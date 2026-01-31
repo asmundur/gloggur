@@ -1,2 +1,115 @@
-# Glöggur
-A symbol-level, incremental codebase indexer for semantic search and precedent retrieval.  Built to help coding agents answer “how is this usually done here?” using real code instead of inferred conventions. Supports change-aware indexing, semantic search, and docstring validation. Embedding backends are pluggable.
+# Gloggur
+
+Gloggur is a symbol-level, incremental codebase indexer for semantic search and precedent retrieval. It parses code into symbols, generates embeddings, stores them locally, and exposes a JSON-friendly CLI for integration with AI agents.
+
+## Features
+
+- Tree-sitter parsing for multi-language symbol extraction
+- Incremental indexing with SHA-256 hashing
+- Pluggable embedding backends (local models or OpenAI)
+- FAISS vector search with SQLite metadata
+- Docstring validation
+- JSON output for CLI automation
+
+## Installation
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## Quickstart
+
+Index a repository:
+
+```bash
+gloggur index . --json
+```
+
+Search for similar symbols:
+
+```bash
+gloggur search "streaming parser" --top-k 5 --json
+```
+
+Stream results as line-delimited JSON:
+
+```bash
+gloggur search "streaming parser" --top-k 50 --json --stream
+```
+
+Validate docstrings:
+
+```bash
+gloggur validate . --json
+```
+
+Check status:
+
+```bash
+gloggur status --json
+```
+
+Clear cache:
+
+```bash
+gloggur clear-cache --json
+```
+
+## Configuration
+
+Create `.gloggur.yaml` or `.gloggur.json` in your repository:
+
+```yaml
+embedding_provider: local
+local_embedding_model: microsoft/codebert-base
+openai_embedding_model: text-embedding-3-large
+cache_dir: .gloggur-cache
+supported_extensions:
+  - .py
+  - .ts
+excluded_dirs:
+  - node_modules
+  - .venv
+```
+
+Environment variables:
+
+- `GLOGGUR_EMBEDDING_PROVIDER`
+- `GLOGGUR_LOCAL_MODEL`
+- `GLOGGUR_OPENAI_MODEL`
+- `GLOGGUR_CACHE_DIR`
+
+## Output Schema
+
+Search results are returned as JSON:
+
+```json
+{
+  "query": "...",
+  "results": [
+    {
+      "symbol": "function_name",
+      "kind": "function",
+      "file": "path/to/file.py",
+      "line": 42,
+      "signature": "def function_name(arg1, arg2)",
+      "docstring": "...",
+      "similarity_score": 0.95,
+      "context": "surrounding code snippet"
+    }
+  ],
+  "metadata": {
+    "total_results": 10,
+    "search_time_ms": 45
+  }
+}
+```
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
