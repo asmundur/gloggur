@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from gloggur.indexer.cache import CacheConfig, CacheManager
 from scripts.validation import CommandRunner, Reporter, TestFixtures, TestResult, Validators
 
 
@@ -158,7 +159,15 @@ def test_incremental_indexing(
     return TestResult(passed=True, message=message, details=details)
 
 
-def test_search_functionality(runner: CommandRunner, target_file: Path) -> TestResult:
+def _find_function_symbol(cache_dir: str) -> Optional[object]:
+    cache = CacheManager(CacheConfig(cache_dir))
+    for symbol in cache.list_symbols():
+        if symbol.kind == "function":
+            return symbol
+    return None
+
+
+def test_search_functionality(runner: CommandRunner, target_file: Path, cache_dir: str) -> TestResult:
     try:
         output = runner.run_search("index repository", top_k=5)
     except Exception as exc:
@@ -176,16 +185,36 @@ def test_search_functionality(runner: CommandRunner, target_file: Path) -> TestR
     if missing_fields:
         return TestResult(passed=False, message=missing_fields, details=output)
 
+    function_symbol = _find_function_symbol(cache_dir)
+    if not function_symbol:
+        return TestResult(passed=False, message="No function symbols found in cache")
     try:
-        kind_output = runner.run_search("index", top_k=5, kind="function")
+        kind_output = runner.run_search(
+            function_symbol.name,
+            top_k=5,
+            kind="function",
+            file_path=function_symbol.file_path,
+        )
     except Exception as exc:
         return TestResult(passed=False, message=f"Search (kind filter) failed: {exc}")
     kind_results = kind_output.get("results", [])
-    if not kind_results or any(item.get("kind") != "function" for item in kind_results):
+    if not kind_results:
+        return TestResult(
+            passed=False,
+            message="Kind filter returned no results",
+            details={"query": function_symbol.name},
+        )
+    if any(item.get("kind") != "function" for item in kind_results):
         return TestResult(
             passed=False,
             message="Kind filter returned invalid results",
             details={"results": kind_results},
+        )
+    if any(item.get("file") != function_symbol.file_path for item in kind_results):
+        return TestResult(
+            passed=False,
+            message="Kind filter returned unexpected files",
+            details={"results": kind_results, "expected_file": function_symbol.file_path},
         )
 
     sample_file = str(target_file)
@@ -322,12 +351,16 @@ def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, s
     reporter.add_section("Phase 1 Smoke Tests")
 
     results: List[Phase1Result] = []
-    cache_dir = ".gloggur-cache"
+    cache_dir = str(Path(".gloggur-cache").resolve())
     fixtures = TestFixtures(cache_dir=cache_dir)
     had_cache = os.path.isdir(cache_dir)
     backup_path: Optional[Path] = None
 
-    runner = CommandRunner(default_timeout=300.0)
+    runner = CommandRunner(
+        cwd=str(PROJECT_ROOT),
+        env={"GLOGGUR_CACHE_DIR": cache_dir},
+        default_timeout=300.0,
+    )
 
     target_file = Path("gloggur/cli/main.py")
     fixture_path = Path("tests/fixtures/phase1_docstring_fixture.py")
@@ -349,7 +382,7 @@ def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, s
         if verbose and test_result.details:
             print(json.dumps({"test": "incremental_indexing", "details": test_result.details}, indent=2))
 
-        test_result = test_search_functionality(runner, target_file)
+        test_result = test_search_functionality(runner, target_file, cache_dir)
         results.append(Phase1Result("Test 1.3: Search Functionality", test_result))
         reporter.add_test_result("Test 1.3: Search Functionality", test_result)
         if verbose and test_result.details:

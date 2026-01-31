@@ -158,7 +158,7 @@ def status(config_path: Optional[str], as_json: bool) -> None:
     metadata = cache.get_index_metadata()
     payload = {
         "cache_dir": config.cache_dir,
-        "metadata": metadata.model_dump() if metadata else None,
+        "metadata": metadata.model_dump(mode="json") if metadata else None,
         "total_symbols": len(cache.list_symbols()),
     }
     _emit(payload, as_json)

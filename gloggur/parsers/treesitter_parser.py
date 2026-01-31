@@ -136,14 +136,17 @@ class TreeSitterParser(Parser):
 
     def _extract_docstring(self, node: Node, source: str) -> Optional[str]:
         if self.language == "python":
-            if node.child_count:
-                body = node.children[-1]
-                if body.type == "block" and body.child_count:
-                    first = body.children[0]
-                    if first.type == "expression_statement" and first.child_count:
-                        expr = first.children[0]
-                        if expr.type == "string":
-                            return self._strip_quotes(source[expr.start_byte : expr.end_byte])
+            body = None
+            for child in node.named_children:
+                if child.type == "block":
+                    body = child
+                    break
+            if body and body.named_child_count:
+                first = body.named_children[0]
+                if first.type == "expression_statement" and first.named_child_count:
+                    expr = first.named_children[0]
+                    if expr.type == "string":
+                        return self._strip_quotes(source[expr.start_byte : expr.end_byte])
         prev = node.prev_named_sibling
         if prev and "comment" in prev.type:
             return source[prev.start_byte : prev.end_byte].strip()
