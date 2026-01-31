@@ -143,9 +143,11 @@ class TreeSitterParser(Parser):
                     break
             if body and body.named_child_count:
                 first = body.named_children[0]
+                if first.type in {"string", "string_literal"}:
+                    return self._strip_quotes(source[first.start_byte : first.end_byte])
                 if first.type == "expression_statement" and first.named_child_count:
                     expr = first.named_children[0]
-                    if expr.type == "string":
+                    if expr.type in {"string", "string_literal"}:
                         return self._strip_quotes(source[expr.start_byte : expr.end_byte])
         prev = node.prev_named_sibling
         if prev and "comment" in prev.type:
