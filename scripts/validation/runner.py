@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -18,6 +19,12 @@ class CommandResult:
     duration_ms: float
     json_data: Optional[object] = None
     timed_out: bool = False
+
+
+class MissingDependencyError(RuntimeError):
+    def __init__(self, module: str, message: str) -> None:
+        super().__init__(message)
+        self.module = module
 
 
 class CommandRunner:
@@ -135,6 +142,24 @@ class CommandRunner:
         return self._require_json(result)
 
     @staticmethod
+    def _missing_dependency_message(result: CommandResult) -> Optional[tuple[str, str]]:
+        combined = "\n".join([result.stderr or "", result.stdout or ""]).strip()
+        if not combined:
+            return None
+        match = re.search(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]", combined)
+        if not match:
+            return None
+        module = match.group(1)
+        install_hint = "pip install -e ."
+        if module in {"pytest", "black", "mypy", "ruff"}:
+            install_hint = "pip install -e '.[dev]'"
+        message = (
+            f"Missing dependency '{module}'. Install project requirements (e.g. {install_hint}) "
+            "and re-run the validation."
+        )
+        return module, message
+
+    @staticmethod
     def _parse_json(stdout: str) -> Optional[object]:
         data = stdout.strip()
         if not data:
@@ -147,6 +172,10 @@ class CommandRunner:
     @staticmethod
     def _parse_stream_results(result: CommandResult) -> Dict[str, object]:
         if result.exit_code != 0:
+            missing = CommandRunner._missing_dependency_message(result)
+            if missing:
+                module, message = missing
+                raise MissingDependencyError(module, message)
             raise RuntimeError(
                 f"Command failed (exit {result.exit_code}): {' '.join(result.command)}\n"
                 f"stderr: {result.stderr.strip()}"
@@ -165,6 +194,10 @@ class CommandRunner:
     @staticmethod
     def _require_json(result: CommandResult) -> Dict[str, object]:
         if result.exit_code != 0:
+            missing = CommandRunner._missing_dependency_message(result)
+            if missing:
+                module, message = missing
+                raise MissingDependencyError(module, message)
             raise RuntimeError(
                 f"Command failed (exit {result.exit_code}): {' '.join(result.command)}\n"
                 f"stderr: {result.stderr.strip()}"

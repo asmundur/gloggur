@@ -57,6 +57,22 @@ Clear cache:
 gloggur clear-cache --json
 ```
 
+## Validation
+
+Gloggur includes a validation suite to verify functionality:
+
+```bash
+# Run all validation tests
+python scripts/validate_all.py
+
+# Run specific phases
+python scripts/validate_phase1.py  # Smoke tests
+python scripts/validate_phase2.py  # Embedding providers
+python scripts/validate_phase3_4.py  # Edge cases & performance
+```
+
+See `docs/VALIDATION.md` for detailed documentation.
+
 ## Configuration
 
 Create `.gloggur.yaml` or `.gloggur.json` in your repository:

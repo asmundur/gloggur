@@ -1,0 +1,66 @@
+name: Validation Suite
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+
+      - name: Run Phase 1 (Smoke Tests)
+        run: python scripts/validate_phase1.py
+
+      - name: Run Phase 2 (Embedding Providers)
+        run: python scripts/validate_phase2.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Run Phase 3 & 4 (Edge Cases & Performance)
+        run: python scripts/validate_phase3_4.py
+
+      - name: Generate Full Report
+        if: always()
+        run: |
+          python scripts/validate_all.py --output validation_report.md
+
+      - name: Upload Report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: validation-report-py${{ matrix.python-version }}
+          path: validation_report.md
+
+      - name: Comment PR with Results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('validation_report.md', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## Validation Report\n\n' + report
+            });

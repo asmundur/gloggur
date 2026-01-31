@@ -1,0 +1,11 @@
+#!/bin/bash
+set -euo pipefail
+
+echo "Running validation suite before push..."
+if [ -x ".venv/bin/python" ]; then
+  .venv/bin/python scripts/validate_all.py --quick
+else
+  python3 scripts/validate_all.py --quick
+fi
+
+echo "Validation passed. Proceeding with push."
