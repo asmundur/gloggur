@@ -13,6 +13,8 @@ class GloggurConfig:
     embedding_provider: str = "local"
     local_embedding_model: str = "microsoft/codebert-base"
     openai_embedding_model: str = "text-embedding-3-large"
+    gemini_embedding_model: str = "gemini-embedding-001"
+    gemini_api_key: Optional[str] = None
     cache_dir: str = ".gloggur-cache"
     model_cache_dir: Optional[str] = None
     supported_extensions: List[str] = field(
@@ -66,6 +68,10 @@ class GloggurConfig:
             data["local_embedding_model"] = os.getenv("GLOGGUR_LOCAL_MODEL")
         if os.getenv("GLOGGUR_OPENAI_MODEL"):
             data["openai_embedding_model"] = os.getenv("GLOGGUR_OPENAI_MODEL")
+        if os.getenv("GLOGGUR_GEMINI_MODEL"):
+            data["gemini_embedding_model"] = os.getenv("GLOGGUR_GEMINI_MODEL")
+        if os.getenv("GLOGGUR_GEMINI_API_KEY"):
+            data["gemini_api_key"] = os.getenv("GLOGGUR_GEMINI_API_KEY")
         if os.getenv("GLOGGUR_CACHE_DIR"):
             data["cache_dir"] = os.getenv("GLOGGUR_CACHE_DIR")
         return data

@@ -62,9 +62,10 @@ gloggur clear-cache --json
 Create `.gloggur.yaml` or `.gloggur.json` in your repository:
 
 ```yaml
-embedding_provider: local
+embedding_provider: gemini
 local_embedding_model: microsoft/codebert-base
 openai_embedding_model: text-embedding-3-large
+gemini_embedding_model: gemini-embedding-001
 cache_dir: .gloggur-cache
 supported_extensions:
   - .py
@@ -79,7 +80,10 @@ Environment variables:
 - `GLOGGUR_EMBEDDING_PROVIDER`
 - `GLOGGUR_LOCAL_MODEL`
 - `GLOGGUR_OPENAI_MODEL`
+- `GLOGGUR_GEMINI_MODEL`
+- `GLOGGUR_GEMINI_API_KEY`
 - `GLOGGUR_CACHE_DIR`
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
 
 ## Output Schema
 
