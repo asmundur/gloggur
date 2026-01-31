@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
 from tree_sitter import Node, Tree
-from tree_sitter_languages import get_parser
+from tree_sitter_language_pack import get_parser
 
 from gloggur.models import Symbol
 from gloggur.parsers.base import ParsedFile, Parser
