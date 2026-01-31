@@ -6,6 +6,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -315,7 +316,8 @@ def render_report(results: List[Phase1Result]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def run_phase1(verbose: bool = False) -> Tuple[int, str]:
+def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, str, Dict[str, object]]:
+    start = time.perf_counter()
     reporter = Reporter()
     reporter.add_section("Phase 1 Smoke Tests")
 
@@ -376,23 +378,41 @@ def run_phase1(verbose: bool = False) -> Tuple[int, str]:
             fixture_path.unlink()
 
     markdown = render_report(results)
-    reporter.print_summary()
+    if emit_summary:
+        reporter.print_summary()
     exit_code = 0 if all(item.result.passed for item in results) else 1
-    return exit_code, markdown
+    duration_ms = (time.perf_counter() - start) * 1000
+    payload = reporter.generate_json()
+    summary = payload.get("summary", {})
+    if isinstance(summary, dict) and "skipped" not in summary:
+        summary["skipped"] = 0
+    payload.update(
+        {
+            "phase": 1,
+            "title": "Smoke Tests",
+            "duration_ms": duration_ms,
+            "summary": summary,
+        }
+    )
+    return exit_code, markdown, payload
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Phase 1 smoke tests for gloggur.")
     parser.add_argument("--output", type=str, default=None, help="Write markdown report to a file")
+    parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Print verbose test details")
     args = parser.parse_args()
 
-    exit_code, markdown = run_phase1(verbose=args.verbose)
+    emit_summary = args.format != "json"
+    verbose = args.verbose and args.format != "json"
+    exit_code, markdown, payload = run_phase1(verbose=verbose, emit_summary=emit_summary)
+    output = markdown if args.format == "markdown" else json.dumps(payload, indent=2)
 
     if args.output:
-        Path(args.output).write_text(markdown, encoding="utf8")
+        Path(args.output).write_text(output, encoding="utf8")
     else:
-        print(markdown)
+        print(output)
 
     sys.exit(exit_code)
 
