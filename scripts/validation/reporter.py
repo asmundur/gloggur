@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 
 @dataclass
 class TestResult:
+    __test__ = False
+
     passed: bool
     message: str
     details: Optional[Dict[str, object]] = None

@@ -8,6 +8,8 @@ from typing import Dict, List, Optional
 
 
 class TestFixtures:
+    __test__ = False
+
     def __init__(self, cache_dir: str = ".gloggur-cache") -> None:
         self.cache_dir = cache_dir
         self._temp_dirs: List[Path] = []

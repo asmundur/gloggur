@@ -175,3 +175,7 @@ def clear_cache(config_path: Optional[str], as_json: bool) -> None:
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
     vector_store.clear()
     _emit({"cleared": True, "cache_dir": config.cache_dir}, as_json)
+
+
+if __name__ == "__main__":
+    cli()
