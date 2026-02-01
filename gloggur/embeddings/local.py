@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from pathlib import Path
 import re
 from typing import Iterable, List, Optional
@@ -16,7 +17,11 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         self._model = None
         self._fallback_dimension = 256
         self._fallback_marker = Path(self.cache_dir or ".gloggur-cache") / ".local_embedding_fallback"
-        self._use_fallback = self._fallback_marker.exists()
+        env_flag = os.getenv("GLOGGUR_LOCAL_FALLBACK")
+        if env_flag is None:
+            self._use_fallback = self._fallback_marker.exists()
+        else:
+            self._use_fallback = env_flag.strip().lower() not in ("", "0", "false", "no", "off")
         self._token_pattern = re.compile(r"[A-Za-z0-9_]+")
 
     def _load_model(self):

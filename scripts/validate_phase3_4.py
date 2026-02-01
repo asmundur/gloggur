@@ -72,7 +72,10 @@ def _build_phase_report(
 
 
 def _new_runner(cache_dir: str, timeout: float = 120.0) -> CommandRunner:
-    return CommandRunner(env={"GLOGGUR_CACHE_DIR": cache_dir}, default_timeout=timeout)
+    return CommandRunner(
+        env={"GLOGGUR_CACHE_DIR": cache_dir, "GLOGGUR_LOCAL_FALLBACK": "1"},
+        default_timeout=timeout,
+    )
 
 
 def _cleanup_cache_dir(cache_dir: str) -> None:
