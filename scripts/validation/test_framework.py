@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -76,6 +77,9 @@ def test_fixtures_backup_restore() -> None:
         (cache_dir / "index.db").write_text("data", encoding="utf8")
         fixtures = TestFixtures(cache_dir=str(cache_dir))
         backup = fixtures.backup_cache()
+        assert backup is not None
         (cache_dir / "index.db").write_text("new", encoding="utf8")
         fixtures.restore_cache(backup)
         assert (cache_dir / "index.db").read_text(encoding="utf8") == "data"
+        if backup.exists():
+            shutil.rmtree(backup)

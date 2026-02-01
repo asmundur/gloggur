@@ -13,12 +13,14 @@ class TestFixtures:
     def __init__(self, cache_dir: str = ".gloggur-cache") -> None:
         self.cache_dir = cache_dir
         self._temp_dirs: List[Path] = []
+        self._backup_dirs: List[Path] = []
 
     def __enter__(self) -> "TestFixtures":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.cleanup_temp_repos()
+        self.cleanup_backup_dirs()
 
     def create_temp_repo(self, files: Dict[str, str]) -> Path:
         repo_dir = Path(tempfile.mkdtemp(prefix="gloggur-test-"))
@@ -64,6 +66,7 @@ class TestFixtures:
         # copytree requires destination to not exist
         shutil.rmtree(backup_dir)
         shutil.copytree(cache_path, backup_dir)
+        self._backup_dirs.append(backup_dir)
         return backup_dir
 
     def restore_cache(self, backup_path: Path) -> None:
@@ -77,3 +80,9 @@ class TestFixtures:
             if path.exists():
                 shutil.rmtree(path)
         self._temp_dirs.clear()
+
+    def cleanup_backup_dirs(self) -> None:
+        for path in self._backup_dirs:
+            if path.exists():
+                shutil.rmtree(path)
+        self._backup_dirs.clear()
