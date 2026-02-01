@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.validation import CommandRunner, TestFixtures, Validators
+from scripts.validation.logging_utils import configure_logging
 from scripts.validation.report_templates import (
     PhaseReport,
     TestCaseResult,
@@ -22,6 +24,8 @@ from scripts.validation.report_templates import (
     render_json,
     render_markdown,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _format_duration(duration_ms: float) -> str:
@@ -175,7 +179,7 @@ def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
-    repo = fixtures.create_temp_repo({"broken.py": "def broken(:\n    pass\n"})
+    repo = fixtures.create_temp_repo({"broken.py": "def broken(:\n    pass\n"}, validate=False)
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
     try:
@@ -501,11 +505,14 @@ def _run_phase4(repo_path: Path) -> PhaseReport:
 
 
 def run_validation(skip_large_repo: bool, benchmark_only: bool) -> ValidationReport:
+    logger.info("Phase 3/4 validation started (skip_large_repo=%s, benchmark_only=%s)", skip_large_repo, benchmark_only)
     phases: List[PhaseReport] = []
     if not benchmark_only:
         phases.append(_run_phase3(skip_large_repo))
     phases.append(_run_phase4(PROJECT_ROOT))
-    return build_validation_report(phases)
+    report = build_validation_report(phases)
+    logger.info("Phase 3/4 validation completed")
+    return report
 
 
 def main() -> int:
@@ -513,7 +520,19 @@ def main() -> int:
     parser.add_argument("--skip-large-repo", action="store_true", help="Skip large repo edge case test.")
     parser.add_argument("--benchmark-only", action="store_true", help="Run only Phase 4 benchmarks.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
+    parser.add_argument("--trace-id", type=str, default=None, help="Trace ID for log correlation.")
     args = parser.parse_args()
+
+    configure_logging(
+        debug=args.debug,
+        log_level=args.log_level,
+        log_file=args.log_file,
+        trace_id=args.trace_id,
+        force=True,
+    )
 
     report = run_validation(skip_large_repo=args.skip_large_repo, benchmark_only=args.benchmark_only)
     if args.format == "json":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import tempfile
 import time
@@ -16,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from gloggur.config import GloggurConfig
 from scripts.validation import CommandRunner, Validators
+from scripts.validation.logging_utils import configure_logging
 from scripts.validation.report_templates import (
     PhaseReport,
     TestCaseResult,
@@ -24,6 +26,8 @@ from scripts.validation.report_templates import (
     render_json,
     render_markdown,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _vector_store_stats(cache_dir: str) -> Tuple[bool, str, Dict[str, object]]:
@@ -230,6 +234,7 @@ def run_phase2(verbose: bool = False) -> ValidationReport:
     repo_root = Path(__file__).resolve().parents[1]
     config = _load_repo_config(repo_root)
     start = time.perf_counter()
+    logger.info("Phase 2 started")
 
     tests = [
         test_local_embeddings(repo_root, config, verbose=verbose),
@@ -246,7 +251,9 @@ def run_phase2(verbose: bool = False) -> ValidationReport:
         tests=tests,
         duration_ms=(time.perf_counter() - start) * 1000,
     )
-    return build_validation_report([phase_report])
+    report = build_validation_report([phase_report])
+    logger.info("Phase 2 completed in %.2f ms", phase_report.duration_ms)
+    return report
 
 
 def main() -> int:
@@ -254,7 +261,19 @@ def main() -> int:
     parser.add_argument("--output", type=str, default=None, help="Write report to a file.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Print verbose test details.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
+    parser.add_argument("--trace-id", type=str, default=None, help="Trace ID for log correlation.")
     args = parser.parse_args()
+
+    configure_logging(
+        debug=args.debug,
+        log_level=args.log_level,
+        log_file=args.log_file,
+        trace_id=args.trace_id,
+        force=True,
+    )
 
     report = run_phase2(verbose=args.verbose)
     output = render_markdown(report) if args.format == "markdown" else json.dumps(render_json(report), indent=2)

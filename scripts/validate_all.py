@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -14,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.validation.logging_utils import configure_logging
 from scripts.validation.report_templates import (
     PhaseReport,
     TestCaseResult,
@@ -37,29 +43,31 @@ PHASE_DEFINITIONS: Dict[int, _PhaseDefinition] = {
     4: _PhaseDefinition(title="Performance Benchmarks", script=Path("scripts/validate_phase3_4.py")),
 }
 
+logger = logging.getLogger(__name__)
+
 
 class ValidationRunner:
-    def __init__(self, phases: Optional[List[int]] = None, quick: bool = False, verbose: bool = False) -> None:
+    def __init__(
+        self,
+        phases: Optional[List[int]] = None,
+        quick: bool = False,
+        verbose: bool = False,
+        parallel: bool = True,
+        max_workers: Optional[int] = None,
+    ) -> None:
         self.phases = phases
         self.quick = quick
         self.verbose = verbose
+        self.parallel = parallel
+        self.max_workers = max_workers
 
     def run_all_phases(self) -> ValidationReport:
         phases = self._resolve_phases()
-        phase_reports: List[PhaseReport] = []
-
-        handle_phase34 = any(phase in (3, 4) for phase in phases)
-        for phase in phases:
-            if phase in (3, 4):
-                if not handle_phase34:
-                    continue
-                handle_phase34 = False
-                phase_reports.extend(self._run_combined_phase34(phases))
-                continue
-            phase_reports.extend(self._run_single_phase(phase))
-
-        phase_reports = [report for report in phase_reports if report.phase in phases]
-        return build_validation_report(phase_reports)
+        if self.parallel and len(phases) > 1:
+            logger.info("Running phases in parallel: %s", phases)
+            return self._run_all_phases_parallel(phases)
+        logger.info("Running phases in serial: %s", phases)
+        return self._run_all_phases_serial(phases)
 
     def run_phase(self, phase_num: int) -> PhaseReport:
         reports = self._run_single_phase(phase_num)
@@ -108,6 +116,70 @@ class ValidationRunner:
             verbose=self.verbose,
         )
 
+    def _run_all_phases_serial(self, phases: List[int]) -> ValidationReport:
+        phase_reports: List[PhaseReport] = []
+        handle_phase34 = any(phase in (3, 4) for phase in phases)
+        for phase in phases:
+            if phase in (3, 4):
+                if not handle_phase34:
+                    continue
+                handle_phase34 = False
+                phase_reports.extend(self._run_combined_phase34(phases))
+                continue
+            phase_reports.extend(self._run_single_phase(phase))
+        phase_reports = [report for report in phase_reports if report.phase in phases]
+        phase_reports.sort(key=lambda report: report.phase)
+        return build_validation_report(phase_reports)
+
+    def _run_all_phases_parallel(self, phases: List[int]) -> ValidationReport:
+        tasks = self._build_parallel_tasks(phases)
+        phase_reports: List[PhaseReport] = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    _execute_phase_script,
+                    task["script"],
+                    task["requested_phases"],
+                    task["fallback_titles"],
+                    self.verbose,
+                ): task
+                for task in tasks
+            }
+            for future in as_completed(future_map):
+                phase_reports.extend(future.result())
+        phase_reports = [report for report in phase_reports if report.phase in phases]
+        phase_reports.sort(key=lambda report: report.phase)
+        return build_validation_report(phase_reports)
+
+    def _build_parallel_tasks(self, phases: List[int]) -> List[Dict[str, object]]:
+        tasks: List[Dict[str, object]] = []
+        handle_phase34 = any(phase in (3, 4) for phase in phases)
+        for phase in phases:
+            if phase in (3, 4):
+                if not handle_phase34:
+                    continue
+                handle_phase34 = False
+                tasks.append(
+                    {
+                        "script": PHASE_DEFINITIONS[3].script,
+                        "requested_phases": [phase for phase in phases if phase in (3, 4)],
+                        "fallback_titles": {
+                            3: PHASE_DEFINITIONS[3].title,
+                            4: PHASE_DEFINITIONS[4].title,
+                        },
+                    }
+                )
+                continue
+            definition = PHASE_DEFINITIONS[phase]
+            tasks.append(
+                {
+                    "script": definition.script,
+                    "requested_phases": [phase],
+                    "fallback_titles": {phase: definition.title},
+                }
+            )
+        return tasks
+
 
 def _execute_phase_script(
     script_path: Path,
@@ -125,9 +197,27 @@ def _execute_phase_script(
     if verbose:
         cmd.append("--verbose")
 
-    start = time.perf_counter()
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    duration_ms = (time.perf_counter() - start) * 1000
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-validate-")
+    env = os.environ.copy()
+    env["GLOGGUR_CACHE_DIR"] = cache_dir
+    if os.getenv("GLOGGUR_LOG_FILE"):
+        env["GLOGGUR_LOG_FILE"] = os.getenv("GLOGGUR_LOG_FILE", "")
+    if os.getenv("GLOGGUR_TRACE_ID"):
+        env["GLOGGUR_TRACE_ID"] = os.getenv("GLOGGUR_TRACE_ID", "")
+    if os.getenv("GLOGGUR_LOG_LEVEL"):
+        env["GLOGGUR_LOG_LEVEL"] = os.getenv("GLOGGUR_LOG_LEVEL", "")
+    if os.getenv("GLOGGUR_DEBUG_LOGS"):
+        env["GLOGGUR_DEBUG_LOGS"] = os.getenv("GLOGGUR_DEBUG_LOGS", "")
+    try:
+        start = time.perf_counter()
+        logger.debug("Executing phase script: %s", " ".join(cmd))
+        completed = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+        duration_ms = (time.perf_counter() - start) * 1000
+        if os.getenv("GLOGGUR_DEBUG_LOGS"):
+            logger.debug("Phase stdout: %s", completed.stdout)
+            logger.debug("Phase stderr: %s", completed.stderr)
+    finally:
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
     payload = _parse_json_output(completed.stdout)
     if payload is None and completed.stderr:
@@ -368,13 +458,33 @@ def main() -> int:
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
     parser.add_argument("--quick", action="store_true", help="Run quick validation (phases 1-2).")
+    parser.add_argument("--serial", action="store_true", help="Disable parallel phase execution.")
+    parser.add_argument("--jobs", type=int, default=None, help="Max parallel workers for phase execution.")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
+    parser.add_argument("--trace-id", type=str, default=None, help="Trace ID for log correlation.")
     args = parser.parse_args()
+
+    configure_logging(
+        debug=args.debug,
+        log_level=args.log_level,
+        log_file=args.log_file,
+        trace_id=args.trace_id,
+        force=True,
+    )
 
     phases = _parse_phases(args.phases)
     if phases and any(phase not in PHASE_DEFINITIONS for phase in phases):
         invalid = ", ".join(str(phase) for phase in phases if phase not in PHASE_DEFINITIONS)
         raise SystemExit(f"Unknown phase(s): {invalid}")
-    runner = ValidationRunner(phases=phases, quick=args.quick, verbose=args.verbose)
+    runner = ValidationRunner(
+        phases=phases,
+        quick=args.quick,
+        verbose=args.verbose,
+        parallel=not args.serial,
+        max_workers=args.jobs,
+    )
     report = runner.run_all_phases()
 
     output = render_markdown(report) if args.format == "markdown" else json.dumps(render_json(report), indent=2)

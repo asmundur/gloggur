@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
+from scripts.validation.reporter import Reporter, TestResult
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class RetryConfig:
@@ -50,24 +55,45 @@ class CommandRunner:
         env: Optional[Dict[str, str]] = None,
         default_timeout: float = 120.0,
         retry_config: Optional[RetryConfig] = None,
+        debug: bool = False,
     ) -> None:
         self.base_cmd = base_cmd or [sys.executable, "-m", "gloggur.cli.main"]
         self.cwd = cwd
         self.env = env
         self.default_timeout = default_timeout
         self.retry_config = retry_config or RetryConfig()
+        self.debug = debug
+
+    def with_env(self, extra_env: Dict[str, str], *, cwd: Optional[str] = None) -> "CommandRunner":
+        merged_env = dict(self.env or {})
+        merged_env.update(extra_env)
+        return CommandRunner(
+            base_cmd=list(self.base_cmd),
+            cwd=cwd or self.cwd,
+            env=merged_env,
+            default_timeout=self.default_timeout,
+            retry_config=self.retry_config,
+            debug=self.debug,
+        )
 
     def run_command(
         self,
         cmd: List[str],
         capture_json: bool = True,
         timeout: Optional[float] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> CommandResult:
         full_cmd = self.base_cmd + cmd
         merged_env = os.environ.copy()
         if self.env:
             merged_env.update(self.env)
+        if extra_env:
+            merged_env.update(extra_env)
         timeout_value = self.default_timeout if timeout is None else timeout
+        if self._debug_enabled():
+            logger.debug("Command start: %s", " ".join(full_cmd))
+            logger.debug("Command env: %s", merged_env)
+            logger.debug("Command timeout: %.2fs", timeout_value)
         return self._execute_with_retry(full_cmd, merged_env, timeout_value, capture_json)
 
     def run_command_streaming(
@@ -76,12 +102,19 @@ class CommandRunner:
         line_callback: Callable[[str], None],
         capture_json: bool = False,
         timeout: Optional[float] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> CommandResult:
         full_cmd = self.base_cmd + cmd
         merged_env = os.environ.copy()
         if self.env:
             merged_env.update(self.env)
+        if extra_env:
+            merged_env.update(extra_env)
         timeout_value = self.default_timeout if timeout is None else timeout
+        if self._debug_enabled():
+            logger.debug("Streaming command start: %s", " ".join(full_cmd))
+            logger.debug("Command env: %s", merged_env)
+            logger.debug("Command timeout: %.2fs", timeout_value)
         start = time.perf_counter()
         process = subprocess.Popen(
             full_cmd,
@@ -96,6 +129,10 @@ class CommandRunner:
         json_data = None
         if capture_json and stdout:
             json_data = self._parse_json(stdout)
+        if self._debug_enabled():
+            logger.debug("Streaming command finished in %.2f ms", duration_ms)
+            logger.debug("Streaming stdout: %s", stdout)
+            logger.debug("Streaming stderr: %s", stderr)
         return CommandResult(
             command=full_cmd,
             stdout=stdout,
@@ -197,9 +234,14 @@ class CommandRunner:
                     check=False,
                 )
                 duration_ms = (time.perf_counter() - start) * 1000
+                if self._debug_enabled():
+                    logger.debug("Command finished in %.2f ms", duration_ms)
+                    logger.debug("Command stdout: %s", completed.stdout)
+                    logger.debug("Command stderr: %s", completed.stderr)
                 is_success = completed.returncode == 0
                 should_retry = (not is_success) and should_retry_exit_code(completed.returncode)
                 if should_retry and attempt + 1 < max_attempts:
+                    logger.warning("Command failed (exit %s), retrying attempt %d", completed.returncode, attempt + 2)
                     sleep_backoff(attempt)
                     continue
                 json_data = None
@@ -224,6 +266,7 @@ class CommandRunner:
                 stderr_text = stderr if isinstance(stderr, str) else stderr.decode("utf8", "ignore")
                 warning = f"WARNING: Command timed out after {timeout}s; partial output captured."
                 stderr_text = f"{warning}\n{stderr_text}".strip()
+                logger.error("Command timed out after %.2fs", timeout)
                 should_retry = should_retry_exception(exc)
                 if should_retry and attempt + 1 < max_attempts:
                     sleep_backoff(attempt)
@@ -242,6 +285,7 @@ class CommandRunner:
                 )
             except self.retry_config.retryable_exceptions as exc:
                 last_exc = exc
+                logger.warning("Retryable exception: %s", exc)
                 if attempt + 1 >= max_attempts:
                     raise
                 sleep_backoff(attempt)
@@ -486,3 +530,46 @@ class CommandRunner:
                 f"Stdout: {CommandRunner._truncate(stripped, 200)}"
             )
         return result.json_data
+
+    def _debug_enabled(self) -> bool:
+        return self.debug or bool(os.getenv("GLOGGUR_DEBUG_LOGS"))
+
+
+@dataclass(frozen=True)
+class TestTask:
+    name: str
+    run: Callable[[], TestResult]
+    section: str = "General"
+
+
+@dataclass(frozen=True)
+class TestOutcome:
+    name: str
+    result: TestResult
+    section: str
+
+
+class TestOrchestrator:
+    def __init__(self, reporter: Reporter, max_workers: Optional[int] = None) -> None:
+        self.reporter = reporter
+        self.max_workers = max_workers
+        self._logger = logging.getLogger(__name__)
+
+    def run(self, tasks: Iterable[TestTask]) -> List[TestOutcome]:
+        outcomes: List[TestOutcome] = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_map = {executor.submit(self._run_task, task): task for task in tasks}
+            for future in as_completed(future_map):
+                outcome = future.result()
+                self.reporter.add_test_result_to_section(outcome.section, outcome.name, outcome.result)
+                outcomes.append(outcome)
+                self._logger.info("Task completed: %s (section=%s)", outcome.name, outcome.section)
+        return outcomes
+
+    @staticmethod
+    def _run_task(task: TestTask) -> TestOutcome:
+        try:
+            result = task.run()
+        except Exception as exc:
+            result = TestResult(passed=False, message=f"Unhandled exception: {exc}")
+        return TestOutcome(name=task.name, result=result, section=task.section)

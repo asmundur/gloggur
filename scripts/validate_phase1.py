@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -19,6 +20,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from scripts.validation import CommandRunner, Reporter, RetryConfig, TestFixtures, TestResult, Validators
+from scripts.validation.logging_utils import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -409,6 +413,7 @@ def run_phase1(
     baseline_path: Optional[str] = None,
 ) -> Tuple[int, str, Dict[str, object]]:
     start = time.perf_counter()
+    logger.info("Phase 1 started")
     reporter = Reporter()
     reporter.add_section("Phase 1 Smoke Tests")
     baseline_payload = _load_baseline_payload(baseline_path)
@@ -416,7 +421,7 @@ def run_phase1(
         reporter.load_baseline_from_payload(baseline_payload)
 
     results: List[Phase1Result] = []
-    cache_dir = str(Path(".gloggur-cache").resolve())
+    cache_dir = os.getenv("GLOGGUR_CACHE_DIR") or str(Path(".gloggur-cache").resolve())
     # Configure retry for transient failures (e.g., network hiccups or rate limits).
     retry_config = RetryConfig(
         max_attempts=3,
@@ -565,6 +570,7 @@ def run_phase1(
             "summary": summary,
         }
     )
+    logger.info("Phase 1 completed in %.2f ms", duration_ms)
     return exit_code, markdown, payload
 
 
@@ -579,7 +585,19 @@ def main() -> None:
         default=None,
         help="Path to JSON report payload for baseline performance comparisons",
     )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
+    parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
+    parser.add_argument("--trace-id", type=str, default=None, help="Trace ID for log correlation.")
     args = parser.parse_args()
+
+    configure_logging(
+        debug=args.debug,
+        log_level=args.log_level,
+        log_file=args.log_file,
+        trace_id=args.trace_id,
+        force=True,
+    )
 
     emit_summary = args.format != "json"
     verbose = args.verbose and args.format != "json"

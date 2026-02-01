@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ SchemaType = Union[type, Tuple[type, ...], Dict[str, Any], List[Any], Optional, 
 
 
 class Validators:
+    logger = logging.getLogger(__name__)
     @staticmethod
     def validate_index_output(output: Dict[str, object]) -> ValidationResult:
         schema = {
@@ -85,6 +87,7 @@ class Validators:
             if not validation.ok:
                 invalid.append({"index": idx, "reason": validation.message})
         if invalid:
+            Validators.logger.warning("Similarity score validation failed for %d results", len(invalid))
             return ValidationResult.failure("Invalid similarity scores", {"errors": invalid})
         return ValidationResult.success("Similarity scores valid")
 
@@ -305,6 +308,7 @@ class Validators:
             check(data[key], expected, key)
 
         if errors:
+            Validators.logger.debug("Schema validation failed with %d errors", len(errors))
             categories: Dict[str, List[Dict[str, Any]]] = {}
             for error in errors:
                 categories.setdefault(error["message"], []).append(error)
