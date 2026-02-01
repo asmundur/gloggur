@@ -72,6 +72,7 @@ python scripts/validate_phase3_4.py  # Edge cases & performance
 ```
 
 See `docs/VALIDATION.md` for detailed documentation.
+See `docs/AGENT_INTEGRATION.md` for agent integration guidance.
 
 ## Configuration
 
