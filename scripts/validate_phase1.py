@@ -6,6 +6,8 @@ import os
 import shutil
 import sqlite3
 import sys
+import tempfile
+import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +46,27 @@ def _validate_required_fields(results: List[Dict[str, object]]) -> Optional[str]
         if missing:
             return f"Result {idx} missing fields: {', '.join(missing)}"
     return None
+
+
+def _create_search_fixture() -> Tuple[Path, Path, str]:
+    fixture_dir = Path(tempfile.mkdtemp(prefix="gloggur-search-"))
+    fixture_file = fixture_dir / "search_fixture.py"
+    content = textwrap.dedent(
+        """\
+        \"\"\"Temporary search fixture to exercise filters.\"\"\"
+
+        def search_fixture_function() -> str:
+            \"\"\"Return a fixture-specific payload for search.\"\"\"
+            return "search fixture function"
+
+        def helper_function() -> int:
+            \"\"\"Helper that increases symbol count.\"\"\"
+            return 42
+        """
+    ).strip() + "\n"
+    fixture_file.write_text(content, encoding="utf8")
+    query = "search fixture function"
+    return fixture_dir, fixture_file, query
 
 
 def test_basic_indexing(runner: CommandRunner, cache_dir: str) -> Tuple[TestResult, Dict[str, object]]:
@@ -159,14 +182,6 @@ def test_incremental_indexing(
     return TestResult(passed=True, message=message, details=details)
 
 
-def _find_function_symbol(cache_dir: str) -> Optional[object]:
-    cache = CacheManager(CacheConfig(cache_dir))
-    for symbol in cache.list_symbols():
-        if symbol.kind == "function":
-            return symbol
-    return None
-
-
 def test_search_functionality(runner: CommandRunner, target_file: Path, cache_dir: str) -> TestResult:
     try:
         output = runner.run_search("index repository", top_k=5)
@@ -185,37 +200,48 @@ def test_search_functionality(runner: CommandRunner, target_file: Path, cache_di
     if missing_fields:
         return TestResult(passed=False, message=missing_fields, details=output)
 
-    function_symbol = _find_function_symbol(cache_dir)
-    if not function_symbol:
-        return TestResult(passed=False, message="No function symbols found in cache")
+    fixture_dir, fixture_file, fixture_query = _create_search_fixture()
     try:
-        kind_output = runner.run_search(
-            function_symbol.name,
-            top_k=5,
-            kind="function",
-            file_path=function_symbol.file_path,
-        )
-    except Exception as exc:
-        return TestResult(passed=False, message=f"Search (kind filter) failed: {exc}")
-    kind_results = kind_output.get("results", [])
-    if not kind_results:
-        return TestResult(
-            passed=False,
-            message="Kind filter returned no results",
-            details={"query": function_symbol.name},
-        )
-    if any(item.get("kind") != "function" for item in kind_results):
-        return TestResult(
-            passed=False,
-            message="Kind filter returned invalid results",
-            details={"results": kind_results},
-        )
-    if any(item.get("file") != function_symbol.file_path for item in kind_results):
-        return TestResult(
-            passed=False,
-            message="Kind filter returned unexpected files",
-            details={"results": kind_results, "expected_file": function_symbol.file_path},
-        )
+        runner.run_index(str(fixture_dir))
+        cache = CacheManager(CacheConfig(cache_dir))
+        fixture_symbols = cache.list_symbols_for_file(str(fixture_file))
+        function_symbol = next((symbol for symbol in fixture_symbols if symbol.kind == "function"), None)
+        if not function_symbol:
+            return TestResult(
+                passed=False,
+                message="Search fixture did not expose any function symbols",
+                details={"file": str(fixture_file)},
+            )
+        try:
+            kind_output = runner.run_search(
+                fixture_query,
+                top_k=50,
+                kind="function",
+                file_path=function_symbol.file_path,
+            )
+        except Exception as exc:
+            return TestResult(passed=False, message=f"Search (kind filter) failed: {exc}")
+        kind_results = kind_output.get("results", [])
+        if not kind_results:
+            return TestResult(
+                passed=False,
+                message="Kind filter returned no results",
+                details={"query": fixture_query, "file": function_symbol.file_path},
+            )
+        if any(item.get("kind") != "function" for item in kind_results):
+            return TestResult(
+                passed=False,
+                message="Kind filter returned invalid results",
+                details={"results": kind_results},
+            )
+        if any(item.get("file") != function_symbol.file_path for item in kind_results):
+            return TestResult(
+                passed=False,
+                message="Kind filter returned unexpected files",
+                details={"results": kind_results, "expected_file": function_symbol.file_path},
+            )
+    finally:
+        shutil.rmtree(fixture_dir, ignore_errors=True)
 
     sample_file = str(target_file)
     if results and isinstance(results[0], dict) and results[0].get("file"):
