@@ -3,25 +3,50 @@ from __future__ import annotations
 import os
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional as TypingOptional, Tuple, Union
 
 
 @dataclass
 class ValidationResult:
     ok: bool
     message: str
-    details: Optional[Dict[str, object]] = None
+    details: TypingOptional[Dict[str, object]] = None
 
     @staticmethod
-    def success(message: str = "ok", details: Optional[Dict[str, object]] = None) -> "ValidationResult":
+    def success(message: str = "ok", details: TypingOptional[Dict[str, object]] = None) -> "ValidationResult":
         return ValidationResult(ok=True, message=message, details=details)
 
     @staticmethod
-    def failure(message: str, details: Optional[Dict[str, object]] = None) -> "ValidationResult":
+    def failure(message: str, details: TypingOptional[Dict[str, object]] = None) -> "ValidationResult":
         return ValidationResult(ok=False, message=message, details=details)
 
 
-SchemaType = Union[type, Tuple[type, ...], Dict[str, Any], List[Any]]
+class Optional:
+    def __init__(self, schema: "SchemaType") -> None:
+        self.schema = schema
+
+    def __repr__(self) -> str:
+        return f"Optional({self.schema!r})"
+
+
+class Range:
+    def __init__(
+        self,
+        min_value: TypingOptional[Union[int, float]] = None,
+        max_value: TypingOptional[Union[int, float]] = None,
+        value_type: Union[type, Tuple[type, ...]] = (int, float),
+    ) -> None:
+        if min_value is not None and max_value is not None and min_value > max_value:
+            raise ValueError("min_value cannot be greater than max_value")
+        self.min_value = min_value
+        self.max_value = max_value
+        self.value_type = value_type
+
+    def __repr__(self) -> str:
+        return f"Range(min_value={self.min_value!r}, max_value={self.max_value!r}, value_type={self.value_type!r})"
+
+
+SchemaType = Union[type, Tuple[type, ...], Dict[str, Any], List[Any], Optional, Range]
 
 
 class Validators:
@@ -54,34 +79,185 @@ class Validators:
     @staticmethod
     def validate_similarity_scores(results: List[Dict[str, object]]) -> ValidationResult:
         invalid: List[Dict[str, object]] = []
+        result_schema = {"similarity_score": Range(min_value=0.0, max_value=1.0)}
         for idx, result in enumerate(results):
-            score = result.get("similarity_score")
-            if not isinstance(score, (int, float)):
-                invalid.append({"index": idx, "reason": "missing similarity_score"})
-                continue
-            if score < 0 or score > 1:
-                invalid.append({"index": idx, "reason": f"out of range: {score}"})
+            validation = Validators.validate_json_structure(result, result_schema)
+            if not validation.ok:
+                invalid.append({"index": idx, "reason": validation.message})
         if invalid:
             return ValidationResult.failure("Invalid similarity scores", {"errors": invalid})
         return ValidationResult.success("Similarity scores valid")
 
     @staticmethod
     def validate_json_structure(data: Dict[str, object], schema: Dict[str, SchemaType]) -> ValidationResult:
-        errors: List[str] = []
+        """Validate a nested JSON-like dict against a schema.
+
+        Schema examples:
+            {"count": int, "scores": [int]}
+            {"score": (int, float)}  # Union types via tuple
+            {"elapsed_ms": Range(min_value=0.0)}
+            {"meta": Optional({"status": str})}
+            {"score": Optional(Range(0.0, 1.0))}
+            {
+                "indexed_files": int,
+                "indexed_symbols": int,
+                "duration_ms": Range(min_value=0.0),
+            }
+        """
+        errors: List[Dict[str, Any]] = []
+
+        def _format_expected_type(expected_type: SchemaType) -> str:
+            if isinstance(expected_type, Optional):
+                return f"optional {_format_expected_type(expected_type.schema)}"
+            if isinstance(expected_type, Range):
+                return f"range({_format_expected_type(expected_type.value_type)})"
+            if isinstance(expected_type, tuple):
+                return " or ".join(t.__name__ for t in expected_type)
+            if isinstance(expected_type, type):
+                return expected_type.__name__
+            return str(expected_type)
+
+        def _preview_value(value: object) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                if len(value) > 50:
+                    return f"'{value[:50]}...'"
+                return f"'{value}'"
+            if isinstance(value, bool):
+                return str(value)
+            if isinstance(value, (int, float)):
+                return str(value)
+            if isinstance(value, dict):
+                return f"dict with {len(value)} keys"
+            if isinstance(value, list):
+                return f"list with {len(value)} items"
+            preview = repr(value)
+            if len(preview) > 50:
+                return preview[:50] + "..."
+            return preview
 
         def check(value: object, expected: SchemaType, path: str) -> None:
+            optional_expected = False
+            if isinstance(expected, Optional):
+                optional_expected = True
+                if value is None:
+                    return
+                expected = expected.schema
+            if value is None:
+                if isinstance(expected, dict):
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": "expected dict, got None (NoneType)",
+                            "expected": "dict",
+                            "actual": "NoneType",
+                            "value_preview": "",
+                        }
+                    )
+                    return
+                if isinstance(expected, list):
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": "expected list, got None (NoneType)",
+                            "expected": "list",
+                            "actual": "NoneType",
+                            "value_preview": "",
+                        }
+                    )
+                    return
+                errors.append(
+                    {
+                        "path": path,
+                        "message": "expected non-null value, got None",
+                        "expected": "optional value" if optional_expected else "non-null value",
+                        "actual": "NoneType",
+                        "value_preview": "",
+                    }
+                )
+                return
+            if isinstance(expected, Range):
+                if not isinstance(value, expected.value_type):
+                    expected_label = _format_expected_type(expected)
+                    if optional_expected:
+                        expected_label = _format_expected_type(Optional(expected))
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": "type mismatch",
+                            "expected": expected_label,
+                            "actual": type(value).__name__,
+                            "value_preview": _preview_value(value),
+                        }
+                    )
+                    return
+                if expected.min_value is not None and value < expected.min_value:
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": f"value {value} below minimum {expected.min_value}",
+                            "expected": f">= {expected.min_value}",
+                            "actual": value,
+                            "value_preview": _preview_value(value),
+                        }
+                    )
+                    return
+                if expected.max_value is not None and value > expected.max_value:
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": f"value {value} above maximum {expected.max_value}",
+                            "expected": f"<= {expected.max_value}",
+                            "actual": value,
+                            "value_preview": _preview_value(value),
+                        }
+                    )
+                return
             if isinstance(expected, dict):
                 if not isinstance(value, dict):
-                    errors.append(f"{path} expected dict")
+                    expected_label = "dict"
+                    if optional_expected:
+                        expected_label = "optional dict"
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": "type mismatch",
+                            "expected": expected_label,
+                            "actual": type(value).__name__,
+                            "value_preview": _preview_value(value),
+                        }
+                    )
                     return
                 for key, sub_schema in expected.items():
+                    if isinstance(sub_schema, Optional) and key not in value:
+                        continue
                     if key not in value:
-                        errors.append(f"{path}.{key} missing")
+                        errors.append(
+                            {
+                                "path": f"{path}.{key}",
+                                "message": "missing field",
+                                "expected": "present",
+                                "actual": "missing",
+                                "value_preview": "",
+                            }
+                        )
                         continue
                     check(value[key], sub_schema, f"{path}.{key}")
             elif isinstance(expected, list):
                 if not isinstance(value, list):
-                    errors.append(f"{path} expected list")
+                    expected_label = "list"
+                    if optional_expected:
+                        expected_label = "optional list"
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": "type mismatch",
+                            "expected": expected_label,
+                            "actual": type(value).__name__,
+                            "value_preview": _preview_value(value),
+                        }
+                    )
                     return
                 if len(expected) == 0:
                     return
@@ -89,18 +265,70 @@ class Validators:
                 for idx, item in enumerate(value):
                     check(item, item_schema, f"{path}[{idx}]")
             else:
+                if isinstance(expected, tuple) and all(isinstance(t, type) for t in expected):
+                    if not isinstance(value, expected):
+                        errors.append(
+                            {
+                                "path": path,
+                                "message": "type mismatch",
+                                "expected": _format_expected_type(expected) if not optional_expected else _format_expected_type(Optional(expected)),
+                                "actual": type(value).__name__,
+                                "value_preview": _preview_value(value),
+                            }
+                        )
+                    return
                 if not isinstance(value, expected):
-                    errors.append(f"{path} expected {expected}")
+                    errors.append(
+                        {
+                            "path": path,
+                            "message": "type mismatch",
+                            "expected": _format_expected_type(expected) if not optional_expected else _format_expected_type(Optional(expected)),
+                            "actual": type(value).__name__,
+                            "value_preview": _preview_value(value),
+                        }
+                    )
 
         for key, expected in schema.items():
+            if isinstance(expected, Optional) and key not in data:
+                continue
             if key not in data:
-                errors.append(f"{key} missing")
+                errors.append(
+                    {
+                        "path": key,
+                        "message": "missing field",
+                        "expected": "present",
+                        "actual": "missing",
+                        "value_preview": "",
+                    }
+                )
                 continue
             check(data[key], expected, key)
 
         if errors:
-            return ValidationResult.failure("Schema validation failed", {"errors": errors})
+            categories: Dict[str, List[Dict[str, Any]]] = {}
+            for error in errors:
+                categories.setdefault(error["message"], []).append(error)
+            summary_parts = [f"{len(items)} {name}" for name, items in categories.items()]
+            summary = f"Schema validation failed ({len(errors)} errors: {', '.join(summary_parts)})"
+            lines = [summary]
+            for name, items in categories.items():
+                lines.append(f"{name.title()}:")
+                for idx, item in enumerate(items, start=1):
+                    preview = item.get("value_preview") or ""
+                    preview_text = f" ({preview})" if preview else ""
+                    if item["message"] == "missing field":
+                        lines.append(f"{idx}. {item['path']}: missing field")
+                    else:
+                        lines.append(
+                            f"{idx}. {item['path']}: expected {item['expected']}, got {item['actual']}{preview_text}"
+                        )
+            return ValidationResult.failure("\n".join(lines), {"errors": errors})
         return ValidationResult.success("Schema validation passed")
+
+    @staticmethod
+    def optional(schema: SchemaType) -> Optional:
+        """Wrap a schema as optional, e.g. Validators.optional(int)."""
+        return Optional(schema)
 
     @staticmethod
     def check_database_symbols(db_path: str, expected_min: int) -> ValidationResult:

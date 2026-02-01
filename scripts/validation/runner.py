@@ -161,6 +161,8 @@ class CommandRunner:
 
     @staticmethod
     def _parse_json(stdout: str) -> Optional[object]:
+        if stdout == "" or stdout.isspace():
+            return None
         data = stdout.strip()
         if not data:
             return None
@@ -170,26 +172,85 @@ class CommandRunner:
             return None
 
     @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "..."
+
+    @staticmethod
+    def _format_command(result: CommandResult) -> str:
+        return " ".join(result.command)
+
+    @staticmethod
     def _parse_stream_results(result: CommandResult) -> Dict[str, object]:
         if result.exit_code != 0:
             missing = CommandRunner._missing_dependency_message(result)
             if missing:
                 module, message = missing
                 raise MissingDependencyError(module, message)
-            raise RuntimeError(
-                f"Command failed (exit {result.exit_code}): {' '.join(result.command)}\n"
-                f"stderr: {result.stderr.strip()}"
+            parsed_count = 0
+            parsing_errors: List[Dict[str, object]] = []
+            for line_number, raw_line in enumerate(result.stdout.splitlines(), start=1):
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    json.loads(stripped)
+                    parsed_count += 1
+                except json.JSONDecodeError as exc:
+                    parsing_errors.append(
+                        {
+                            "line_number": line_number,
+                            "line_content": CommandRunner._truncate(stripped, 100),
+                            "error": str(exc),
+                        }
+                    )
+            parsing_error_lines = []
+            for error in parsing_errors:
+                parsing_error_lines.append(
+                    f"  - Line {error['line_number']}: {error['line_content']} ({error['error']})"
+                )
+            parsing_error_details = "\n".join(parsing_error_lines)
+            error_message = (
+                "Command failed while parsing stream results\n"
+                f"Command: {CommandRunner._format_command(result)}\n"
+                f"Exit Code: {result.exit_code}\n"
+                f"Stdout: {CommandRunner._truncate(result.stdout.strip(), 500)}\n"
+                f"Stderr: {CommandRunner._truncate(result.stderr.strip(), 500)}\n"
+                f"Parsed JSON lines before failure: {parsed_count}\n"
+                f"Parsing errors: {len(parsing_errors)}"
             )
-        results = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
+            if parsing_error_details:
+                error_message = f"{error_message}\nParsing error details:\n{parsing_error_details}"
+            error = RuntimeError(error_message)
+            error.parsing_errors = parsing_errors
+            raise error
+        results: List[object] = []
+        parsing_errors: List[Dict[str, object]] = []
+        total_lines = 0
+        for line_number, raw_line in enumerate(result.stdout.splitlines(), start=1):
+            stripped = raw_line.strip()
+            if not stripped:
                 continue
+            total_lines += 1
             try:
-                results.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return {"stream": True, "results": results}
+                results.append(json.loads(stripped))
+            except json.JSONDecodeError as exc:
+                parsing_errors.append(
+                    {
+                        "line_number": line_number,
+                        "line_content": CommandRunner._truncate(stripped, 100),
+                        "error": str(exc),
+                    }
+                )
+        response: Dict[str, object] = {"stream": True, "results": results, "parsing_errors": parsing_errors}
+        if total_lines > 0 and parsing_errors:
+            failure_rate = len(parsing_errors) / total_lines
+            if failure_rate > 0.10:
+                response["warnings"] = [
+                    f"High parsing error rate: {len(parsing_errors)} of {total_lines} lines failed to parse."
+                ]
+        return response
 
     @staticmethod
     def _require_json(result: CommandResult) -> Dict[str, object]:
@@ -199,12 +260,34 @@ class CommandRunner:
                 module, message = missing
                 raise MissingDependencyError(module, message)
             raise RuntimeError(
-                f"Command failed (exit {result.exit_code}): {' '.join(result.command)}\n"
-                f"stderr: {result.stderr.strip()}"
+                "Command failed while expecting JSON output\n"
+                f"Command: {CommandRunner._format_command(result)}\n"
+                f"Exit Code: {result.exit_code}\n"
+                f"Duration: {result.duration_ms:.2f} ms\n"
+                f"Stdout: {CommandRunner._truncate(result.stdout.strip(), 500)}\n"
+                f"Stderr: {CommandRunner._truncate(result.stderr.strip(), 500)}"
             )
         if result.json_data is None or not isinstance(result.json_data, dict):
+            stdout = result.stdout
+            stripped = stdout.strip()
+            command = CommandRunner._format_command(result)
+            if not stripped or stdout.isspace():
+                raise ValueError(
+                    "Expected JSON object but command produced no output\n"
+                    f"Command: {command}\n"
+                    "Hint: Command may have produced empty output.\n"
+                    f"Stdout: {CommandRunner._truncate(stripped, 200)}"
+                )
+            if result.json_data is None:
+                raise ValueError(
+                    "Expected JSON object but command produced invalid JSON output\n"
+                    f"Command: {command}\n"
+                    "Hint: Command may have produced non-JSON output.\n"
+                    f"Stdout: {CommandRunner._truncate(stripped, 200)}"
+                )
             raise ValueError(
-                f"Expected JSON object from command: {' '.join(result.command)}\n"
-                f"stdout: {result.stdout.strip()}"
+                "Expected JSON object but received a different JSON type\n"
+                f"Command: {command}\n"
+                f"Stdout: {CommandRunner._truncate(stripped, 200)}"
             )
         return result.json_data
