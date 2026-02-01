@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from gloggur.indexer.cache import CacheConfig, CacheManager
-from scripts.validation import CommandRunner, Reporter, TestFixtures, TestResult, Validators
+from scripts.validation import CommandRunner, Reporter, RetryConfig, TestFixtures, TestResult, Validators
 
 
 @dataclass
@@ -71,7 +71,7 @@ def _create_search_fixture() -> Tuple[Path, Path, str]:
 
 def test_basic_indexing(runner: CommandRunner, cache_dir: str) -> Tuple[TestResult, Dict[str, object]]:
     try:
-        output = runner.run_index(".")
+        output = runner.run_index(".", timeout=300.0)
     except Exception as exc:
         return TestResult(passed=False, message=f"Index command failed: {exc}"), {}
 
@@ -119,8 +119,8 @@ def test_incremental_indexing(
     target_file: Path,
 ) -> TestResult:
     try:
-        baseline = first_run or runner.run_index(".")
-        second_run = runner.run_index(".")
+        baseline = first_run or runner.run_index(".", timeout=300.0)
+        second_run = runner.run_index(".", timeout=300.0)
     except Exception as exc:
         return TestResult(passed=False, message=f"Index command failed: {exc}")
 
@@ -155,7 +155,7 @@ def test_incremental_indexing(
     modified = original + "\n# phase1 smoke test change\n"
     try:
         target_file.write_text(modified, encoding="utf8")
-        modified_run = runner.run_index(".")
+        modified_run = runner.run_index(".", timeout=300.0)
     except Exception as exc:
         return TestResult(passed=False, message=f"Re-index after change failed: {exc}")
     finally:
@@ -202,7 +202,7 @@ def test_search_functionality(runner: CommandRunner, target_file: Path, cache_di
 
     fixture_dir, fixture_file, fixture_query = _create_search_fixture()
     try:
-        runner.run_index(str(fixture_dir))
+        runner.run_index(str(fixture_dir), timeout=300.0)
         cache = CacheManager(CacheConfig(cache_dir))
         fixture_symbols = cache.list_symbols_for_file(str(fixture_file))
         function_symbol = next((symbol for symbol in fixture_symbols if symbol.kind == "function"), None)
@@ -323,14 +323,14 @@ def test_docstring_validation(runner: CommandRunner, fixture_path: Path) -> Test
 
 def test_status_and_cache(runner: CommandRunner) -> TestResult:
     try:
-        status_before = runner.run_status()
+        status_before = runner.run_status(timeout=10.0)
         total_before = int(status_before.get("total_symbols", 0))
         if total_before <= 0:
             return TestResult(passed=False, message="Status showed zero symbols before clear", details=status_before)
         cleared = runner.run_clear_cache()
         if not cleared.get("cleared"):
             return TestResult(passed=False, message="Clear-cache did not report cleared", details=cleared)
-        status_after = runner.run_status()
+        status_after = runner.run_status(timeout=10.0)
         total_after = int(status_after.get("total_symbols", 0))
         if total_after != 0:
             return TestResult(passed=False, message="Status after clear-cache was not zero", details=status_after)
@@ -378,10 +378,17 @@ def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, s
 
     results: List[Phase1Result] = []
     cache_dir = str(Path(".gloggur-cache").resolve())
+    # Configure retry for transient failures (e.g., network hiccups or rate limits).
+    retry_config = RetryConfig(
+        max_attempts=3,
+        initial_backoff_ms=1000.0,
+        retryable_exceptions=(ConnectionError, TimeoutError),
+    )
     runner = CommandRunner(
         cwd=str(PROJECT_ROOT),
         env={"GLOGGUR_CACHE_DIR": cache_dir},
-        default_timeout=300.0,
+        default_timeout=120.0,
+        retry_config=retry_config,
     )
 
     target_file = Path("gloggur/cli/main.py")

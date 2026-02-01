@@ -6,8 +6,20 @@ import subprocess
 import sys
 import time
 import re
+import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+
+
+@dataclass
+class RetryConfig:
+    max_attempts: int = 1  # 1 means no retry
+    initial_backoff_ms: float = 1000.0
+    max_backoff_ms: float = 30000.0
+    backoff_multiplier: float = 2.0
+    retryable_exceptions: tuple = (ConnectionError, TimeoutError)
+    retryable_exit_codes: Optional[Union[Set[int], Callable[[int], bool]]] = None
+    retry_on_nonzero_exit: bool = False
 
 
 @dataclass
@@ -19,6 +31,9 @@ class CommandResult:
     duration_ms: float
     json_data: Optional[object] = None
     timed_out: bool = False
+    timeout_used: Optional[float] = None
+    retry_attempts: int = 0
+    partial_output: bool = False
 
 
 class MissingDependencyError(RuntimeError):
@@ -34,56 +49,207 @@ class CommandRunner:
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         default_timeout: float = 120.0,
+        retry_config: Optional[RetryConfig] = None,
     ) -> None:
         self.base_cmd = base_cmd or [sys.executable, "-m", "gloggur.cli.main"]
         self.cwd = cwd
         self.env = env
         self.default_timeout = default_timeout
+        self.retry_config = retry_config or RetryConfig()
 
-    def run_command(self, cmd: List[str], capture_json: bool = True) -> CommandResult:
+    def run_command(
+        self,
+        cmd: List[str],
+        capture_json: bool = True,
+        timeout: Optional[float] = None,
+    ) -> CommandResult:
         full_cmd = self.base_cmd + cmd
-        start = time.perf_counter()
         merged_env = os.environ.copy()
         if self.env:
             merged_env.update(self.env)
-        try:
-            completed = subprocess.run(
-                full_cmd,
-                capture_output=True,
-                text=True,
-                cwd=self.cwd,
-                env=merged_env,
-                timeout=self.default_timeout,
-                check=False,
-            )
-            duration_ms = (time.perf_counter() - start) * 1000
-            json_data = None
-            if capture_json:
-                json_data = self._parse_json(completed.stdout)
-            return CommandResult(
-                command=full_cmd,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-                exit_code=completed.returncode,
-                duration_ms=duration_ms,
-                json_data=json_data,
-                timed_out=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            duration_ms = (time.perf_counter() - start) * 1000
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or ""
-            return CommandResult(
-                command=full_cmd,
-                stdout=stdout if isinstance(stdout, str) else stdout.decode("utf8", "ignore"),
-                stderr=stderr if isinstance(stderr, str) else stderr.decode("utf8", "ignore"),
-                exit_code=-1,
-                duration_ms=duration_ms,
-                json_data=None,
-                timed_out=True,
-            )
+        timeout_value = self.default_timeout if timeout is None else timeout
+        return self._execute_with_retry(full_cmd, merged_env, timeout_value, capture_json)
 
-    def run_index(self, path: str, **kwargs: object) -> Dict[str, object]:
+    def run_command_streaming(
+        self,
+        cmd: List[str],
+        line_callback: Callable[[str], None],
+        capture_json: bool = False,
+        timeout: Optional[float] = None,
+    ) -> CommandResult:
+        full_cmd = self.base_cmd + cmd
+        merged_env = os.environ.copy()
+        if self.env:
+            merged_env.update(self.env)
+        timeout_value = self.default_timeout if timeout is None else timeout
+        start = time.perf_counter()
+        process = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=self.cwd,
+            env=merged_env,
+        )
+        stdout, stderr, timed_out = self._stream_output(process, timeout_value, line_callback)
+        duration_ms = (time.perf_counter() - start) * 1000
+        json_data = None
+        if capture_json and stdout:
+            json_data = self._parse_json(stdout)
+        return CommandResult(
+            command=full_cmd,
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=process.returncode if process.returncode is not None else -1,
+            duration_ms=duration_ms,
+            json_data=json_data,
+            timed_out=timed_out,
+            timeout_used=timeout_value,
+            retry_attempts=0,
+            partial_output=timed_out,
+        )
+
+    def _stream_output(
+        self,
+        process: subprocess.Popen[str],
+        timeout: float,
+        line_callback: Callable[[str], None],
+    ) -> Tuple[str, str, bool]:
+        stdout_lines: List[str] = []
+        stderr_lines: List[str] = []
+        lock = threading.Lock()
+
+        def read_stdout() -> None:
+            if process.stdout is None:
+                return
+            for line in iter(process.stdout.readline, ""):
+                with lock:
+                    stdout_lines.append(line)
+                line_callback(line)
+
+        def read_stderr() -> None:
+            if process.stderr is None:
+                return
+            for line in iter(process.stderr.readline, ""):
+                with lock:
+                    stderr_lines.append(line)
+
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        timed_out = False
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_lines)
+        if timed_out:
+            stderr = f"WARNING: Command timed out after {timeout}s; partial output captured.\n{stderr}"
+        return stdout, stderr, timed_out
+
+    def _execute_with_retry(
+        self,
+        full_cmd: List[str],
+        merged_env: Dict[str, str],
+        timeout: float,
+        capture_json: bool,
+    ) -> CommandResult:
+        def should_retry_exit_code(exit_code: int) -> bool:
+            predicate = self.retry_config.retryable_exit_codes
+            if predicate is None:
+                return self.retry_config.retry_on_nonzero_exit and exit_code != 0
+            if isinstance(predicate, set):
+                return exit_code in predicate
+            return bool(predicate(exit_code))
+
+        def should_retry_exception(exc: BaseException) -> bool:
+            return isinstance(exc, self.retry_config.retryable_exceptions)
+
+        def sleep_backoff(attempt_index: int) -> None:
+            backoff_delay = min(
+                self.retry_config.initial_backoff_ms * (self.retry_config.backoff_multiplier**attempt_index),
+                self.retry_config.max_backoff_ms,
+            )
+            time.sleep(backoff_delay / 1000)
+
+        last_exc: Optional[BaseException] = None
+        max_attempts = max(1, self.retry_config.max_attempts)
+        for attempt in range(max_attempts):
+            start = time.perf_counter()
+            try:
+                completed = subprocess.run(
+                    full_cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=self.cwd,
+                    env=merged_env,
+                    timeout=timeout,
+                    check=False,
+                )
+                duration_ms = (time.perf_counter() - start) * 1000
+                is_success = completed.returncode == 0
+                should_retry = (not is_success) and should_retry_exit_code(completed.returncode)
+                if should_retry and attempt + 1 < max_attempts:
+                    sleep_backoff(attempt)
+                    continue
+                json_data = None
+                if capture_json:
+                    json_data = self._parse_json(completed.stdout)
+                return CommandResult(
+                    command=full_cmd,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    exit_code=completed.returncode,
+                    duration_ms=duration_ms,
+                    json_data=json_data,
+                    timed_out=False,
+                    timeout_used=timeout,
+                    retry_attempts=attempt,
+                    partial_output=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                duration_ms = (time.perf_counter() - start) * 1000
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                stderr_text = stderr if isinstance(stderr, str) else stderr.decode("utf8", "ignore")
+                warning = f"WARNING: Command timed out after {timeout}s; partial output captured."
+                stderr_text = f"{warning}\n{stderr_text}".strip()
+                should_retry = should_retry_exception(exc)
+                if should_retry and attempt + 1 < max_attempts:
+                    sleep_backoff(attempt)
+                    continue
+                return CommandResult(
+                    command=full_cmd,
+                    stdout=stdout if isinstance(stdout, str) else stdout.decode("utf8", "ignore"),
+                    stderr=stderr_text,
+                    exit_code=-1,
+                    duration_ms=duration_ms,
+                    json_data=None,
+                    timed_out=True,
+                    timeout_used=timeout,
+                    retry_attempts=attempt,
+                    partial_output=True,
+                )
+            except self.retry_config.retryable_exceptions as exc:
+                last_exc = exc
+                if attempt + 1 >= max_attempts:
+                    raise
+                sleep_backoff(attempt)
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Command execution failed without returning a result.")
+
+    def run_index(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
         cmd = ["index", path, "--json"]
         config_path = kwargs.get("config_path")
         embedding_provider = kwargs.get("embedding_provider")
@@ -91,10 +257,10 @@ class CommandRunner:
             cmd += ["--config", str(config_path)]
         if embedding_provider:
             cmd += ["--embedding-provider", str(embedding_provider)]
-        result = self.run_command(cmd, capture_json=True)
+        result = self.run_command(cmd, capture_json=True, timeout=timeout)
         return self._require_json(result)
 
-    def run_search(self, query: str, **kwargs: object) -> Dict[str, object]:
+    def run_search(self, query: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
         cmd = ["search", query, "--json"]
         config_path = kwargs.get("config_path")
         kind = kwargs.get("kind")
@@ -112,33 +278,33 @@ class CommandRunner:
         if stream:
             cmd += ["--stream"]
         capture_json = not bool(stream)
-        result = self.run_command(cmd, capture_json=capture_json)
+        result = self.run_command(cmd, capture_json=capture_json, timeout=timeout)
         if stream:
             return self._parse_stream_results(result)
         return self._require_json(result)
 
-    def run_validate(self, path: str, **kwargs: object) -> Dict[str, object]:
+    def run_validate(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
         cmd = ["validate", path, "--json"]
         config_path = kwargs.get("config_path")
         if config_path:
             cmd += ["--config", str(config_path)]
-        result = self.run_command(cmd, capture_json=True)
+        result = self.run_command(cmd, capture_json=True, timeout=timeout)
         return self._require_json(result)
 
-    def run_status(self, **kwargs: object) -> Dict[str, object]:
+    def run_status(self, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
         cmd = ["status", "--json"]
         config_path = kwargs.get("config_path")
         if config_path:
             cmd += ["--config", str(config_path)]
-        result = self.run_command(cmd, capture_json=True)
+        result = self.run_command(cmd, capture_json=True, timeout=timeout)
         return self._require_json(result)
 
-    def run_clear_cache(self, **kwargs: object) -> Dict[str, object]:
+    def run_clear_cache(self, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
         cmd = ["clear-cache", "--json"]
         config_path = kwargs.get("config_path")
         if config_path:
             cmd += ["--config", str(config_path)]
-        result = self.run_command(cmd, capture_json=True)
+        result = self.run_command(cmd, capture_json=True, timeout=timeout)
         return self._require_json(result)
 
     @staticmethod
@@ -188,6 +354,17 @@ class CommandRunner:
             if missing:
                 module, message = missing
                 raise MissingDependencyError(module, message)
+            timeout_info = ""
+            if result.timed_out:
+                timeout_info = (
+                    f"Timeout: Command timed out after {result.timeout_used}s. Partial output may be available.\n"
+                )
+            retry_info = ""
+            if result.retry_attempts > 0:
+                retry_info = f"Retry Attempts: {result.retry_attempts}\n"
+            partial_warning = ""
+            if result.partial_output:
+                partial_warning = "Warning: Output may be incomplete due to timeout\n"
             parsed_count = 0
             parsing_errors: List[Dict[str, object]] = []
             for line_number, raw_line in enumerate(result.stdout.splitlines(), start=1):
@@ -215,6 +392,9 @@ class CommandRunner:
                 "Command failed while parsing stream results\n"
                 f"Command: {CommandRunner._format_command(result)}\n"
                 f"Exit Code: {result.exit_code}\n"
+                f"{timeout_info}"
+                f"{retry_info}"
+                f"{partial_warning}"
                 f"Stdout: {CommandRunner._truncate(result.stdout.strip(), 500)}\n"
                 f"Stderr: {CommandRunner._truncate(result.stderr.strip(), 500)}\n"
                 f"Parsed JSON lines before failure: {parsed_count}\n"
@@ -259,11 +439,26 @@ class CommandRunner:
             if missing:
                 module, message = missing
                 raise MissingDependencyError(module, message)
+            timeout_message = ""
+            if result.timed_out:
+                timeout_message = (
+                    f"Command timed out after {result.timeout_used}s\n"
+                    "Hint: Partial output may be available.\n"
+                )
+            retry_message = ""
+            if result.retry_attempts > 0:
+                retry_message = f"Retry Attempts: {result.retry_attempts}\n"
+            partial_warning = ""
+            if result.partial_output:
+                partial_warning = "Warning: Output may be incomplete due to timeout\n"
             raise RuntimeError(
                 "Command failed while expecting JSON output\n"
                 f"Command: {CommandRunner._format_command(result)}\n"
                 f"Exit Code: {result.exit_code}\n"
                 f"Duration: {result.duration_ms:.2f} ms\n"
+                f"{timeout_message}"
+                f"{retry_message}"
+                f"{partial_warning}"
                 f"Stdout: {CommandRunner._truncate(result.stdout.strip(), 500)}\n"
                 f"Stderr: {CommandRunner._truncate(result.stderr.strip(), 500)}"
             )
