@@ -378,10 +378,6 @@ def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, s
 
     results: List[Phase1Result] = []
     cache_dir = str(Path(".gloggur-cache").resolve())
-    fixtures = TestFixtures(cache_dir=cache_dir)
-    had_cache = os.path.isdir(cache_dir)
-    backup_path: Optional[Path] = None
-
     runner = CommandRunner(
         cwd=str(PROJECT_ROOT),
         env={"GLOGGUR_CACHE_DIR": cache_dir},
@@ -391,50 +387,50 @@ def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, s
     target_file = Path("gloggur/cli/main.py")
     fixture_path = Path("tests/fixtures/phase1_docstring_fixture.py")
 
-    try:
-        if had_cache:
+    with TestFixtures(cache_dir=cache_dir) as fixtures:
+        backup_path: Optional[Path] = None
+        try:
             backup_path = fixtures.backup_cache()
-        fixtures.cleanup_cache()
-
-        test_result, first_run = test_basic_indexing(runner, cache_dir)
-        results.append(Phase1Result("Test 1.1: Basic Indexing", test_result))
-        reporter.add_test_result("Test 1.1: Basic Indexing", test_result)
-        if verbose and test_result.details:
-            print(json.dumps({"test": "basic_indexing", "details": test_result.details}, indent=2))
-
-        test_result = test_incremental_indexing(runner, first_run, target_file)
-        results.append(Phase1Result("Test 1.2: Incremental Indexing", test_result))
-        reporter.add_test_result("Test 1.2: Incremental Indexing", test_result)
-        if verbose and test_result.details:
-            print(json.dumps({"test": "incremental_indexing", "details": test_result.details}, indent=2))
-
-        test_result = test_search_functionality(runner, target_file, cache_dir)
-        results.append(Phase1Result("Test 1.3: Search Functionality", test_result))
-        reporter.add_test_result("Test 1.3: Search Functionality", test_result)
-        if verbose and test_result.details:
-            print(json.dumps({"test": "search_functionality", "details": test_result.details}, indent=2))
-
-        test_result = test_docstring_validation(runner, fixture_path)
-        results.append(Phase1Result("Test 1.4: Docstring Validation", test_result))
-        reporter.add_test_result("Test 1.4: Docstring Validation", test_result)
-        if verbose and test_result.details:
-            print(json.dumps({"test": "docstring_validation", "details": test_result.details}, indent=2))
-
-        test_result = test_status_and_cache(runner)
-        results.append(Phase1Result("Test 1.5: Status & Cache Management", test_result))
-        reporter.add_test_result("Test 1.5: Status & Cache Management", test_result)
-        if verbose and test_result.details:
-            print(json.dumps({"test": "status_and_cache", "details": test_result.details}, indent=2))
-
-    finally:
-        if had_cache and backup_path is not None:
-            fixtures.restore_cache(backup_path)
-            shutil.rmtree(backup_path, ignore_errors=True)
-        else:
             fixtures.cleanup_cache()
-        fixtures.cleanup_temp_repos()
-        if fixture_path.exists():
-            fixture_path.unlink()
+
+            test_result, first_run = test_basic_indexing(runner, cache_dir)
+            results.append(Phase1Result("Test 1.1: Basic Indexing", test_result))
+            reporter.add_test_result("Test 1.1: Basic Indexing", test_result)
+            if verbose and test_result.details:
+                print(json.dumps({"test": "basic_indexing", "details": test_result.details}, indent=2))
+
+            test_result = test_incremental_indexing(runner, first_run, target_file)
+            results.append(Phase1Result("Test 1.2: Incremental Indexing", test_result))
+            reporter.add_test_result("Test 1.2: Incremental Indexing", test_result)
+            if verbose and test_result.details:
+                print(json.dumps({"test": "incremental_indexing", "details": test_result.details}, indent=2))
+
+            test_result = test_search_functionality(runner, target_file, cache_dir)
+            results.append(Phase1Result("Test 1.3: Search Functionality", test_result))
+            reporter.add_test_result("Test 1.3: Search Functionality", test_result)
+            if verbose and test_result.details:
+                print(json.dumps({"test": "search_functionality", "details": test_result.details}, indent=2))
+
+            test_result = test_docstring_validation(runner, fixture_path)
+            results.append(Phase1Result("Test 1.4: Docstring Validation", test_result))
+            reporter.add_test_result("Test 1.4: Docstring Validation", test_result)
+            if verbose and test_result.details:
+                print(json.dumps({"test": "docstring_validation", "details": test_result.details}, indent=2))
+
+            test_result = test_status_and_cache(runner)
+            results.append(Phase1Result("Test 1.5: Status & Cache Management", test_result))
+            reporter.add_test_result("Test 1.5: Status & Cache Management", test_result)
+            if verbose and test_result.details:
+                print(json.dumps({"test": "status_and_cache", "details": test_result.details}, indent=2))
+
+        finally:
+            if backup_path is not None:
+                fixtures.restore_cache(backup_path)
+                shutil.rmtree(backup_path, ignore_errors=True)
+            else:
+                fixtures.cleanup_cache()
+            if fixture_path.exists():
+                fixture_path.unlink()
 
     markdown = render_report(results)
     if emit_summary:
