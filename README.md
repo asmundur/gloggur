@@ -13,10 +13,24 @@ Gloggur is a symbol-level, incremental codebase indexer for semantic search and 
 
 ## Installation
 
+Preferred:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+pipx install gloggur
+```
+
+Alternatives:
+
+```bash
+pip install gloggur
+```
+
+Optional:
+
+```bash
+pipx install "gloggur[openai]"
+pipx install "gloggur[gemini]"
+pipx install "gloggur[local]"
 ```
 
 ## Quickstart
