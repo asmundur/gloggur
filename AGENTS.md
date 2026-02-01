@@ -2,6 +2,8 @@
 
 Gloggur is a tool **for** coding agents. When working in this repository, you are expected to use Gloggur to orient yourself in the codebase before making changes.
 
+use .venv for running python modules. 
+
 ## Required workflow
 
 1. **Index the repository** (first time per workspace):
