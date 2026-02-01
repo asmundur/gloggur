@@ -10,6 +10,7 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from contextvars import copy_context
 from dataclasses import dataclass
 import shutil
 import tempfile
@@ -634,7 +635,11 @@ class TestOrchestrator:
                 self._logger.info("Task completed: %s (section=%s)", outcome.name, outcome.section)
             return outcomes
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_map = {executor.submit(self._run_task, task): task for task in tasks}
+            future_map: Dict[object, TestTask] = {}
+            for task in tasks:
+                ctx = copy_context()
+                future = executor.submit(ctx.run, self._run_task, task)
+                future_map[future] = task
             for future in as_completed(future_map):
                 outcome = future.result()
                 self.reporter.add_test_result_to_section(outcome.section, outcome.name, outcome.result)
