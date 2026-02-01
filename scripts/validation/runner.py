@@ -9,8 +9,11 @@ import time
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
+import shutil
+import tempfile
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
 from scripts.validation.reporter import Reporter, TestResult
 
@@ -75,6 +78,36 @@ class CommandRunner:
             retry_config=self.retry_config,
             debug=self.debug,
         )
+
+    @contextmanager
+    def isolated_env(
+        self,
+        *,
+        cache_dir: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        prefix: str = "gloggur-cache-",
+        cwd: Optional[str] = None,
+    ) -> Iterator["CommandRunner"]:
+        owns_cache = cache_dir is None
+        if cache_dir is None:
+            cache_dir = tempfile.mkdtemp(prefix=prefix)
+        merged_env = dict(self.env or {})
+        merged_env["GLOGGUR_CACHE_DIR"] = cache_dir
+        if extra_env:
+            merged_env.update(extra_env)
+        runner = CommandRunner(
+            base_cmd=list(self.base_cmd),
+            cwd=cwd or self.cwd,
+            env=merged_env,
+            default_timeout=self.default_timeout,
+            retry_config=self.retry_config,
+            debug=self.debug,
+        )
+        try:
+            yield runner
+        finally:
+            if owns_cache:
+                shutil.rmtree(cache_dir, ignore_errors=True)
 
     def run_command(
         self,
@@ -557,6 +590,13 @@ class TestOrchestrator:
 
     def run(self, tasks: Iterable[TestTask]) -> List[TestOutcome]:
         outcomes: List[TestOutcome] = []
+        if self.max_workers == 1:
+            for task in tasks:
+                outcome = self._run_task(task)
+                self.reporter.add_test_result_to_section(outcome.section, outcome.name, outcome.result)
+                outcomes.append(outcome)
+                self._logger.info("Task completed: %s (section=%s)", outcome.name, outcome.section)
+            return outcomes
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_map = {executor.submit(self._run_task, task): task for task in tasks}
             for future in as_completed(future_map):

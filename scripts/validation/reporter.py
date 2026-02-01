@@ -311,16 +311,17 @@ class Reporter:
                 print(f"{green}All tests passed{reset}")
 
     def _summary_counts(self) -> tuple[int, int, int]:
-        total = 0
-        passed = 0
-        for section in self._sections:
-            for item in section.results:
-                total += 1
-                result: TestResult = item["result"]
-                if result.passed:
-                    passed += 1
-        failed = total - passed
-        return total, passed, failed
+        with self._lock:
+            total = 0
+            passed = 0
+            for section in self._sections:
+                for item in section.results:
+                    total += 1
+                    result: TestResult = item["result"]
+                    if result.passed:
+                        passed += 1
+            failed = total - passed
+            return total, passed, failed
 
     def _evaluate_thresholds(self, name: str, metric: PerformanceMetric) -> None:
         thresholds = self._performance_thresholds.get(name)

@@ -134,7 +134,11 @@ class ValidationRunner:
     def _run_all_phases_parallel(self, phases: List[int]) -> ValidationReport:
         tasks = self._build_parallel_tasks(phases)
         phase_reports: List[PhaseReport] = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        max_workers = self.max_workers
+        if max_workers is None:
+            cpu_count = os.cpu_count() or 1
+            max_workers = max(1, min(len(tasks), cpu_count))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
                 executor.submit(
                     _execute_phase_script,
