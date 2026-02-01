@@ -104,16 +104,26 @@ class TestFixtures:
         self._backup_dirs: List[Path] = []
         self._cache_dirs: List[Path] = []
         self._cache_lock = threading.Lock()
+        self._cache_dir_local = threading.local()
+        self._cache_dir_local.value = cache_dir
 
     @property
     def cache_dir(self) -> str:
-        return self._cache_dir
+        return self._get_cache_dir()
 
     @cache_dir.setter
     def cache_dir(self, value: str) -> None:
         with self._cache_lock:
             self._cache_dir = value
             self._owns_cache_dir = False
+        self._cache_dir_local.value = value
+
+    def _get_cache_dir(self) -> str:
+        local_cache_dir = getattr(self._cache_dir_local, "value", None)
+        if local_cache_dir:
+            return local_cache_dir
+        with self._cache_lock:
+            return self._cache_dir
 
     def __enter__(self) -> "TestFixtures":
         return self
@@ -122,10 +132,19 @@ class TestFixtures:
         self.cleanup_temp_repos()
         self.cleanup_backup_dirs()
         if self._owns_cache_dir:
-            self.cleanup_cache()
+            self._cleanup_owned_cache_dir()
         self.cleanup_cache_dirs()
 
-    def create_temp_repo(self, files: Dict[str, Union[str, FixtureFile]], validate: bool = True) -> Path:
+    def create_temp_repo(
+        self,
+        files: Dict[str, Union[str, FixtureFile]],
+        validate: bool = True,
+        cache_dir: Optional[str] = None,
+    ) -> Path:
+        if cache_dir is None:
+            self.new_cache_dir()
+        else:
+            self._cache_dir_local.value = str(cache_dir)
         normalized_files = self._normalize_files(files)
         if validate:
             self._validate_fixture_files(normalized_files)
@@ -302,9 +321,14 @@ class TestFixtures:
             + "\n"
         )
 
-    def create_temp_repo_from_fixture(self, name: str, validate: bool = True) -> Path:
+    def create_temp_repo_from_fixture(
+        self,
+        name: str,
+        validate: bool = True,
+        cache_dir: Optional[str] = None,
+    ) -> Path:
         template = self.registry.get(name)
-        return self.create_temp_repo(template.files, validate=validate)
+        return self.create_temp_repo(template.files, validate=validate, cache_dir=cache_dir)
 
     def create_temp_repo_from_fixtures(
         self,
@@ -312,13 +336,14 @@ class TestFixtures:
         validate: bool = True,
         name: str = "composed",
         description: str = "Composed fixture",
+        cache_dir: Optional[str] = None,
     ) -> Path:
         template = self.registry.compose(
             name=name,
             fixtures=fixtures,
             description=description,
         )
-        return self.create_temp_repo(template.files, validate=validate)
+        return self.create_temp_repo(template.files, validate=validate, cache_dir=cache_dir)
 
     @classmethod
     def list_fixture_templates(cls, tags: Optional[Iterable[str]] = None) -> List[FixtureTemplate]:
@@ -329,6 +354,12 @@ class TestFixtures:
         return cls.registry.get(name)
 
     def cleanup_cache(self) -> None:
+        cache_dir = self._get_cache_dir()
+        if cache_dir and os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir)
+            logger.debug("Removed cache dir %s", cache_dir)
+
+    def _cleanup_owned_cache_dir(self) -> None:
         with self._cache_lock:
             cache_dir = self._cache_dir
         if cache_dir and os.path.isdir(cache_dir):
@@ -343,16 +374,8 @@ class TestFixtures:
             return cache_dir
 
     def new_cache_dir(self, prefix: str = "gloggur-cache-") -> Path:
-        with self._cache_lock:
-            old_cache_dir = self._cache_dir
-            old_owned = self._owns_cache_dir
         cache_dir = self.create_cache_dir(prefix=prefix)
-        with self._cache_lock:
-            self._cache_dir = str(cache_dir)
-            self._owns_cache_dir = True
-        if old_owned and old_cache_dir and os.path.isdir(old_cache_dir):
-            shutil.rmtree(old_cache_dir)
-            logger.debug("Removed cache dir %s", old_cache_dir)
+        self._cache_dir_local.value = str(cache_dir)
         return cache_dir
 
     def cleanup_cache_dirs(self) -> None:
@@ -365,8 +388,7 @@ class TestFixtures:
                 logger.debug("Removed cache dir %s", path)
 
     def backup_cache(self) -> Optional[Path]:
-        with self._cache_lock:
-            cache_path = Path(self._cache_dir)
+        cache_path = Path(self._get_cache_dir())
         if not cache_path.exists():
             return None
         backup_dir = Path(tempfile.mkdtemp(prefix="gloggur-cache-backup-"))
@@ -377,8 +399,7 @@ class TestFixtures:
         return backup_dir
 
     def restore_cache(self, backup_path: Path) -> None:
-        with self._cache_lock:
-            cache_path = Path(self._cache_dir)
+        cache_path = Path(self._get_cache_dir())
         if cache_path.exists():
             shutil.rmtree(cache_path)
         shutil.copytree(backup_path, cache_path)
