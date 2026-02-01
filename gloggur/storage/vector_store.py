@@ -30,6 +30,9 @@ class VectorStore:
         self.config = config
         self._index = None
         self._id_map: List[str] = []
+        self._fallback_vectors: List[List[float]] = []
+        self._fallback_path = os.path.join(self.config.cache_dir, "vectors.npy")
+        self._faiss_available = self._check_faiss()
         os.makedirs(self.config.cache_dir, exist_ok=True)
         self.load()
 
@@ -47,45 +50,68 @@ class VectorStore:
         if not vectors:
             return
         matrix = np.asarray(vectors, dtype="float32")
-        if self._index is None:
-            self._index = self._create_index(matrix.shape[1])
-        self._index.add(matrix)
+        if self._faiss_available:
+            if self._index is None:
+                self._index = self._create_index(matrix.shape[1])
+            self._index.add(matrix)
+        else:
+            self._fallback_vectors.extend(vectors)
         self._id_map.extend(ids)
         self._persist_id_map()
 
     def search(self, query_vector: List[float], k: int) -> List[tuple[str, float]]:
-        if self._index is None or not self._id_map:
+        if not self._id_map:
             return []
-        vector = np.asarray([query_vector], dtype="float32")
-        distances, indices = self._index.search(vector, k)
-        results = []
-        for idx, distance in zip(indices[0], distances[0]):
-            if idx < 0 or idx >= len(self._id_map):
-                continue
-            results.append((self._id_map[idx], float(distance)))
-        return results
+        if self._faiss_available and self._index is not None:
+            vector = np.asarray([query_vector], dtype="float32")
+            distances, indices = self._index.search(vector, k)
+            results = []
+            for idx, distance in zip(indices[0], distances[0]):
+                if idx < 0 or idx >= len(self._id_map):
+                    continue
+                results.append((self._id_map[idx], float(distance)))
+            return results
+        if not self._fallback_vectors:
+            return []
+        matrix = np.asarray(self._fallback_vectors, dtype="float32")
+        vector = np.asarray(query_vector, dtype="float32")
+        diffs = matrix - vector
+        distances = np.sum(diffs * diffs, axis=1)
+        if k <= 0:
+            return []
+        top_indices = np.argsort(distances)[: min(k, len(distances))]
+        return [(self._id_map[idx], float(distances[idx])) for idx in top_indices]
 
     def save(self) -> None:
-        if self._index is None:
-            return
         self._persist_id_map()
-        import faiss
+        if self._faiss_available and self._index is not None:
+            import faiss
 
-        faiss.write_index(self._index, self.config.index_path)
+            faiss.write_index(self._index, self.config.index_path)
+            return
+        if self._fallback_vectors:
+            np.save(self._fallback_path, np.asarray(self._fallback_vectors, dtype="float32"))
+        self._touch_index_placeholder()
 
     def load(self) -> None:
-        if not os.path.exists(self.config.index_path):
-            self._load_id_map()
-            return
-        import faiss
-
-        self._index = faiss.read_index(self.config.index_path)
         self._load_id_map()
+        if self._faiss_available and os.path.exists(self.config.index_path):
+            import faiss
+
+            self._index = faiss.read_index(self.config.index_path)
+            return
+        if os.path.exists(self._fallback_path):
+            try:
+                matrix = np.load(self._fallback_path)
+            except OSError:
+                matrix = np.asarray([], dtype="float32")
+            self._fallback_vectors = matrix.tolist() if matrix.size else []
 
     def clear(self) -> None:
         self._index = None
         self._id_map = []
-        for path in (self.config.index_path, self.config.id_map_path):
+        self._fallback_vectors = []
+        for path in (self.config.index_path, self.config.id_map_path, self._fallback_path):
             if os.path.exists(path):
                 os.remove(path)
 
@@ -105,3 +131,20 @@ class VectorStore:
         import faiss
 
         return faiss.IndexFlatL2(dimension)
+
+    @staticmethod
+    def _check_faiss() -> bool:
+        try:
+            import faiss  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    def _touch_index_placeholder(self) -> None:
+        if os.path.exists(self.config.index_path):
+            return
+        try:
+            with open(self.config.index_path, "wb") as handle:
+                handle.write(b"FAISS_UNAVAILABLE\n")
+        except OSError:
+            pass

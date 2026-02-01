@@ -27,7 +27,9 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
-            raise RuntimeError("sentence-transformers is required for local embeddings") from exc
+            self._enable_fallback()
+            self._model = None
+            return None
         try:
             self._model = SentenceTransformer(self.model_name, cache_folder=self.cache_dir)
             return self._model
