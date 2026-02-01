@@ -10,6 +10,7 @@ import pytest
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.models import Symbol
 from scripts.validation import CommandRunner, Reporter, TestFixtures, TestResult, Validators
+from scripts.validation.reporter import PerformanceMetric
 
 
 def test_command_runner_status_json() -> None:
@@ -60,6 +61,20 @@ def test_reporter_outputs() -> None:
     payload = reporter.generate_json()
     assert "Validation Report" in markdown
     assert payload["summary"]["failed"] == 1
+
+
+def test_reporter_performance_markdown_with_baseline_trends() -> None:
+    reporter = Reporter()
+    reporter.add_performance_metric("Phase 1 Total", duration_ms=1500.0, throughput=2.0, throughput_unit="tests/s")
+    reporter.set_baseline_metrics(
+        {"Phase 1 Total": PerformanceMetric(name="Phase 1 Total", duration_ms=1200.0, throughput=2.5)}
+    )
+    reporter.add_baseline_trends()
+    markdown = reporter.render_performance_markdown()
+    assert "Phase 1 Total" in markdown
+    assert "Comparison to baseline:" in markdown
+    assert "Performance Trends" in markdown
+    assert "```mermaid" in markdown
 
 
 def test_fixtures_create_and_cleanup() -> None:

@@ -39,6 +39,28 @@ def _count_symbols(db_path: str) -> int:
         return int(row[0]) if row else 0
 
 
+def _load_baseline_payload(path: Optional[str]) -> Optional[Dict[str, object]]:
+    if not path:
+        return None
+    baseline_path = Path(path)
+    if not baseline_path.exists():
+        return None
+    try:
+        return json.loads(baseline_path.read_text(encoding="utf8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+
+
+def _env_float(name: str, default: Optional[float] = None) -> Optional[float]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def _validate_required_fields(results: List[Dict[str, object]]) -> Optional[str]:
     required = {"symbol", "kind", "file", "line", "signature", "similarity_score"}
     for idx, item in enumerate(results):
@@ -258,8 +280,18 @@ def test_search_functionality(runner: CommandRunner, target_file: Path, cache_di
             details={"results": file_results, "file": sample_file},
         )
 
+    search_time_ms = None
+    metadata = output.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("search_time_ms") is not None:
+        try:
+            search_time_ms = float(metadata["search_time_ms"])
+        except (TypeError, ValueError):
+            search_time_ms = None
+
     message = f"Search returned {len(results)} results with valid scores and filters"
     details = {"total_results": len(results)}
+    if search_time_ms is not None:
+        details["search_time_ms"] = search_time_ms
     return TestResult(passed=True, message=message, details=details)
 
 
@@ -371,10 +403,17 @@ def render_report(results: List[Phase1Result]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, str, Dict[str, object]]:
+def run_phase1(
+    verbose: bool = False,
+    emit_summary: bool = True,
+    baseline_path: Optional[str] = None,
+) -> Tuple[int, str, Dict[str, object]]:
     start = time.perf_counter()
     reporter = Reporter()
     reporter.add_section("Phase 1 Smoke Tests")
+    baseline_payload = _load_baseline_payload(baseline_path)
+    if baseline_payload:
+        reporter.load_baseline_from_payload(baseline_payload)
 
     results: List[Phase1Result] = []
     cache_dir = str(Path(".gloggur-cache").resolve())
@@ -403,18 +442,77 @@ def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, s
             test_result, first_run = test_basic_indexing(runner, cache_dir)
             results.append(Phase1Result("Test 1.1: Basic Indexing", test_result))
             reporter.add_test_result("Test 1.1: Basic Indexing", test_result)
+            if isinstance(test_result.details, dict):
+                duration_ms = test_result.details.get("duration_ms")
+                indexed_files = test_result.details.get("indexed_files")
+                if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+                    throughput = None
+                    if isinstance(indexed_files, (int, float)):
+                        throughput = indexed_files / (duration_ms / 1000)
+                    reporter.add_performance_metric(
+                        "Indexing",
+                        duration_ms=float(duration_ms),
+                        throughput=throughput,
+                        throughput_unit="files/s",
+                    )
+                    reporter.set_performance_thresholds(
+                        "Indexing",
+                        max_duration_ms=_env_float("GLOGGUR_PERF_INDEX_MAX_MS", 30000.0),
+                    )
             if verbose and test_result.details:
                 print(json.dumps({"test": "basic_indexing", "details": test_result.details}, indent=2))
 
             test_result = test_incremental_indexing(runner, first_run, target_file)
             results.append(Phase1Result("Test 1.2: Incremental Indexing", test_result))
             reporter.add_test_result("Test 1.2: Incremental Indexing", test_result)
+            if isinstance(test_result.details, dict):
+                second_run = test_result.details.get("second")
+                first_run_details = test_result.details.get("first")
+                if isinstance(second_run, dict):
+                    duration_ms = second_run.get("duration_ms")
+                    total_files = None
+                    if isinstance(first_run_details, dict):
+                        first_indexed = first_run_details.get("indexed_files", 0)
+                        first_skipped = first_run_details.get("skipped_files", 0)
+                        if isinstance(first_indexed, (int, float)) and isinstance(first_skipped, (int, float)):
+                            total_files = first_indexed + first_skipped
+                    if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+                        throughput = None
+                        if isinstance(total_files, (int, float)) and total_files > 0:
+                            throughput = total_files / (duration_ms / 1000)
+                        reporter.add_performance_metric(
+                            "Incremental Indexing",
+                            duration_ms=float(duration_ms),
+                            throughput=throughput,
+                            throughput_unit="files/s",
+                        )
+                        reporter.set_performance_thresholds(
+                            "Incremental Indexing",
+                            max_duration_ms=_env_float("GLOGGUR_PERF_INCREMENTAL_MAX_MS", 10000.0),
+                        )
             if verbose and test_result.details:
                 print(json.dumps({"test": "incremental_indexing", "details": test_result.details}, indent=2))
 
             test_result = test_search_functionality(runner, target_file, cache_dir)
             results.append(Phase1Result("Test 1.3: Search Functionality", test_result))
             reporter.add_test_result("Test 1.3: Search Functionality", test_result)
+            if isinstance(test_result.details, dict):
+                search_time_ms = test_result.details.get("search_time_ms")
+                total_results = test_result.details.get("total_results")
+                if isinstance(search_time_ms, (int, float)) and search_time_ms > 0:
+                    throughput = None
+                    if isinstance(total_results, (int, float)):
+                        throughput = total_results / (search_time_ms / 1000)
+                    reporter.add_performance_metric(
+                        "Search",
+                        duration_ms=float(search_time_ms),
+                        throughput=throughput,
+                        throughput_unit="results/s",
+                    )
+                    reporter.set_performance_thresholds(
+                        "Search",
+                        max_duration_ms=_env_float("GLOGGUR_PERF_SEARCH_MAX_MS", 5000.0),
+                    )
             if verbose and test_result.details:
                 print(json.dumps({"test": "search_functionality", "details": test_result.details}, indent=2))
 
@@ -439,11 +537,22 @@ def run_phase1(verbose: bool = False, emit_summary: bool = True) -> Tuple[int, s
             if fixture_path.exists():
                 fixture_path.unlink()
 
-    markdown = render_report(results)
     if emit_summary:
         reporter.print_summary()
     exit_code = 0 if all(item.result.passed for item in results) else 1
     duration_ms = (time.perf_counter() - start) * 1000
+    reporter.add_performance_metric(
+        "Phase 1 Total",
+        duration_ms=duration_ms,
+        throughput=len(results) / (duration_ms / 1000) if duration_ms > 0 else None,
+        throughput_unit="tests/s",
+    )
+    if baseline_payload:
+        reporter.add_baseline_trends()
+    markdown = render_report(results)
+    performance_section = reporter.render_performance_markdown()
+    if performance_section:
+        markdown = f"{markdown.rstrip()}\n\n{performance_section}\n"
     payload = reporter.generate_json()
     summary = payload.get("summary", {})
     if isinstance(summary, dict) and "skipped" not in summary:
@@ -464,11 +573,21 @@ def main() -> None:
     parser.add_argument("--output", type=str, default=None, help="Write markdown report to a file")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Print verbose test details")
+    parser.add_argument(
+        "--baseline",
+        type=str,
+        default=None,
+        help="Path to JSON report payload for baseline performance comparisons",
+    )
     args = parser.parse_args()
 
     emit_summary = args.format != "json"
     verbose = args.verbose and args.format != "json"
-    exit_code, markdown, payload = run_phase1(verbose=verbose, emit_summary=emit_summary)
+    exit_code, markdown, payload = run_phase1(
+        verbose=verbose,
+        emit_summary=emit_summary,
+        baseline_path=args.baseline,
+    )
     output = markdown if args.format == "markdown" else json.dumps(payload, indent=2)
 
     if args.output:
