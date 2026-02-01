@@ -31,6 +31,7 @@ def configure_logging(
     log_level: Optional[str] = None,
     log_file: Optional[str] = None,
     trace_id: Optional[str] = None,
+    stream: Optional[str] = None,
     force: bool = False,
 ) -> str:
     global _CONFIGURED
@@ -63,7 +64,9 @@ def configure_logging(
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    stream_handler = logging.StreamHandler(sys.stdout)
+    resolved_stream = (stream or os.getenv("GLOGGUR_LOG_STREAM") or "stdout").lower()
+    stream_target = sys.stderr if resolved_stream == "stderr" else sys.stdout
+    stream_handler = logging.StreamHandler(stream_target)
     stream_handler.setLevel(level)
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(TraceIdFilter())

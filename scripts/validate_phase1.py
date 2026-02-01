@@ -596,6 +596,7 @@ def main() -> None:
         log_level=args.log_level,
         log_file=args.log_file,
         trace_id=args.trace_id,
+        stream="stderr" if args.format == "json" else None,
         force=True,
     )
 
