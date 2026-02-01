@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 
 def _utc_now() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 class Symbol(BaseModel):
