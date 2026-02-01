@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 from gloggur.models import Symbol
 
@@ -56,10 +57,18 @@ class MetadataStore:
             rows = conn.execute("SELECT * FROM symbols ORDER BY file_path, start_line").fetchall()
             return [self._row_to_symbol(row) for row in rows]
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.config.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     @staticmethod
     def _row_to_symbol(row: sqlite3.Row) -> Symbol:

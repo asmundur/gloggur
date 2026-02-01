@@ -49,11 +49,11 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         for item in embeddings:
             if isinstance(item, list):
                 vectors.append(item)
-            elif hasattr(item, "values"):
-                vectors.append(list(item.values))
             elif isinstance(item, dict):
                 if "values" in item:
                     vectors.append(list(item["values"]))
                 elif "embedding" in item:
                     vectors.append(list(item["embedding"]))
+            elif hasattr(item, "values"):
+                vectors.append(list(item.values))
         return vectors
