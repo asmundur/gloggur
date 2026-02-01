@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.validation.logging_utils import configure_logging
+from scripts.validation.logging_utils import configure_logging, log_event
 from scripts.validation.report_templates import (
     PhaseReport,
     TestCaseResult,
@@ -214,12 +214,30 @@ def _execute_phase_script(
         env["GLOGGUR_DEBUG_LOGS"] = os.getenv("GLOGGUR_DEBUG_LOGS", "")
     try:
         start = time.perf_counter()
-        logger.debug("Executing phase script: %s", " ".join(cmd))
+        if os.getenv("GLOGGUR_DEBUG_LOGS"):
+            log_event(
+                logger,
+                logging.DEBUG,
+                "phase.execute.start",
+                command=cmd,
+                env=env,
+                requested_phases=requested_phases,
+            )
+        else:
+            logger.debug("Executing phase script: %s", " ".join(cmd))
         completed = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
         duration_ms = (time.perf_counter() - start) * 1000
         if os.getenv("GLOGGUR_DEBUG_LOGS"):
-            logger.debug("Phase stdout: %s", completed.stdout)
-            logger.debug("Phase stderr: %s", completed.stderr)
+            log_event(
+                logger,
+                logging.DEBUG,
+                "phase.execute.finish",
+                command=cmd,
+                duration_ms=duration_ms,
+                exit_code=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
     finally:
         shutil.rmtree(cache_dir, ignore_errors=True)
 

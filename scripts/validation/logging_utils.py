@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -82,3 +83,11 @@ def configure_logging(
     root.addFilter(TraceIdFilter())
     _CONFIGURED = True
     return resolved_trace_id
+
+
+def log_event(logger: logging.Logger, level: int, event: str, **fields: object) -> None:
+    if fields:
+        payload = json.dumps(fields, default=str, ensure_ascii=True, sort_keys=True)
+        logger.log(level, "%s | %s", event, payload)
+        return
+    logger.log(level, "%s", event)

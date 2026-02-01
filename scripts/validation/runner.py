@@ -15,6 +15,7 @@ import shutil
 import tempfile
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
+from scripts.validation.logging_utils import log_event
 from scripts.validation.reporter import Reporter, TestResult
 
 logger = logging.getLogger(__name__)
@@ -124,9 +125,14 @@ class CommandRunner:
             merged_env.update(extra_env)
         timeout_value = self.default_timeout if timeout is None else timeout
         if self._debug_enabled():
-            logger.debug("Command start: %s", " ".join(full_cmd))
-            logger.debug("Command env: %s", merged_env)
-            logger.debug("Command timeout: %.2fs", timeout_value)
+            log_event(
+                logger,
+                logging.DEBUG,
+                "command.start",
+                command=full_cmd,
+                env=merged_env,
+                timeout_s=timeout_value,
+            )
         return self._execute_with_retry(full_cmd, merged_env, timeout_value, capture_json)
 
     def run_command_streaming(
@@ -145,9 +151,14 @@ class CommandRunner:
             merged_env.update(extra_env)
         timeout_value = self.default_timeout if timeout is None else timeout
         if self._debug_enabled():
-            logger.debug("Streaming command start: %s", " ".join(full_cmd))
-            logger.debug("Command env: %s", merged_env)
-            logger.debug("Command timeout: %.2fs", timeout_value)
+            log_event(
+                logger,
+                logging.DEBUG,
+                "command.stream.start",
+                command=full_cmd,
+                env=merged_env,
+                timeout_s=timeout_value,
+            )
         start = time.perf_counter()
         process = subprocess.Popen(
             full_cmd,
@@ -163,9 +174,16 @@ class CommandRunner:
         if capture_json and stdout:
             json_data = self._parse_json(stdout)
         if self._debug_enabled():
-            logger.debug("Streaming command finished in %.2f ms", duration_ms)
-            logger.debug("Streaming stdout: %s", stdout)
-            logger.debug("Streaming stderr: %s", stderr)
+            log_event(
+                logger,
+                logging.DEBUG,
+                "command.stream.finish",
+                command=full_cmd,
+                duration_ms=duration_ms,
+                stdout=stdout,
+                stderr=stderr,
+                timed_out=timed_out,
+            )
         return CommandResult(
             command=full_cmd,
             stdout=stdout,
@@ -268,9 +286,16 @@ class CommandRunner:
                 )
                 duration_ms = (time.perf_counter() - start) * 1000
                 if self._debug_enabled():
-                    logger.debug("Command finished in %.2f ms", duration_ms)
-                    logger.debug("Command stdout: %s", completed.stdout)
-                    logger.debug("Command stderr: %s", completed.stderr)
+                    log_event(
+                        logger,
+                        logging.DEBUG,
+                        "command.finish",
+                        command=full_cmd,
+                        duration_ms=duration_ms,
+                        exit_code=completed.returncode,
+                        stdout=completed.stdout,
+                        stderr=completed.stderr,
+                    )
                 is_success = completed.returncode == 0
                 should_retry = (not is_success) and should_retry_exit_code(completed.returncode)
                 if should_retry and attempt + 1 < max_attempts:
@@ -299,6 +324,17 @@ class CommandRunner:
                 stderr_text = stderr if isinstance(stderr, str) else stderr.decode("utf8", "ignore")
                 warning = f"WARNING: Command timed out after {timeout}s; partial output captured."
                 stderr_text = f"{warning}\n{stderr_text}".strip()
+                if self._debug_enabled():
+                    log_event(
+                        logger,
+                        logging.DEBUG,
+                        "command.timeout",
+                        command=full_cmd,
+                        duration_ms=duration_ms,
+                        timeout_s=timeout,
+                        stdout=stdout if isinstance(stdout, str) else stdout.decode("utf8", "ignore"),
+                        stderr=stderr_text,
+                    )
                 logger.error("Command timed out after %.2fs", timeout)
                 should_retry = should_retry_exception(exc)
                 if should_retry and attempt + 1 < max_attempts:

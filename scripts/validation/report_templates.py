@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Dict, List, Optional
 
+from scripts.validation.logging_utils import log_event
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TestCaseResult:
@@ -77,6 +81,17 @@ def build_validation_report(
     else:
         recommendation = "Ready for production use."
 
+    log_event(
+        logger,
+        logging.INFO,
+        "validation.report.build",
+        total=total,
+        passed=passed,
+        failed=failed,
+        skipped=skipped,
+        status=status,
+        phases=len(phases),
+    )
     return ValidationReport(
         generated_at=generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         status=status,

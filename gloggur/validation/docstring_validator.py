@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import List
 
 from gloggur.models import Symbol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,6 +22,8 @@ def validate_docstrings(symbols: List[Symbol]) -> List[DocstringReport]:
         warnings = _validate_symbol(symbol)
         if warnings:
             reports.append(DocstringReport(symbol_id=symbol.id, warnings=warnings))
+            logger.debug("Docstring warnings for %s: %s", symbol.id, warnings)
+    logger.info("Docstring validation completed (symbols=%d, warnings=%d)", len(symbols), len(reports))
     return reports
 
 
