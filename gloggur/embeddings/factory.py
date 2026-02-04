@@ -6,6 +6,7 @@ from gloggur.embeddings.local import LocalEmbeddingProvider
 
 
 def create_embedding_provider(config: GloggurConfig) -> EmbeddingProvider:
+    """Create an embedding provider based on configuration."""
     provider = config.embedding_provider
     if provider == "local":
         return LocalEmbeddingProvider(

@@ -13,6 +13,7 @@ from gloggur.parsers.base import ParsedFile, Parser
 
 @dataclass(frozen=True)
 class LanguageSpec:
+    """Tree-sitter node type configuration for a language."""
     name: str
     function_nodes: List[str]
     class_nodes: List[str]
@@ -61,7 +62,9 @@ _LANGUAGE_SPECS: Dict[str, LanguageSpec] = {
 
 
 class TreeSitterParser(Parser):
+    """Tree-sitter powered parser for supported languages."""
     def __init__(self, language: str) -> None:
+        """Initialize the parser for a specific language."""
         if language not in _LANGUAGE_SPECS:
             raise ValueError(f"Unsupported language: {language}")
         self.language = language
@@ -69,13 +72,16 @@ class TreeSitterParser(Parser):
         self.parser = get_parser(language)
 
     def parse_file(self, path: str, source: str) -> ParsedFile:
+        """Parse a file and return its symbols and metadata."""
         symbols = self.extract_symbols(path, source)
         return ParsedFile(path=path, language=self.language, source=source, symbols=symbols)
 
     def parse_with_edit(self, old_tree: Optional[Tree], new_source: str) -> Tree:
+        """Parse with incremental edit support if a previous tree is available."""
         return self.parser.parse(bytes(new_source, "utf8"), old_tree)
 
     def extract_symbols(self, path: str, source: str) -> List[Symbol]:
+        """Extract symbols from source using the tree-sitter AST."""
         tree = self.parser.parse(bytes(source, "utf8"))
         symbols: List[Symbol] = []
         for node in self._walk(tree.root_node):
@@ -87,9 +93,11 @@ class TreeSitterParser(Parser):
         return symbols
 
     def get_supported_languages(self) -> Iterable[str]:
+        """Return the single language supported by this parser."""
         return [self.language]
 
     def _symbol_from_node(self, node: Node, path: str, source: str) -> Optional[Symbol]:
+        """Convert a tree-sitter node into a Symbol if it matches."""
         kind = self._symbol_kind(node)
         if not kind:
             return None
@@ -115,6 +123,7 @@ class TreeSitterParser(Parser):
         )
 
     def _symbol_kind(self, node: Node) -> Optional[str]:
+        """Classify a node as function, class, or interface."""
         if node.type in self.spec.function_nodes:
             return "function"
         if node.type in self.spec.class_nodes:
@@ -124,17 +133,20 @@ class TreeSitterParser(Parser):
         return None
 
     def _extract_name(self, node: Node, source: str) -> Optional[str]:
+        """Extract the symbol name from a node."""
         for child in node.children:
             if child.type in {"identifier", "type_identifier", "name", "property_identifier"}:
                 return source[child.start_byte : child.end_byte]
         return None
 
     def _extract_signature(self, node: Node, source: str) -> Optional[str]:
+        """Extract the first-line signature for a symbol."""
         text = source[node.start_byte : node.end_byte]
         first_line = text.splitlines()[0] if text else ""
         return first_line.strip() or None
 
     def _extract_docstring(self, node: Node, source: str) -> Optional[str]:
+        """Extract a docstring or adjacent comment for a node."""
         if self.language == "python":
             body = None
             for child in node.named_children:
@@ -155,12 +167,14 @@ class TreeSitterParser(Parser):
         return None
 
     def _walk(self, node: Node) -> Iterable[Node]:
+        """Yield a depth-first traversal of the syntax tree."""
         yield node
         for child in node.children:
             yield from self._walk(child)
 
     @staticmethod
     def _strip_quotes(value: str) -> str:
+        """Strip surrounding quotes from a string literal."""
         if value.startswith(("'''", '"""')) and value.endswith(("'''", '"""')):
             return value[3:-3].strip()
         if value.startswith(("'", '"')) and value.endswith(("'", '"')):

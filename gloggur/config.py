@@ -10,6 +10,8 @@ import yaml
 
 @dataclass
 class GloggurConfig:
+    """Configuration for indexing, embeddings, and validation."""
+
     embedding_provider: str = "local"
     local_embedding_model: str = "microsoft/codebert-base"
     openai_embedding_model: str = "text-embedding-3-large"
@@ -41,6 +43,7 @@ class GloggurConfig:
         path: Optional[str] = None,
         overrides: Optional[Dict[str, object]] = None,
     ) -> "GloggurConfig":
+        """Load configuration from file/env with optional overrides."""
         data: Dict[str, object] = {}
         if path:
             data.update(cls._load_file(path))
@@ -56,6 +59,7 @@ class GloggurConfig:
 
     @staticmethod
     def _load_file(path: str) -> Dict[str, object]:
+        """Load configuration values from a JSON or YAML file."""
         with open(path, "r", encoding="utf8") as handle:
             if path.endswith((".yaml", ".yml")):
                 return yaml.safe_load(handle) or {}
@@ -63,6 +67,7 @@ class GloggurConfig:
 
     @staticmethod
     def _load_env() -> Dict[str, object]:
+        """Load configuration values from environment variables."""
         data: Dict[str, object] = {}
         if os.getenv("GLOGGUR_EMBEDDING_PROVIDER"):
             data["embedding_provider"] = os.getenv("GLOGGUR_EMBEDDING_PROVIDER")

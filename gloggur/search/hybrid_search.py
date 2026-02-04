@@ -11,17 +11,20 @@ from gloggur.storage.vector_store import VectorStore
 
 @dataclass
 class SearchResult:
+    """Search hit containing a symbol id and similarity score."""
     symbol_id: str
     similarity_score: float
 
 
 class HybridSearch:
+    """Hybrid search using embeddings and cached metadata."""
     def __init__(
         self,
         embedding_provider: EmbeddingProvider,
         vector_store: VectorStore,
         metadata_store: MetadataStore,
     ) -> None:
+        """Initialize search with embedding, vector, and metadata stores."""
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self.metadata_store = metadata_store
@@ -32,6 +35,7 @@ class HybridSearch:
         filters: Optional[Dict[str, str]] = None,
         top_k: int = 10,
     ) -> Dict[str, object]:
+        """Search for symbols matching the query and filters."""
         start = time.time()
         filters = filters or {}
         query_vector = self.embedding_provider.embed_text(query)
@@ -71,6 +75,7 @@ class HybridSearch:
 
     @staticmethod
     def _load_context(path: str, line: int, radius: int = 3) -> str:
+        """Load a small context window around a symbol."""
         try:
             with open(path, "r", encoding="utf8") as handle:
                 lines = handle.readlines()

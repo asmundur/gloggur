@@ -12,21 +12,26 @@ from gloggur.models import Symbol
 
 @dataclass
 class VectorStoreConfig:
+    """Configuration for the vector index store."""
     cache_dir: str
     index_name: str = "vectors.index"
     id_map_name: str = "vectors.json"
 
     @property
     def index_path(self) -> str:
+        """Return the path to the FAISS index."""
         return os.path.join(self.cache_dir, self.index_name)
 
     @property
     def id_map_path(self) -> str:
+        """Return the path to the id map JSON file."""
         return os.path.join(self.cache_dir, self.id_map_name)
 
 
 class VectorStore:
+    """Vector index backed by FAISS with a numpy fallback."""
     def __init__(self, config: VectorStoreConfig) -> None:
+        """Initialize the vector store and load existing data."""
         self.config = config
         self._index = None
         self._id_map: List[str] = []
@@ -37,6 +42,7 @@ class VectorStore:
         self.load()
 
     def add_vectors(self, symbols: Iterable[Symbol]) -> None:
+        """Add embedding vectors for new symbols."""
         vectors = []
         ids = []
         existing = set(self._id_map)
@@ -60,6 +66,7 @@ class VectorStore:
         self._persist_id_map()
 
     def search(self, query_vector: List[float], k: int) -> List[tuple[str, float]]:
+        """Return the k nearest symbols for a query vector."""
         if not self._id_map:
             return []
         if self._faiss_available and self._index is not None:
@@ -83,6 +90,7 @@ class VectorStore:
         return [(self._id_map[idx], float(distances[idx])) for idx in top_indices]
 
     def save(self) -> None:
+        """Persist the index and id map to disk."""
         self._persist_id_map()
         if self._faiss_available and self._index is not None:
             import faiss
@@ -94,6 +102,7 @@ class VectorStore:
         self._touch_index_placeholder()
 
     def load(self) -> None:
+        """Load index and id map from disk if present."""
         self._load_id_map()
         if self._faiss_available and os.path.exists(self.config.index_path):
             import faiss
@@ -108,6 +117,7 @@ class VectorStore:
             self._fallback_vectors = matrix.tolist() if matrix.size else []
 
     def clear(self) -> None:
+        """Remove all persisted vectors and metadata."""
         self._index = None
         self._id_map = []
         self._fallback_vectors = []
@@ -116,10 +126,12 @@ class VectorStore:
                 os.remove(path)
 
     def _persist_id_map(self) -> None:
+        """Write the id map to disk."""
         with open(self.config.id_map_path, "w", encoding="utf8") as handle:
             json.dump(self._id_map, handle)
 
     def _load_id_map(self) -> None:
+        """Read the id map from disk."""
         if not os.path.exists(self.config.id_map_path):
             self._id_map = []
             return
@@ -128,12 +140,14 @@ class VectorStore:
 
     @staticmethod
     def _create_index(dimension: int):
+        """Create a FAISS index for the given dimension."""
         import faiss
 
         return faiss.IndexFlatL2(dimension)
 
     @staticmethod
     def _check_faiss() -> bool:
+        """Return True if FAISS can be imported."""
         try:
             import faiss  # noqa: F401
         except Exception:
@@ -141,6 +155,7 @@ class VectorStore:
         return True
 
     def _touch_index_placeholder(self) -> None:
+        """Create a placeholder index file when FAISS is unavailable."""
         if os.path.exists(self.config.index_path):
             return
         try:

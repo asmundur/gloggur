@@ -7,10 +7,12 @@ from pydantic import BaseModel, Field
 
 
 def _utc_now() -> datetime:
+    """Return the current UTC time."""
     return datetime.now(timezone.utc)
 
 
 class Symbol(BaseModel):
+    """Symbol metadata extracted from source code."""
     id: str
     name: str
     kind: str
@@ -25,6 +27,7 @@ class Symbol(BaseModel):
 
 
 class FileMetadata(BaseModel):
+    """Per-file metadata stored in the index cache."""
     path: str
     language: Optional[str] = None
     content_hash: str
@@ -33,6 +36,7 @@ class FileMetadata(BaseModel):
 
 
 class IndexMetadata(BaseModel):
+    """Aggregate metadata for a completed index run."""
     version: str
     last_updated: datetime = Field(default_factory=_utc_now)
     total_symbols: int = 0
@@ -40,6 +44,7 @@ class IndexMetadata(BaseModel):
 
 
 class ValidationFileMetadata(BaseModel):
+    """Per-file metadata stored for validation runs."""
     path: str
     content_hash: str
     last_validated: datetime = Field(default_factory=_utc_now)

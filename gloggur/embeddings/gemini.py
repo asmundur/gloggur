@@ -7,7 +7,9 @@ from gloggur.embeddings.base import EmbeddingProvider
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
+    """Embedding provider that calls the Gemini embeddings API."""
     def __init__(self, model: str, api_key: str | None = None) -> None:
+        """Initialize the Gemini client and model selection."""
         self.model = model
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
@@ -20,12 +22,14 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         self._dimension: int | None = None
 
     def embed_text(self, text: str) -> List[float]:
+        """Embed a single text string."""
         vectors = self.embed_batch([text])
         if not vectors:
             raise RuntimeError("Gemini embeddings returned no vectors")
         return vectors[0]
 
     def embed_batch(self, texts: Iterable[str]) -> List[List[float]]:
+        """Embed a batch of text strings."""
         payload = list(texts)
         response = self._client.models.embed_content(model=self.model, contents=payload)
         vectors = self._extract_vectors(response)
@@ -34,12 +38,14 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return vectors
 
     def get_dimension(self) -> int:
+        """Return the embedding dimension (probe if unknown)."""
         if self._dimension is None:
             _ = self.embed_text("dimension probe")
         return self._dimension or 0
 
     @staticmethod
     def _extract_vectors(response: object) -> List[List[float]]:
+        """Extract embedding vectors from a Gemini response object."""
         embeddings = getattr(response, "embeddings", None) or getattr(response, "embedding", None)
         if embeddings is None and isinstance(response, dict):
             embeddings = response.get("embeddings") or response.get("embedding")

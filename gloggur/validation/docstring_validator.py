@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DocstringReport:
+    """Validation report for a single symbol."""
     symbol_id: str
     warnings: List[str]
     semantic_score: Optional[float] = None
@@ -27,6 +28,7 @@ def validate_docstrings(
     semantic_threshold: Optional[float] = 0.2,
     semantic_max_chars: int = 4000,
 ) -> List[DocstringReport]:
+    """Validate docstrings and optionally score semantic similarity."""
     semantic_scores = _compute_semantic_scores(
         symbols,
         code_texts=code_texts,
@@ -53,6 +55,7 @@ def _validate_symbol(
     semantic_score: Optional[float],
     semantic_threshold: Optional[float],
 ) -> List[str]:
+    """Return warnings for a symbol based on docstring content."""
     warnings: List[str] = []
     if symbol.kind not in {"function", "class", "interface"}:
         return warnings
@@ -75,6 +78,7 @@ def _compute_semantic_scores(
     embedding_provider: Optional[EmbeddingProvider],
     max_chars: int,
 ) -> Dict[str, float]:
+    """Compute docstring-to-code semantic similarity scores."""
     if not embedding_provider or not code_texts:
         return {}
     pairs: List[Tuple[str, str, str, Optional[str]]] = []
@@ -109,6 +113,7 @@ def _prepare_code_text(
     docstring: Optional[str],
     max_chars: int,
 ) -> str:
+    """Prepare code text for similarity scoring."""
     text = code_text
     if language == "python" and docstring:
         text = _strip_python_docstring(text)
@@ -119,6 +124,7 @@ def _prepare_code_text(
 
 
 def _strip_python_docstring(code_text: str) -> str:
+    """Remove the first Python docstring from a code snippet."""
     lines = code_text.splitlines()
     if len(lines) <= 1:
         return code_text
@@ -131,6 +137,7 @@ def _strip_python_docstring(code_text: str) -> str:
 
 
 def _cosine_similarity(vector_a: Iterable[float], vector_b: Iterable[float]) -> float:
+    """Compute cosine similarity between two vectors."""
     dot = 0.0
     norm_a = 0.0
     norm_b = 0.0

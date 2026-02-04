@@ -25,6 +25,7 @@ def cli() -> None:
 
 
 def _emit(payload: Dict[str, object], as_json: bool) -> None:
+    """Print payload as JSON or raw text."""
     if as_json:
         click.echo(json.dumps(payload, indent=2))
     else:
@@ -32,10 +33,12 @@ def _emit(payload: Dict[str, object], as_json: bool) -> None:
 
 
 def _load_config(config_path: Optional[str]) -> GloggurConfig:
+    """Load configuration from file/env."""
     return GloggurConfig.load(path=config_path)
 
 
 def _hash_content(source: str) -> str:
+    """Hash content to detect changes."""
     return hashlib.sha256(source.encode("utf8")).hexdigest()
 
 

@@ -16,6 +16,7 @@ from gloggur.storage.vector_store import VectorStore
 
 @dataclass
 class IndexResult:
+    """Summary of an indexing run."""
     indexed_files: int
     indexed_symbols: int
     skipped_files: int
@@ -23,6 +24,7 @@ class IndexResult:
 
 
 class Indexer:
+    """Incremental repository indexer."""
     def __init__(
         self,
         config: GloggurConfig,
@@ -31,6 +33,7 @@ class Indexer:
         embedding_provider: Optional[EmbeddingProvider] = None,
         vector_store: Optional[VectorStore] = None,
     ) -> None:
+        """Initialize the indexer with cache, parsers, and embeddings."""
         self.config = config
         self.cache = cache or CacheManager(CacheConfig(config.cache_dir))
         self.parser_registry = parser_registry or ParserRegistry()
@@ -38,6 +41,7 @@ class Indexer:
         self.vector_store = vector_store
 
     def index_repository(self, path: str) -> IndexResult:
+        """Index all supported files under a repository root."""
         start = time.time()
         indexed_files = 0
         indexed_symbols = 0
@@ -66,6 +70,7 @@ class Indexer:
         )
 
     def index_file(self, path: str) -> Optional[int]:
+        """Index a single file if it has changed."""
         try:
             with open(path, "r", encoding="utf8") as handle:
                 source = handle.read()
@@ -95,6 +100,7 @@ class Indexer:
         return len(symbols)
 
     def _iter_source_files(self, root: str) -> Iterable[str]:
+        """Yield supported source files under a root directory."""
         excludes = set(self.config.excluded_dirs)
         for current_root, dirs, files in os.walk(root):
             dirs[:] = [d for d in dirs if d not in excludes]
@@ -104,12 +110,14 @@ class Indexer:
                     yield full_path
 
     def _is_supported_file(self, path: str) -> bool:
+        """Return whether a file path has a supported extension."""
         for ext in self.config.supported_extensions:
             if path.endswith(ext):
                 return True
         return False
 
     def _apply_embeddings(self, symbols: List[Symbol], source: str) -> List[Symbol]:
+        """Attach embeddings to symbols when a provider is available."""
         if not self.embedding_provider:
             return symbols
         lines = source.splitlines()
@@ -123,10 +131,12 @@ class Indexer:
 
     @staticmethod
     def _hash_content(source: str) -> str:
+        """Hash file contents for change detection."""
         return hashlib.sha256(source.encode("utf8")).hexdigest()
 
     @staticmethod
     def _symbol_text(symbol: Symbol, lines: List[str]) -> str:
+        """Build a short text representation for embedding."""
         snippet_start = max(0, symbol.start_line - 1)
         snippet_end = min(len(lines), snippet_start + 3)
         snippet = "\n".join(lines[snippet_start:snippet_end]).strip()
