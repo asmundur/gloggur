@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Iterator, List, Optional
 
-from gloggur.models import FileMetadata, IndexMetadata, Symbol
+from gloggur.models import FileMetadata, IndexMetadata, Symbol, ValidationFileMetadata
 
 
 @dataclass
@@ -69,6 +69,11 @@ class CacheManager:
                 CREATE TABLE IF NOT EXISTS validations (
                     symbol_id TEXT PRIMARY KEY,
                     warnings TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS validation_files (
+                    path TEXT PRIMARY KEY,
+                    content_hash TEXT NOT NULL,
+                    last_validated TEXT NOT NULL
                 );
                 """
             )
@@ -197,11 +202,42 @@ class CacheManager:
                 return []
             return json.loads(row["warnings"])
 
+    def get_validation_file_metadata(self, path: str) -> Optional[ValidationFileMetadata]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM validation_files WHERE path = ?", (path,)
+            ).fetchone()
+            if not row:
+                return None
+            return ValidationFileMetadata(
+                path=row["path"],
+                content_hash=row["content_hash"],
+                last_validated=datetime.fromisoformat(row["last_validated"]),
+            )
+
+    def upsert_validation_file_metadata(self, metadata: ValidationFileMetadata) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO validation_files (path, content_hash, last_validated)
+                VALUES (?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    last_validated = excluded.last_validated
+                """,
+                (
+                    metadata.path,
+                    metadata.content_hash,
+                    metadata.last_validated.isoformat(),
+                ),
+            )
+
     def clear(self) -> None:
         with self._connect() as conn:
             conn.executescript(
                 """
                 DELETE FROM validations;
+                DELETE FROM validation_files;
                 DELETE FROM symbols;
                 DELETE FROM files;
                 DELETE FROM metadata;

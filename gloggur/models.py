@@ -37,3 +37,9 @@ class IndexMetadata(BaseModel):
     last_updated: datetime = Field(default_factory=_utc_now)
     total_symbols: int = 0
     indexed_files: int = 0
+
+
+class ValidationFileMetadata(BaseModel):
+    path: str
+    content_hash: str
+    last_validated: datetime = Field(default_factory=_utc_now)

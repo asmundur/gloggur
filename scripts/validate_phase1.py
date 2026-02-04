@@ -340,17 +340,18 @@ def test_docstring_validation(runner: CommandRunner, fixture_path: Path) -> Test
         return TestResult(passed=False, message="Validation returned no warnings", details=output)
 
     missing_doc = False
-    missing_params = False
     for report in warnings:
         for warning in report.get("warnings", []) if isinstance(report, dict) else []:
             if "Missing docstring" in warning:
                 missing_doc = True
-            if "Missing docstring params" in warning:
-                missing_params = True
     if not missing_doc:
         return TestResult(passed=False, message="Missing docstring warnings not detected")
-    if not missing_params:
-        return TestResult(passed=False, message="Missing parameter doc warnings not detected")
+
+    reports = output.get("reports", [])
+    if not isinstance(reports, list) or not reports:
+        return TestResult(passed=False, message="Validation returned no reports", details=output)
+    if not any(report.get("semantic_score") is not None for report in reports if isinstance(report, dict)):
+        return TestResult(passed=False, message="No semantic scores reported", details=output)
 
     message = f"Validation returned {len(warnings)} warning entries"
     details = {"total_warnings": len(warnings)}

@@ -20,6 +20,7 @@ This repository ships Gloggur, a symbol-level indexer intended for coding agents
    ```bash
    gloggur validate . --json
    ```
+   Validation skips unchanged files by default; add `--force` to revalidate everything.
 
 ## Tips for effective searches
 

@@ -8,7 +8,7 @@ Gloggur is a symbol-level, incremental codebase indexer for semantic search and 
 - Incremental indexing with SHA-256 hashing
 - Pluggable embedding backends (local models or OpenAI)
 - FAISS vector search with SQLite metadata
-- Docstring validation
+- Docstring validation with semantic similarity scoring
 - JSON output for CLI automation
 
 ## Installation
@@ -53,11 +53,13 @@ Stream results as line-delimited JSON:
 gloggur search "streaming parser" --top-k 50 --json --stream
 ```
 
-Validate docstrings:
+Validate docstrings (semantic similarity scoring):
 
 ```bash
 gloggur validate . --json
 ```
+
+`gloggur validate` skips unchanged files by default. Use `--force` to revalidate everything.
 
 Check status:
 
@@ -98,6 +100,8 @@ local_embedding_model: microsoft/codebert-base
 openai_embedding_model: text-embedding-3-large
 gemini_embedding_model: gemini-embedding-001
 cache_dir: .gloggur-cache
+docstring_semantic_threshold: 0.2
+docstring_semantic_max_chars: 4000
 supported_extensions:
   - .py
   - .ts

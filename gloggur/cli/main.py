@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import click
 
@@ -10,6 +11,7 @@ from gloggur.config import GloggurConfig
 from gloggur.embeddings.factory import create_embedding_provider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.indexer import Indexer
+from gloggur.models import ValidationFileMetadata
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
@@ -31,6 +33,10 @@ def _emit(payload: Dict[str, object], as_json: bool) -> None:
 
 def _load_config(config_path: Optional[str]) -> GloggurConfig:
     return GloggurConfig.load(path=config_path)
+
+
+def _hash_content(source: str) -> str:
+    return hashlib.sha256(source.encode("utf8")).hexdigest()
 
 
 @cli.command()
@@ -112,12 +118,18 @@ def search(
 @click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
-def validate(path: str, config_path: Optional[str], as_json: bool) -> None:
+@click.option("--force", is_flag=True, default=False, help="Revalidate even if unchanged since last run.")
+def validate(path: str, config_path: Optional[str], as_json: bool, force: bool) -> None:
     """Run docstring validation."""
     config = _load_config(config_path)
     cache = CacheManager(CacheConfig(config.cache_dir))
     parser_registry = ParserRegistry()
+    embedding = create_embedding_provider(config) if config.embedding_provider else None
     symbols = []
+    code_texts: Dict[str, str] = {}
+    processed_files: List[Tuple[str, str]] = []
+    skipped_files = 0
+    validated_files = 0
     paths = [path]
     if os.path.isdir(path):
         paths = []
@@ -133,17 +145,46 @@ def validate(path: str, config_path: Optional[str], as_json: bool) -> None:
                 source = handle.read()
         except (OSError, UnicodeDecodeError):
             continue
+        content_hash = _hash_content(source)
+        if not force:
+            existing = cache.get_validation_file_metadata(file_path)
+            if existing and existing.content_hash == content_hash:
+                skipped_files += 1
+                continue
         parser_entry = parser_registry.get_parser_for_path(file_path)
         if not parser_entry:
             continue
-        symbols.extend(parser_entry.parser.extract_symbols(file_path, source))
-    reports = validate_docstrings(symbols)
+        file_symbols = parser_entry.parser.extract_symbols(file_path, source)
+        lines = source.splitlines()
+        for symbol in file_symbols:
+            snippet_start = max(0, symbol.start_line - 1)
+            snippet_end = min(len(lines), symbol.end_line)
+            code_texts[symbol.id] = "\n".join(lines[snippet_start:snippet_end])
+        symbols.extend(file_symbols)
+        processed_files.append((file_path, content_hash))
+        validated_files += 1
+    reports = validate_docstrings(
+        symbols,
+        code_texts=code_texts,
+        embedding_provider=embedding,
+        semantic_threshold=config.docstring_semantic_threshold,
+        semantic_max_chars=config.docstring_semantic_max_chars,
+    )
     for report in reports:
         cache.set_validation_warnings(report.symbol_id, report.warnings)
+    for file_path, content_hash in processed_files:
+        cache.upsert_validation_file_metadata(
+            ValidationFileMetadata(path=file_path, content_hash=content_hash)
+        )
+    warning_reports = [report for report in reports if report.warnings]
     payload = {
         "path": path,
-        "warnings": [report.__dict__ for report in reports],
-        "total": len(reports),
+        "warnings": [report.__dict__ for report in warning_reports],
+        "total": len(warning_reports),
+        "reports": [report.__dict__ for report in reports],
+        "reports_total": len(reports),
+        "validated_files": validated_files,
+        "skipped_files": skipped_files,
     }
     _emit(payload, as_json)
 
