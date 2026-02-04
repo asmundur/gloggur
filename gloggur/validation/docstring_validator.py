@@ -26,6 +26,7 @@ def validate_docstrings(
     code_texts: Optional[Dict[str, str]] = None,
     embedding_provider: Optional[EmbeddingProvider] = None,
     semantic_threshold: Optional[float] = 0.2,
+    semantic_min_chars: int = 0,
     semantic_max_chars: int = 4000,
 ) -> List[DocstringReport]:
     """Validate docstrings and optionally score semantic similarity."""
@@ -33,6 +34,7 @@ def validate_docstrings(
         symbols,
         code_texts=code_texts,
         embedding_provider=embedding_provider,
+        min_chars=semantic_min_chars,
         max_chars=semantic_max_chars,
     )
     reports: List[DocstringReport] = []
@@ -76,6 +78,7 @@ def _compute_semantic_scores(
     *,
     code_texts: Optional[Dict[str, str]],
     embedding_provider: Optional[EmbeddingProvider],
+    min_chars: int,
     max_chars: int,
 ) -> Dict[str, float]:
     """Compute docstring-to-code semantic similarity scores."""
@@ -85,11 +88,15 @@ def _compute_semantic_scores(
     for symbol in symbols:
         if not symbol.docstring:
             continue
+        if min_chars > 0 and len(symbol.docstring.strip()) < min_chars:
+            continue
         code_text = code_texts.get(symbol.id)
         if not code_text:
             continue
         cleaned = _prepare_code_text(code_text, symbol.language, symbol.docstring, max_chars)
         if not cleaned:
+            continue
+        if min_chars > 0 and len(cleaned.strip()) < min_chars:
             continue
         pairs.append((symbol.id, symbol.docstring, cleaned, symbol.language))
     if not pairs:

@@ -171,6 +171,7 @@ def validate(path: str, config_path: Optional[str], as_json: bool, force: bool) 
         code_texts=code_texts,
         embedding_provider=embedding,
         semantic_threshold=config.docstring_semantic_threshold,
+        semantic_min_chars=config.docstring_semantic_min_chars,
         semantic_max_chars=config.docstring_semantic_max_chars,
     )
     for report in reports:

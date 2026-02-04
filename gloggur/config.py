@@ -20,6 +20,7 @@ class GloggurConfig:
     cache_dir: str = ".gloggur-cache"
     model_cache_dir: Optional[str] = None
     docstring_semantic_threshold: float = 0.2
+    docstring_semantic_min_chars: int = 40
     docstring_semantic_max_chars: int = 4000
     supported_extensions: List[str] = field(
         default_factory=lambda: [".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java"]
@@ -33,6 +34,7 @@ class GloggurConfig:
             ".gloggur-cache",
             "dist",
             "build",
+            "htmlcov",
         ]
     )
     index_version: str = "1"
@@ -79,6 +81,13 @@ class GloggurConfig:
             data["gemini_embedding_model"] = os.getenv("GLOGGUR_GEMINI_MODEL")
         if os.getenv("GLOGGUR_GEMINI_API_KEY"):
             data["gemini_api_key"] = os.getenv("GLOGGUR_GEMINI_API_KEY")
+        if os.getenv("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS"):
+            try:
+                data["docstring_semantic_min_chars"] = int(
+                    os.getenv("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS", "0")
+                )
+            except ValueError:
+                pass
         if os.getenv("GLOGGUR_CACHE_DIR"):
             data["cache_dir"] = os.getenv("GLOGGUR_CACHE_DIR")
         return data

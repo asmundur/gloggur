@@ -78,6 +78,7 @@ def test_validation_flags_low_semantic_similarity() -> None:
         code_texts=code_texts,
         embedding_provider=FakeEmbeddingProvider(),
         semantic_threshold=0.5,
+        semantic_min_chars=0,
     )
     assert len(reports) == 1
     warnings = reports[0].warnings
