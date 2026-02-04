@@ -16,7 +16,7 @@ from gloggur.storage.vector_store import VectorStore
 
 @dataclass
 class IndexResult:
-    """Summary of an indexing run."""
+    """Summary of an indexing run (files, symbols, skipped, duration)."""
     indexed_files: int
     indexed_symbols: int
     skipped_files: int
@@ -24,7 +24,7 @@ class IndexResult:
 
 
 class Indexer:
-    """Incremental repository indexer."""
+    """Incremental repository indexer that hashes files and stores symbols."""
     def __init__(
         self,
         config: GloggurConfig,
@@ -117,7 +117,7 @@ class Indexer:
         return False
 
     def _apply_embeddings(self, symbols: List[Symbol], source: str) -> List[Symbol]:
-        """Attach embeddings to symbols when a provider is available."""
+        """Attach embedding vectors to symbols when a provider is available."""
         if not self.embedding_provider:
             return symbols
         lines = source.splitlines()
@@ -136,7 +136,7 @@ class Indexer:
 
     @staticmethod
     def _symbol_text(symbol: Symbol, lines: List[str]) -> str:
-        """Build a short text representation for embedding."""
+        """Build embedding text from signature, docstring, and code snippet."""
         snippet_start = max(0, symbol.start_line - 1)
         snippet_end = min(len(lines), snippet_start + 3)
         snippet = "\n".join(lines[snippet_start:snippet_end]).strip()

@@ -17,7 +17,7 @@ class SearchResult:
 
 
 class HybridSearch:
-    """Hybrid search using embeddings and cached metadata."""
+    """Hybrid search using embeddings, vector store, and metadata store."""
     def __init__(
         self,
         embedding_provider: EmbeddingProvider,

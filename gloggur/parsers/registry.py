@@ -8,7 +8,7 @@ from gloggur.parsers.treesitter_parser import TreeSitterParser
 
 @dataclass(frozen=True)
 class ParserEntry:
-    """Pairing of parser and language label."""
+    """Parser entry: tree-sitter parser and language label."""
     parser: TreeSitterParser
     language: str
 
@@ -26,13 +26,13 @@ _EXTENSION_MAP: Dict[str, str] = {
 
 
 class ParserRegistry:
-    """Registry for mapping file extensions to parsers."""
+    """Registry that maps file extensions to tree-sitter parsers."""
     def __init__(self) -> None:
         """Initialize an empty parser cache."""
         self._parsers: Dict[str, TreeSitterParser] = {}
 
     def get_parser_for_path(self, path: str) -> Optional[ParserEntry]:
-        """Return a parser entry based on the file extension."""
+        """Return a parser entry for a file path extension."""
         for ext, language in _EXTENSION_MAP.items():
             if path.endswith(ext):
                 if language not in self._parsers:

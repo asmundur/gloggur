@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DocstringReport:
-    """Validation report for a single symbol."""
+    """Validation report for a single symbol (warnings and score)."""
     symbol_id: str
     warnings: List[str]
     semantic_score: Optional[float] = None
@@ -29,7 +29,7 @@ def validate_docstrings(
     semantic_min_chars: int = 0,
     semantic_max_chars: int = 4000,
 ) -> List[DocstringReport]:
-    """Validate docstrings and optionally score semantic similarity."""
+    """Validate docstrings and compute semantic similarity scores."""
     semantic_scores = _compute_semantic_scores(
         symbols,
         code_texts=code_texts,
@@ -81,7 +81,7 @@ def _compute_semantic_scores(
     min_chars: int,
     max_chars: int,
 ) -> Dict[str, float]:
-    """Compute docstring-to-code semantic similarity scores."""
+    """Compute docstring-to-code semantic similarity scores via embeddings."""
     if not embedding_provider or not code_texts:
         return {}
     pairs: List[Tuple[str, str, str, Optional[str]]] = []
@@ -120,7 +120,7 @@ def _prepare_code_text(
     docstring: Optional[str],
     max_chars: int,
 ) -> str:
-    """Prepare code text for similarity scoring."""
+    """Prepare code text for similarity scoring (strip docstring, trim)."""
     text = code_text
     if language == "python" and docstring:
         text = _strip_python_docstring(text)

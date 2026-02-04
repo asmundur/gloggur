@@ -13,7 +13,7 @@ from gloggur.parsers.base import ParsedFile, Parser
 
 @dataclass(frozen=True)
 class LanguageSpec:
-    """Tree-sitter node type configuration for a language."""
+    """Tree-sitter node type configuration for functions/classes/interfaces."""
     name: str
     function_nodes: List[str]
     class_nodes: List[str]
@@ -62,9 +62,9 @@ _LANGUAGE_SPECS: Dict[str, LanguageSpec] = {
 
 
 class TreeSitterParser(Parser):
-    """Tree-sitter powered parser for supported languages."""
+    """Tree-sitter parser that extracts Symbol objects from source code."""
     def __init__(self, language: str) -> None:
-        """Initialize the parser for a specific language."""
+        """Initialize a tree-sitter parser for the given language."""
         if language not in _LANGUAGE_SPECS:
             raise ValueError(f"Unsupported language: {language}")
         self.language = language
@@ -72,16 +72,16 @@ class TreeSitterParser(Parser):
         self.parser = get_parser(language)
 
     def parse_file(self, path: str, source: str) -> ParsedFile:
-        """Parse a file and return its symbols and metadata."""
+        """Parse a file and return ParsedFile with extracted symbols."""
         symbols = self.extract_symbols(path, source)
         return ParsedFile(path=path, language=self.language, source=source, symbols=symbols)
 
     def parse_with_edit(self, old_tree: Optional[Tree], new_source: str) -> Tree:
-        """Parse with incremental edit support if a previous tree is available."""
+        """Parse source with optional incremental edit support."""
         return self.parser.parse(bytes(new_source, "utf8"), old_tree)
 
     def extract_symbols(self, path: str, source: str) -> List[Symbol]:
-        """Extract symbols from source using the tree-sitter AST."""
+        """Extract function/class/interface symbols from the AST."""
         tree = self.parser.parse(bytes(source, "utf8"))
         symbols: List[Symbol] = []
         for node in self._walk(tree.root_node):
@@ -97,7 +97,7 @@ class TreeSitterParser(Parser):
         return [self.language]
 
     def _symbol_from_node(self, node: Node, path: str, source: str) -> Optional[Symbol]:
-        """Convert a tree-sitter node into a Symbol if it matches."""
+        """Convert a matching AST node into a Symbol with metadata."""
         kind = self._symbol_kind(node)
         if not kind:
             return None
@@ -146,7 +146,7 @@ class TreeSitterParser(Parser):
         return first_line.strip() or None
 
     def _extract_docstring(self, node: Node, source: str) -> Optional[str]:
-        """Extract a docstring or adjacent comment for a node."""
+        """Extract a docstring or nearby comment for a symbol."""
         if self.language == "python":
             body = None
             for child in node.named_children:

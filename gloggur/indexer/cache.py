@@ -13,7 +13,7 @@ from gloggur.models import FileMetadata, IndexMetadata, Symbol, ValidationFileMe
 
 @dataclass
 class CacheConfig:
-    """Configuration for the on-disk cache."""
+    """Configuration for the on-disk cache (cache dir and db path)."""
     cache_dir: str
 
     @property

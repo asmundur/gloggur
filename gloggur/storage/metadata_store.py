@@ -11,7 +11,7 @@ from gloggur.models import Symbol
 
 @dataclass
 class MetadataStoreConfig:
-    """Configuration for the metadata store."""
+    """Configuration for the metadata store (SQLite db path)."""
     cache_dir: str
 
     @property
@@ -21,13 +21,13 @@ class MetadataStoreConfig:
 
 
 class MetadataStore:
-    """Read-only access to indexed symbol metadata."""
+    """Read-only access to indexed symbol metadata in SQLite."""
     def __init__(self, config: MetadataStoreConfig) -> None:
         """Initialize the metadata store."""
         self.config = config
 
     def get_symbol(self, symbol_id: str) -> Optional[Symbol]:
-        """Fetch a symbol by its id."""
+        """Fetch a symbol by its id from the symbols table."""
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM symbols WHERE id = ?", (symbol_id,)).fetchone()
             if not row:
@@ -80,7 +80,7 @@ class MetadataStore:
 
     @staticmethod
     def _row_to_symbol(row: sqlite3.Row) -> Symbol:
-        """Convert a database row into a Symbol."""
+        """Convert a symbols table row into a Symbol."""
         import json
 
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None

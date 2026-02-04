@@ -10,7 +10,7 @@ import yaml
 
 @dataclass
 class GloggurConfig:
-    """Configuration for indexing, embeddings, and validation."""
+    """Configuration for indexing, embeddings, and docstring validation."""
 
     embedding_provider: str = "local"
     local_embedding_model: str = "microsoft/codebert-base"
@@ -20,7 +20,7 @@ class GloggurConfig:
     cache_dir: str = ".gloggur-cache"
     model_cache_dir: Optional[str] = None
     docstring_semantic_threshold: float = 0.2
-    docstring_semantic_min_chars: int = 40
+    docstring_semantic_min_chars: int = 0
     docstring_semantic_max_chars: int = 4000
     supported_extensions: List[str] = field(
         default_factory=lambda: [".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java"]
@@ -45,7 +45,7 @@ class GloggurConfig:
         path: Optional[str] = None,
         overrides: Optional[Dict[str, object]] = None,
     ) -> "GloggurConfig":
-        """Load configuration from file/env with optional overrides."""
+        """Load config from file/env (yaml/json) and apply overrides."""
         data: Dict[str, object] = {}
         if path:
             data.update(cls._load_file(path))
@@ -61,7 +61,7 @@ class GloggurConfig:
 
     @staticmethod
     def _load_file(path: str) -> Dict[str, object]:
-        """Load configuration values from a JSON or YAML file."""
+        """Load config values from a JSON or YAML file path."""
         with open(path, "r", encoding="utf8") as handle:
             if path.endswith((".yaml", ".yml")):
                 return yaml.safe_load(handle) or {}
@@ -69,7 +69,7 @@ class GloggurConfig:
 
     @staticmethod
     def _load_env() -> Dict[str, object]:
-        """Load configuration values from environment variables."""
+        """Load config values from GLOGGUR_* environment variables."""
         data: Dict[str, object] = {}
         if os.getenv("GLOGGUR_EMBEDDING_PROVIDER"):
             data["embedding_provider"] = os.getenv("GLOGGUR_EMBEDDING_PROVIDER")

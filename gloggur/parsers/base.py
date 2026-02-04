@@ -9,7 +9,7 @@ from gloggur.models import Symbol
 
 @dataclass
 class ParsedFile:
-    """Parsed file data returned by a parser."""
+    """Parsed file data: path, language, source, extracted symbols."""
     path: str
     language: Optional[str]
     source: str

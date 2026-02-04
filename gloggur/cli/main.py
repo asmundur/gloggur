@@ -21,7 +21,7 @@ from gloggur.validation.docstring_validator import validate_docstrings
 
 @click.group()
 def cli() -> None:
-    """Gloggur: symbol-level, incremental codebase indexer."""
+    """Gloggur CLI for indexing, search, and docstring validation."""
 
 
 def _emit(payload: Dict[str, object], as_json: bool) -> None:
@@ -48,7 +48,7 @@ def _hash_content(source: str) -> str:
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--embedding-provider", type=str, default=None)
 def index(path: str, config_path: Optional[str], as_json: bool, embedding_provider: Optional[str]) -> None:
-    """Index a repository or file."""
+    """Index a repository or file and emit counts."""
     overrides = {}
     if embedding_provider:
         overrides["embedding_provider"] = embedding_provider
@@ -98,7 +98,7 @@ def search(
     top_k: int,
     stream: bool,
 ) -> None:
-    """Search for code patterns with filters."""
+    """Search indexed symbols with optional filters."""
     config = _load_config(config_path)
     embedding = create_embedding_provider(config)
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
@@ -123,7 +123,7 @@ def search(
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--force", is_flag=True, default=False, help="Revalidate even if unchanged since last run.")
 def validate(path: str, config_path: Optional[str], as_json: bool, force: bool) -> None:
-    """Run docstring validation."""
+    """Run docstring validation and emit warnings/reports."""
     config = _load_config(config_path)
     cache = CacheManager(CacheConfig(config.cache_dir))
     parser_registry = ParserRegistry()

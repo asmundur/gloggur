@@ -12,7 +12,7 @@ from gloggur.models import Symbol
 
 @dataclass
 class VectorStoreConfig:
-    """Configuration for the vector index store."""
+    """Configuration for the vector index store (FAISS and fallback paths)."""
     cache_dir: str
     index_name: str = "vectors.index"
     id_map_name: str = "vectors.json"
@@ -42,7 +42,7 @@ class VectorStore:
         self.load()
 
     def add_vectors(self, symbols: Iterable[Symbol]) -> None:
-        """Add embedding vectors for new symbols."""
+        """Add Symbol.embedding_vector values to FAISS or numpy fallback."""
         vectors = []
         ids = []
         existing = set(self._id_map)
@@ -66,7 +66,7 @@ class VectorStore:
         self._persist_id_map()
 
     def search(self, query_vector: List[float], k: int) -> List[tuple[str, float]]:
-        """Return the k nearest symbols for a query vector."""
+        """Return k nearest symbol ids for a query vector."""
         if not self._id_map:
             return []
         if self._faiss_available and self._index is not None:
@@ -90,7 +90,7 @@ class VectorStore:
         return [(self._id_map[idx], float(distances[idx])) for idx in top_indices]
 
     def save(self) -> None:
-        """Persist the index and id map to disk."""
+        """Persist the FAISS index and id map to disk."""
         self._persist_id_map()
         if self._faiss_available and self._index is not None:
             import faiss
@@ -102,7 +102,7 @@ class VectorStore:
         self._touch_index_placeholder()
 
     def load(self) -> None:
-        """Load index and id map from disk if present."""
+        """Load FAISS index and id map from disk if present."""
         self._load_id_map()
         if self._faiss_available and os.path.exists(self.config.index_path):
             import faiss
@@ -117,7 +117,7 @@ class VectorStore:
             self._fallback_vectors = matrix.tolist() if matrix.size else []
 
     def clear(self) -> None:
-        """Remove all persisted vectors and metadata."""
+        """Remove all persisted vectors and metadata files."""
         self._index = None
         self._id_map = []
         self._fallback_vectors = []
