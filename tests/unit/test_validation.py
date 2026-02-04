@@ -13,6 +13,7 @@ def _symbol(
     signature: str | None = None,
     docstring: str | None = None,
 ) -> Symbol:
+    """Create a sample Symbol for validation tests."""
     return Symbol(
         id=symbol_id,
         name=name,
@@ -28,7 +29,9 @@ def _symbol(
 
 
 class FakeEmbeddingProvider(EmbeddingProvider):
+    """Fake embedding provider for semantic similarity tests."""
     def embed_text(self, text: str) -> list[float]:
+        """Return a deterministic embedding vector based on text."""
         lowered = text.lower()
         if "file" in lowered:
             return [1.0, 0.0]
@@ -37,13 +40,16 @@ class FakeEmbeddingProvider(EmbeddingProvider):
         return [0.0, 0.0]
 
     def embed_batch(self, texts):
+        """Batch embed by delegating to embed_text."""
         return [self.embed_text(text) for text in texts]
 
     def get_dimension(self) -> int:
+        """Return the fake embedding dimension."""
         return 2
 
 
 def test_validation_reports_missing_docstring() -> None:
+    """Missing docstrings should emit warnings."""
     symbol = _symbol(symbol_id="s1", name="add", signature="def add(a, b):", docstring=None)
     reports = validate_docstrings([symbol])
     assert len(reports) == 1
@@ -51,6 +57,7 @@ def test_validation_reports_missing_docstring() -> None:
 
 
 def test_validation_includes_private_symbols() -> None:
+    """Private symbols are still validated for docstrings."""
     symbol = _symbol(symbol_id="s2", name="_internal", signature="def _internal():", docstring=None)
     reports = validate_docstrings([symbol])
     assert len(reports) == 1
@@ -58,6 +65,7 @@ def test_validation_includes_private_symbols() -> None:
 
 
 def test_validation_flags_low_semantic_similarity() -> None:
+    """Low semantic similarity should be flagged."""
     symbol = _symbol(
         symbol_id="s3",
         name="compute",

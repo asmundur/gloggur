@@ -19,12 +19,14 @@ pytest.importorskip("faiss")
 
 
 def _write_fallback_marker(cache_dir: str) -> None:
+    """Create the local embedding fallback marker file."""
     marker = Path(cache_dir) / ".local_embedding_fallback"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch(exist_ok=True)
 
 
 def test_hybrid_search_returns_ranked_results() -> None:
+    """Hybrid search should return ranked results with scores."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
