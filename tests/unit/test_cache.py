@@ -7,6 +7,7 @@ from gloggur.models import IndexMetadata, Symbol
 
 
 def _sample_symbol(symbol_id: str = "sample:1:add") -> Symbol:
+    """Create a sample symbol for cache tests."""
     return Symbol(
         id=symbol_id,
         name="add",
@@ -23,6 +24,7 @@ def _sample_symbol(symbol_id: str = "sample:1:add") -> Symbol:
 
 
 def test_cache_round_trip_symbols_metadata_and_warnings() -> None:
+    """Ensure cache round-trips symbols, metadata, and warnings."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     cache = CacheManager(CacheConfig(cache_dir))
 
@@ -45,6 +47,7 @@ def test_cache_round_trip_symbols_metadata_and_warnings() -> None:
 
 
 def test_cache_clear_removes_entries() -> None:
+    """Ensure cache clear removes all entries."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     cache = CacheManager(CacheConfig(cache_dir))
     cache.upsert_symbols([_sample_symbol()])

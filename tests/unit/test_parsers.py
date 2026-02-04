@@ -6,6 +6,7 @@ from scripts.validation.fixtures import TestFixtures
 
 
 def test_parser_registry_supports_known_extensions() -> None:
+    """Parser registry should resolve known extensions."""
     registry = ParserRegistry()
     extensions = registry.supported_extensions()
     assert extensions == EXTENSION_LANGUAGE
@@ -16,6 +17,7 @@ def test_parser_registry_supports_known_extensions() -> None:
 
 
 def test_treesitter_parser_extracts_python_symbols() -> None:
+    """Tree-sitter parser should extract Python symbols."""
     source = TestFixtures.create_sample_python_file()
     parser = TreeSitterParser("python")
     symbols = parser.extract_symbols("sample.py", source)
@@ -36,6 +38,7 @@ def test_treesitter_parser_extracts_python_symbols() -> None:
 
 
 def test_parse_file_returns_parsed_file() -> None:
+    """parse_file should return a ParsedFile with symbols."""
     source = TestFixtures.create_sample_python_file()
     parser = TreeSitterParser("python")
     parsed = parser.parse_file("sample.py", source)

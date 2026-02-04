@@ -27,23 +27,27 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Phase1Result:
+    """Result wrapper for phase 1 tests."""
     name: str
     result: TestResult
 
 
 def _format_duration(duration_ms: float | int) -> str:
+    """Format a duration in milliseconds."""
     if duration_ms >= 1000:
         return f"{duration_ms / 1000:.2f}s"
     return f"{int(duration_ms)}ms"
 
 
 def _count_symbols(db_path: str) -> int:
+    """Count symbols in the index database."""
     with sqlite3.connect(db_path) as conn:
         row = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()
         return int(row[0]) if row else 0
 
 
 def _load_baseline_payload(path: Optional[str]) -> Optional[Dict[str, object]]:
+    """Load a baseline JSON payload from disk."""
     if not path:
         return None
     baseline_path = Path(path)
@@ -56,6 +60,7 @@ def _load_baseline_payload(path: Optional[str]) -> Optional[Dict[str, object]]:
 
 
 def _env_float(name: str, default: Optional[float] = None) -> Optional[float]:
+    """Read a float from an environment variable."""
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -66,6 +71,7 @@ def _env_float(name: str, default: Optional[float] = None) -> Optional[float]:
 
 
 def _validate_required_fields(results: List[Dict[str, object]]) -> Optional[str]:
+    """Validate search results contain required fields."""
     required = {"symbol", "kind", "file", "line", "signature", "similarity_score"}
     for idx, item in enumerate(results):
         missing = [field for field in required if field not in item]
@@ -75,6 +81,7 @@ def _validate_required_fields(results: List[Dict[str, object]]) -> Optional[str]
 
 
 def _create_search_fixture() -> Tuple[Path, Path, str]:
+    """Create a temporary file for search tests."""
     fixture_dir = Path(tempfile.mkdtemp(prefix="gloggur-search-"))
     fixture_file = fixture_dir / "search_fixture.py"
     content = textwrap.dedent(
@@ -96,6 +103,7 @@ def _create_search_fixture() -> Tuple[Path, Path, str]:
 
 
 def test_basic_indexing(runner: CommandRunner, cache_dir: str) -> Tuple[TestResult, Dict[str, object]]:
+    """Smoke test for indexing a repository."""
     try:
         output = runner.run_index(".", timeout=300.0)
     except Exception as exc:
@@ -144,6 +152,7 @@ def test_incremental_indexing(
     first_run: Optional[Dict[str, object]],
     target_file: Path,
 ) -> TestResult:
+    """Smoke test for incremental indexing behavior."""
     try:
         baseline = first_run or runner.run_index(".", timeout=300.0)
         second_run = runner.run_index(".", timeout=300.0)
@@ -209,6 +218,7 @@ def test_incremental_indexing(
 
 
 def test_search_functionality(runner: CommandRunner, target_file: Path, cache_dir: str) -> TestResult:
+    """Smoke test for search filters and scores."""
     try:
         output = runner.run_search("index repository", top_k=5)
     except Exception as exc:
@@ -300,6 +310,7 @@ def test_search_functionality(runner: CommandRunner, target_file: Path, cache_di
 
 
 def _create_docstring_fixture(path: Path) -> None:
+    """Create a fixture file with missing docstrings."""
     path.parent.mkdir(parents=True, exist_ok=True)
     content = (
         "\n".join(
@@ -326,6 +337,7 @@ def _create_docstring_fixture(path: Path) -> None:
 
 
 def test_docstring_validation(runner: CommandRunner, fixture_path: Path) -> TestResult:
+    """Smoke test for docstring validation warnings."""
     try:
         _create_docstring_fixture(fixture_path)
         output = runner.run_validate(".")
@@ -359,6 +371,7 @@ def test_docstring_validation(runner: CommandRunner, fixture_path: Path) -> Test
 
 
 def test_status_and_cache(runner: CommandRunner) -> TestResult:
+    """Smoke test for status and cache clear commands."""
     try:
         status_before = runner.run_status(timeout=10.0)
         total_before = int(status_before.get("total_symbols", 0))
@@ -380,6 +393,7 @@ def test_status_and_cache(runner: CommandRunner) -> TestResult:
 
 
 def render_report(results: List[Phase1Result]) -> str:
+    """Render a markdown report for phase 1."""
     total = len(results)
     passed = sum(1 for item in results if item.result.passed)
     failed = total - passed
@@ -413,6 +427,7 @@ def run_phase1(
     emit_summary: bool = True,
     baseline_path: Optional[str] = None,
 ) -> Tuple[int, str, Dict[str, object]]:
+    """Run phase 1 validation tests."""
     start = time.perf_counter()
     logger.info("Phase 1 started")
     reporter = Reporter()
@@ -576,6 +591,7 @@ def run_phase1(
 
 
 def main() -> None:
+    """CLI entrypoint for phase 1 validation."""
     parser = argparse.ArgumentParser(description="Run Phase 1 smoke tests for gloggur.")
     parser.add_argument("--output", type=str, default=None, help="Write markdown report to a file")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")

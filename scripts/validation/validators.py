@@ -9,34 +9,42 @@ from typing import Any, Dict, List, Optional as TypingOptional, Tuple, Union
 
 @dataclass
 class ValidationResult:
+    """Result of schema or validation checks."""
     ok: bool
     message: str
     details: TypingOptional[Dict[str, object]] = None
 
     @staticmethod
     def success(message: str = "ok", details: TypingOptional[Dict[str, object]] = None) -> "ValidationResult":
+        """Create a successful validation result."""
         return ValidationResult(ok=True, message=message, details=details)
 
     @staticmethod
     def failure(message: str, details: TypingOptional[Dict[str, object]] = None) -> "ValidationResult":
+        """Create a failed validation result."""
         return ValidationResult(ok=False, message=message, details=details)
 
 
 class Optional:
+    """Optional wrapper for schema elements."""
     def __init__(self, schema: "SchemaType") -> None:
+        """Store the wrapped schema."""
         self.schema = schema
 
     def __repr__(self) -> str:
+        """Return a string representation."""
         return f"Optional({self.schema!r})"
 
 
 class Range:
+    """Numeric range constraint for schema values."""
     def __init__(
         self,
         min_value: TypingOptional[Union[int, float]] = None,
         max_value: TypingOptional[Union[int, float]] = None,
         value_type: Union[type, Tuple[type, ...]] = (int, float),
     ) -> None:
+        """Initialize range bounds and allowed value types."""
         if min_value is not None and max_value is not None and min_value > max_value:
             raise ValueError("min_value cannot be greater than max_value")
         self.min_value = min_value
@@ -44,6 +52,7 @@ class Range:
         self.value_type = value_type
 
     def __repr__(self) -> str:
+        """Return a string representation."""
         return f"Range(min_value={self.min_value!r}, max_value={self.max_value!r}, value_type={self.value_type!r})"
 
 
@@ -51,9 +60,11 @@ SchemaType = Union[type, Tuple[type, ...], Dict[str, Any], List[Any], Optional, 
 
 
 class Validators:
+    """Static helpers for validating schema outputs."""
     logger = logging.getLogger(__name__)
     @staticmethod
     def validate_index_output(output: Dict[str, object]) -> ValidationResult:
+        """Validate index command output schema."""
         schema = {
             "indexed_files": int,
             "indexed_symbols": int,
@@ -64,6 +75,7 @@ class Validators:
 
     @staticmethod
     def validate_search_output(output: Dict[str, object]) -> ValidationResult:
+        """Validate search command output schema."""
         schema = {
             "query": str,
             "results": list,
@@ -80,6 +92,7 @@ class Validators:
 
     @staticmethod
     def validate_similarity_scores(results: List[Dict[str, object]]) -> ValidationResult:
+        """Validate similarity score ranges in search results."""
         invalid: List[Dict[str, object]] = []
         result_schema = {"similarity_score": Range(min_value=0.0, max_value=1.0)}
         for idx, result in enumerate(results):
@@ -110,6 +123,7 @@ class Validators:
         errors: List[Dict[str, Any]] = []
 
         def _format_expected_type(expected_type: SchemaType) -> str:
+            """Format the expected type for error messages."""
             if isinstance(expected_type, Optional):
                 return f"optional {_format_expected_type(expected_type.schema)}"
             if isinstance(expected_type, Range):
@@ -121,6 +135,7 @@ class Validators:
             return str(expected_type)
 
         def _preview_value(value: object) -> str:
+            """Return a short preview string for a value."""
             if value is None:
                 return ""
             if isinstance(value, str):
@@ -141,6 +156,7 @@ class Validators:
             return preview
 
         def check(value: object, expected: SchemaType, path: str) -> None:
+            """Validate a value against the schema."""
             optional_expected = False
             if isinstance(expected, Optional):
                 optional_expected = True
@@ -336,6 +352,7 @@ class Validators:
 
     @staticmethod
     def check_database_symbols(db_path: str, expected_min: int) -> ValidationResult:
+        """Check the symbol table count meets a minimum."""
         if not os.path.exists(db_path):
             return ValidationResult.failure("Database not found", {"db_path": db_path})
         try:
@@ -353,6 +370,7 @@ class Validators:
 
     @staticmethod
     def check_cache_exists(cache_dir: str) -> ValidationResult:
+        """Ensure the cache directory and database exist."""
         if not os.path.isdir(cache_dir):
             return ValidationResult.failure("Cache directory missing", {"cache_dir": cache_dir})
         db_path = os.path.join(cache_dir, "index.db")

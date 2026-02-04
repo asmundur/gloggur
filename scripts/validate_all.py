@@ -32,6 +32,7 @@ from scripts.validation.report_templates import (
 
 @dataclass(frozen=True)
 class _PhaseDefinition:
+    """Metadata describing a validation phase."""
     title: str
     script: Path
 
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class ValidationRunner:
+    """Orchestrate running validation phases."""
     def __init__(
         self,
         phases: Optional[List[int]] = None,
@@ -55,6 +57,7 @@ class ValidationRunner:
         parallel: bool = True,
         max_workers: Optional[int] = None,
     ) -> None:
+        """Initialize the validation runner."""
         self.phases = phases
         self.quick = quick
         self.verbose = verbose
@@ -62,6 +65,7 @@ class ValidationRunner:
         self.max_workers = max_workers
 
     def run_all_phases(self) -> ValidationReport:
+        """Run all requested phases and build a report."""
         phases = self._resolve_phases()
         if self.parallel and len(phases) > 1:
             logger.info("Running phases in parallel: %s", phases)
@@ -70,6 +74,7 @@ class ValidationRunner:
         return self._run_all_phases_serial(phases)
 
     def run_phase(self, phase_num: int) -> PhaseReport:
+        """Run a single phase and return its report."""
         reports = self._run_single_phase(phase_num)
         for report in reports:
             if report.phase == phase_num:
@@ -77,9 +82,11 @@ class ValidationRunner:
         return _missing_phase_report(phase_num, PHASE_DEFINITIONS[phase_num].title, "Phase output missing.")
 
     def generate_comprehensive_report(self, report: ValidationReport) -> str:
+        """Render the full report as markdown."""
         return render_markdown(report)
 
     def save_report(self, report: ValidationReport, path: str, fmt: str) -> None:
+        """Write the report to disk."""
         output_path = Path(path)
         if fmt == "json":
             output = json.dumps(render_json(report), indent=2)
@@ -88,6 +95,7 @@ class ValidationRunner:
         output_path.write_text(output, encoding="utf8")
 
     def _resolve_phases(self) -> List[int]:
+        """Resolve which phases should run."""
         if self.phases:
             return sorted(set(self.phases))
         if self.quick:
@@ -95,6 +103,7 @@ class ValidationRunner:
         return [1, 2, 3, 4]
 
     def _run_single_phase(self, phase: int) -> List[PhaseReport]:
+        """Run a single phase script."""
         definition = PHASE_DEFINITIONS[phase]
         return _execute_phase_script(
             definition.script,
@@ -104,6 +113,7 @@ class ValidationRunner:
         )
 
     def _run_combined_phase34(self, phases: List[int]) -> List[PhaseReport]:
+        """Run combined phase 3/4 script."""
         script = PHASE_DEFINITIONS[3].script
         fallback_titles = {
             3: PHASE_DEFINITIONS[3].title,
@@ -117,6 +127,7 @@ class ValidationRunner:
         )
 
     def _run_all_phases_serial(self, phases: List[int]) -> ValidationReport:
+        """Run phases serially and build a report."""
         phase_reports: List[PhaseReport] = []
         handle_phase34 = any(phase in (3, 4) for phase in phases)
         for phase in phases:
@@ -132,6 +143,7 @@ class ValidationRunner:
         return build_validation_report(phase_reports)
 
     def _run_all_phases_parallel(self, phases: List[int]) -> ValidationReport:
+        """Run phases in parallel and build a report."""
         tasks = self._build_parallel_tasks(phases)
         phase_reports: List[PhaseReport] = []
         max_workers = self.max_workers
@@ -156,6 +168,7 @@ class ValidationRunner:
         return build_validation_report(phase_reports)
 
     def _build_parallel_tasks(self, phases: List[int]) -> List[Dict[str, object]]:
+        """Build task definitions for parallel execution."""
         tasks: List[Dict[str, object]] = []
         handle_phase34 = any(phase in (3, 4) for phase in phases)
         for phase in phases:
@@ -191,6 +204,7 @@ def _execute_phase_script(
     fallback_titles: Dict[int, str],
     verbose: bool = False,
 ) -> List[PhaseReport]:
+    """Execute a phase script and parse its JSON output."""
     if not script_path.exists():
         return [
             _missing_phase_report(phase, fallback_titles.get(phase, f"Phase {phase}"), "Phase script missing.")
@@ -278,6 +292,7 @@ def _execute_phase_script(
 
 
 def _parse_json_output(raw: str) -> Optional[Dict[str, object]]:
+    """Parse JSON from raw output, attempting last JSON line."""
     data = raw.strip()
     if not data:
         return None
@@ -302,6 +317,7 @@ def _phase_reports_from_payload(
     fallback_titles: Dict[int, str],
     duration_ms: float,
 ) -> List[PhaseReport]:
+    """Build phase reports from a JSON payload."""
     if "phases" in payload and isinstance(payload["phases"], list):
         reports: List[PhaseReport] = []
         for item in payload["phases"]:
@@ -314,6 +330,7 @@ def _phase_reports_from_payload(
 def _phase_report_from_payload(
     payload: Dict[str, object], fallback_titles: Dict[int, str], duration_ms: float
 ) -> PhaseReport:
+    """Build a phase report from a JSON payload."""
     phase_num = int(payload.get("phase", payload.get("phase_number", 0)) or 0)
     if phase_num == 0:
         phase_num = min(fallback_titles.keys()) if fallback_titles else 0
@@ -339,6 +356,7 @@ def _phase_report_from_payload(
 
 
 def _tests_from_payload(payload: Dict[str, object]) -> List[TestCaseResult]:
+    """Extract test case results from a JSON payload."""
     if "tests" in payload and isinstance(payload["tests"], list):
         return [_test_from_payload(item) for item in payload["tests"] if isinstance(item, dict)]
     if "sections" in payload and isinstance(payload["sections"], list):
@@ -370,6 +388,7 @@ def _tests_from_payload(payload: Dict[str, object]) -> List[TestCaseResult]:
 
 
 def _test_from_payload(payload: Dict[str, object]) -> TestCaseResult:
+    """Convert a JSON payload into a TestCaseResult."""
     name = str(payload.get("name", "test"))
     message = str(payload.get("message", payload.get("detail", "")) or "")
     status = str(payload.get("status", "")).lower()
@@ -387,6 +406,7 @@ def _test_from_payload(payload: Dict[str, object]) -> TestCaseResult:
 
 
 def _summary_from_payload(payload: Dict[str, object], tests: List[TestCaseResult]) -> Dict[str, int]:
+    """Build a summary dict from payload or derived tests."""
     summary = payload.get("summary")
     if isinstance(summary, dict):
         return {
@@ -399,6 +419,7 @@ def _summary_from_payload(payload: Dict[str, object], tests: List[TestCaseResult
 
 
 def _summarize_tests(tests: List[TestCaseResult]) -> Dict[str, int]:
+    """Summarize test results by status."""
     total = len(tests)
     passed = sum(1 for test in tests if test.status == "passed")
     failed = sum(1 for test in tests if test.status == "failed")
@@ -407,6 +428,7 @@ def _summarize_tests(tests: List[TestCaseResult]) -> Dict[str, int]:
 
 
 def _status_from_summary(summary: Dict[str, int]) -> str:
+    """Return phase status based on summary counts."""
     if summary.get("failed", 0):
         return "failed"
     if summary.get("skipped", 0):
@@ -415,6 +437,7 @@ def _status_from_summary(summary: Dict[str, int]) -> str:
 
 
 def _missing_phase_report(phase: int, title: str, message: str) -> PhaseReport:
+    """Return a failing phase report when output is missing."""
     tests = [TestCaseResult(name="Phase runner", status="failed", message=message)]
     return PhaseReport(
         phase=phase,
@@ -427,6 +450,7 @@ def _missing_phase_report(phase: int, title: str, message: str) -> PhaseReport:
 
 
 def _missing_dependency_message(stdout: str, stderr: str) -> Optional[str]:
+    """Return a friendly message when a dependency is missing."""
     combined = "\n".join([stderr or "", stdout or ""]).strip()
     if not combined:
         return None
@@ -444,6 +468,7 @@ def _missing_dependency_message(stdout: str, stderr: str) -> Optional[str]:
 
 
 def _format_execution_error(cmd: List[str], returncode: int, stdout: str, stderr: str) -> str:
+    """Format a helpful error message from execution output."""
     missing = _missing_dependency_message(stdout, stderr)
     if missing:
         return missing
@@ -459,6 +484,7 @@ def _format_execution_error(cmd: List[str], returncode: int, stdout: str, stderr
 
 
 def _parse_phases(raw: Optional[str]) -> Optional[List[int]]:
+    """Parse a comma-separated phase list."""
     if not raw:
         return None
     phases = []
@@ -474,6 +500,7 @@ def _parse_phases(raw: Optional[str]) -> Optional[List[int]]:
 
 
 def main() -> int:
+    """CLI entrypoint for running all phases."""
     parser = argparse.ArgumentParser(description="Run all gloggur validation phases.")
     parser.add_argument("--phases", type=str, default=None, help="Comma-separated phase list, e.g. 1,2,4")
     parser.add_argument("--output", type=str, default=None, help="Write report to file.")

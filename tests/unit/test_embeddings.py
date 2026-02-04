@@ -13,6 +13,7 @@ from gloggur.embeddings.openai import OpenAIEmbeddingProvider
 
 
 def test_local_embedding_fallback_marker_enables_offline_vectors() -> None:
+    """Ensure fallback marker enables deterministic local embeddings."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     marker = Path(cache_dir) / ".local_embedding_fallback"
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -29,12 +30,14 @@ def test_local_embedding_fallback_marker_enables_offline_vectors() -> None:
 
 
 def test_openai_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI provider should require API key."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         OpenAIEmbeddingProvider(model="text-embedding-3-large")
 
 
 def test_gemini_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gemini provider should require API key."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
@@ -42,8 +45,11 @@ def test_gemini_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI provider returns embeddings and dimension."""
     class FakeEmbeddings:
+        """Fake OpenAI embeddings client."""
         def create(self, model: str, input: object):
+            """Return fake embeddings for testing."""
             if isinstance(input, list):
                 return SimpleNamespace(
                     data=[
@@ -54,7 +60,9 @@ def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatc
             return SimpleNamespace(data=[SimpleNamespace(embedding=[0.5, 0.25])])
 
     class FakeOpenAI:
+        """Fake OpenAI client wrapper."""
         def __init__(self, api_key: str) -> None:
+            """Store fake embeddings client."""
             self.embeddings = FakeEmbeddings()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -71,12 +79,17 @@ def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatc
 
 
 def test_gemini_embed_text_and_dimension(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gemini provider returns embeddings and dimension."""
     class FakeModels:
+        """Fake Gemini models client."""
         def embed_content(self, model: str, contents: object):
+            """Return fake embedding response."""
             return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2])])
 
     class FakeClient:
+        """Fake Gemini client wrapper."""
         def __init__(self, api_key: str) -> None:
+            """Store fake models client."""
             self.models = FakeModels()
 
     genai_module = ModuleType("google.genai")
@@ -94,6 +107,7 @@ def test_gemini_embed_text_and_dimension(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_gemini_extract_vectors_variants() -> None:
+    """Gemini vector extraction handles multiple response shapes."""
     response_lists = SimpleNamespace(embeddings=[[0.1, 0.2], [0.3, 0.4]])
     assert GeminiEmbeddingProvider._extract_vectors(response_lists) == [
         [0.1, 0.2],
@@ -108,6 +122,7 @@ def test_gemini_extract_vectors_variants() -> None:
 
 
 def test_local_embedding_fallback_vector_is_normalized(tmp_path: Path) -> None:
+    """Fallback embeddings are normalized to unit length."""
     provider = LocalEmbeddingProvider("local", cache_dir=str(tmp_path))
     provider._use_fallback = True
 
@@ -118,20 +133,27 @@ def test_local_embedding_fallback_vector_is_normalized(tmp_path: Path) -> None:
 
 
 def test_local_embedding_model_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Local embedding provider uses model encode paths."""
     class FakeVector:
+        """Fake vector object with tolist."""
         def __init__(self, values) -> None:
+            """Store fake vector values."""
             self._values = values
 
         def tolist(self):
+            """Return vector values as list."""
             return list(self._values)
 
     class FakeModel:
+        """Fake model with encode/dimension methods."""
         def encode(self, texts, normalize_embeddings: bool = True):
+            """Return fake vector values for inputs."""
             if isinstance(texts, list) and len(texts) == 1:
                 return [FakeVector([0.1, 0.2])]
             return [FakeVector([0.3, 0.4]), FakeVector([0.5, 0.6])]
 
         def get_sentence_embedding_dimension(self) -> int:
+            """Return fake embedding dimension."""
             return 2
 
     provider = LocalEmbeddingProvider("local")

@@ -13,16 +13,20 @@ _CONFIGURED = False
 
 
 class TraceIdFilter(logging.Filter):
+    """Inject a trace id into log records."""
     def filter(self, record: logging.LogRecord) -> bool:
+        """Attach trace id to the log record."""
         record.trace_id = _TRACE_ID.get()
         return True
 
 
 def set_trace_id(trace_id: str) -> None:
+    """Set the current trace id."""
     _TRACE_ID.set(trace_id)
 
 
 def get_trace_id() -> str:
+    """Return the current trace id."""
     return _TRACE_ID.get()
 
 
@@ -35,6 +39,7 @@ def configure_logging(
     stream: Optional[str] = None,
     force: bool = False,
 ) -> str:
+    """Configure global logging for validation scripts."""
     global _CONFIGURED
     if _CONFIGURED and not force:
         return get_trace_id()
@@ -86,6 +91,7 @@ def configure_logging(
 
 
 def log_event(logger: logging.Logger, level: int, event: str, **fields: object) -> None:
+    """Log an event with structured JSON fields."""
     if fields:
         payload = json.dumps(fields, default=str, ensure_ascii=True, sort_keys=True)
         logger.log(level, "%s | %s", event, payload)

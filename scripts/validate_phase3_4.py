@@ -29,12 +29,14 @@ logger = logging.getLogger(__name__)
 
 
 def _format_duration(duration_ms: float) -> str:
+    """Format a duration in milliseconds."""
     if duration_ms >= 1000:
         return f"{duration_ms / 1000:.2f}s"
     return f"{int(duration_ms)}ms"
 
 
 def _summarize_tests(tests: List[TestCaseResult]) -> Dict[str, int]:
+    """Summarize test results by status."""
     total = len(tests)
     passed = sum(1 for test in tests if test.status == "passed")
     failed = sum(1 for test in tests if test.status == "failed")
@@ -43,6 +45,7 @@ def _summarize_tests(tests: List[TestCaseResult]) -> Dict[str, int]:
 
 
 def _status_from_summary(summary: Dict[str, int]) -> str:
+    """Derive phase status from summary counts."""
     if summary.get("failed", 0):
         return "failed"
     if summary.get("skipped", 0):
@@ -58,6 +61,7 @@ def _build_phase_report(
     performance: Optional[Dict[str, object]] = None,
     issues: Optional[List[str]] = None,
 ) -> PhaseReport:
+    """Build a phase report from test results and metrics."""
     summary = _summarize_tests(tests)
     return PhaseReport(
         phase=phase,
@@ -72,6 +76,7 @@ def _build_phase_report(
 
 
 def _new_runner(cache_dir: str, timeout: float = 120.0) -> CommandRunner:
+    """Create a command runner with an isolated cache directory."""
     return CommandRunner(
         env={"GLOGGUR_CACHE_DIR": cache_dir, "GLOGGUR_LOCAL_FALLBACK": "1"},
         default_timeout=timeout,
@@ -79,11 +84,13 @@ def _new_runner(cache_dir: str, timeout: float = 120.0) -> CommandRunner:
 
 
 def _cleanup_cache_dir(cache_dir: str) -> None:
+    """Delete a cache directory if it exists."""
     if cache_dir and Path(cache_dir).exists():
         shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 def _make_large_repo(fixtures: TestFixtures, file_count: int) -> Path:
+    """Create a temporary repository with many files."""
     template = "\n".join(
         [
             "def handler_{idx}(value: int) -> int:",
@@ -98,6 +105,7 @@ def _make_large_repo(fixtures: TestFixtures, file_count: int) -> Path:
 
 
 def _parse_streaming_output(stdout: str) -> Tuple[bool, List[Dict[str, object]]]:
+    """Parse line-delimited JSON output."""
     results: List[Dict[str, object]] = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -114,6 +122,7 @@ def _parse_streaming_output(stdout: str) -> Tuple[bool, List[Dict[str, object]]]
 
 
 def _test_empty_repository(fixtures: TestFixtures) -> TestCaseResult:
+    """Validate indexing on an empty repository."""
     repo = fixtures.create_temp_repo({})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
@@ -148,6 +157,7 @@ def _test_empty_repository(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
+    """Validate indexing skips unsupported files."""
     repo = fixtures.create_temp_repo({"README.txt": "just text\n", "notes.md": "# Notes\n"})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
@@ -182,6 +192,7 @@ def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
+    """Validate indexing handles malformed code."""
     repo = fixtures.create_temp_repo({"broken.py": "def broken(:\n    pass\n"}, validate=False)
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
@@ -206,6 +217,7 @@ def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _test_large_repository(fixtures: TestFixtures, file_count: int = 500) -> TestCaseResult:
+    """Validate indexing performance on a large repository."""
     repo = _make_large_repo(fixtures, file_count=file_count)
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir, timeout=300.0)
@@ -248,6 +260,7 @@ def _test_large_repository(fixtures: TestFixtures, file_count: int = 500) -> Tes
 
 
 def _test_streaming_results(fixtures: TestFixtures) -> TestCaseResult:
+    """Validate search streaming output format."""
     repo = fixtures.create_temp_repo({"sample.py": fixtures.create_sample_python_file()})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
@@ -286,6 +299,7 @@ def _test_streaming_results(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _run_phase3(skip_large_repo: bool) -> PhaseReport:
+    """Run phase 3 edge-case validation tests."""
     fixtures = TestFixtures()
     tests: List[TestCaseResult] = []
     start = time.perf_counter()
@@ -316,6 +330,7 @@ def _run_phase3(skip_large_repo: bool) -> PhaseReport:
 
 
 def _benchmark_indexing_speed(repo_path: Path) -> Tuple[TestCaseResult, Dict[str, object]]:
+    """Benchmark indexing speed and return metrics."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir, timeout=300.0)
     try:
@@ -365,6 +380,7 @@ def _benchmark_indexing_speed(repo_path: Path) -> Tuple[TestCaseResult, Dict[str
 
 
 def _benchmark_search_latency(repo_path: Path) -> Tuple[TestCaseResult, Dict[str, object]]:
+    """Benchmark search latency and return metrics."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir, timeout=300.0)
     try:
@@ -427,6 +443,7 @@ def _benchmark_search_latency(repo_path: Path) -> Tuple[TestCaseResult, Dict[str
 
 
 def _benchmark_incremental_reindex(repo_path: Path) -> Tuple[TestCaseResult, Dict[str, object]]:
+    """Benchmark incremental reindex speed."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir, timeout=300.0)
     try:
@@ -481,6 +498,7 @@ def _benchmark_incremental_reindex(repo_path: Path) -> Tuple[TestCaseResult, Dic
 
 
 def _run_phase4(repo_path: Path) -> PhaseReport:
+    """Run phase 4 performance benchmarks."""
     tests: List[TestCaseResult] = []
     performance: Dict[str, object] = {}
     start = time.perf_counter()
@@ -508,6 +526,7 @@ def _run_phase4(repo_path: Path) -> PhaseReport:
 
 
 def run_validation(skip_large_repo: bool, benchmark_only: bool) -> ValidationReport:
+    """Run phase 3 and/or phase 4 validation."""
     logger.info("Phase 3/4 validation started (skip_large_repo=%s, benchmark_only=%s)", skip_large_repo, benchmark_only)
     phases: List[PhaseReport] = []
     if not benchmark_only:
@@ -519,6 +538,7 @@ def run_validation(skip_large_repo: bool, benchmark_only: bool) -> ValidationRep
 
 
 def main() -> int:
+    """CLI entrypoint for phase 3/4 validation."""
     parser = argparse.ArgumentParser(description="Run Phase 3 & 4 validation tests for gloggur.")
     parser.add_argument("--skip-large-repo", action="store_true", help="Skip large repo edge case test.")
     parser.add_argument("--benchmark-only", action="store_true", help="Run only Phase 4 benchmarks.")

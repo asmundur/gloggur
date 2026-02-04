@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TestCaseResult:
+    """Result of a single validation test case."""
     name: str
     status: str
     message: str
@@ -19,6 +20,7 @@ class TestCaseResult:
 
 @dataclass
 class PhaseReport:
+    """Summary of a validation phase."""
     phase: int
     title: str
     status: str
@@ -31,6 +33,7 @@ class PhaseReport:
 
 @dataclass
 class ValidationReport:
+    """Aggregate report across all validation phases."""
     generated_at: str
     status: str
     summary: Dict[str, int]
@@ -43,6 +46,7 @@ class ValidationReport:
 def build_validation_report(
     phases: List[PhaseReport], generated_at: Optional[str] = None
 ) -> ValidationReport:
+    """Build a validation report from per-phase data."""
     total = 0
     passed = 0
     failed = 0
@@ -104,6 +108,7 @@ def build_validation_report(
 
 
 def render_markdown(report: ValidationReport) -> str:
+    """Render a validation report as Markdown."""
     total = report.summary["total"]
     passed = report.summary["passed"]
     failed = report.summary["failed"]
@@ -164,6 +169,7 @@ def render_markdown(report: ValidationReport) -> str:
 
 
 def render_json(report: ValidationReport) -> Dict[str, object]:
+    """Render a validation report as JSON-compatible dict."""
     return {
         "generated_at": report.generated_at,
         "status": report.status,
@@ -196,6 +202,7 @@ def render_json(report: ValidationReport) -> Dict[str, object]:
 
 
 def _status_label(status: str, total: int, passed: int, failed: int, skipped: int) -> str:
+    """Return a formatted status label."""
     if status == "failed":
         return f"FAILED ({passed}/{total} passed, {failed} failed)"
     if status == "passed_with_skips":
@@ -204,6 +211,7 @@ def _status_label(status: str, total: int, passed: int, failed: int, skipped: in
 
 
 def _phase_summary_label(phase: PhaseReport, summary: Dict[str, int]) -> str:
+    """Return a formatted summary label for a phase."""
     total = summary.get("total", len(phase.tests))
     passed = summary.get("passed", 0)
     failed = summary.get("failed", 0)
@@ -216,6 +224,7 @@ def _phase_summary_label(phase: PhaseReport, summary: Dict[str, int]) -> str:
 
 
 def _test_line(test: TestCaseResult) -> str:
+    """Format a single test result line."""
     if test.status == "failed":
         prefix = "[FAIL]"
     elif test.status == "skipped":

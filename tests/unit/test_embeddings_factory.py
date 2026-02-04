@@ -7,10 +7,13 @@ from gloggur.embeddings import factory
 
 
 def test_create_embedding_provider_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Factory returns local embedding provider with config args."""
     created = {}
 
     class DummyLocal:
+        """Dummy local provider capturing constructor args."""
         def __init__(self, model_name: str, cache_dir: str | None) -> None:
+            """Record constructor arguments."""
             created["model_name"] = model_name
             created["cache_dir"] = cache_dir
 
@@ -27,10 +30,13 @@ def test_create_embedding_provider_local(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_create_embedding_provider_openai(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Factory returns OpenAI embedding provider with config args."""
     created = {}
 
     class DummyOpenAI:
+        """Dummy OpenAI provider capturing constructor args."""
         def __init__(self, model: str) -> None:
+            """Record constructor argument."""
             created["model"] = model
 
     monkeypatch.setattr(factory, "OpenAIEmbeddingProvider", DummyOpenAI)
@@ -42,10 +48,13 @@ def test_create_embedding_provider_openai(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_create_embedding_provider_gemini(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Factory returns Gemini embedding provider with config args."""
     created = {}
 
     class DummyGemini:
+        """Dummy Gemini provider capturing constructor args."""
         def __init__(self, model: str, api_key: str | None) -> None:
+            """Record constructor arguments."""
             created["model"] = model
             created["api_key"] = api_key
 
@@ -62,6 +71,7 @@ def test_create_embedding_provider_gemini(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_create_embedding_provider_unknown() -> None:
+    """Factory raises for unknown embedding provider."""
     config = GloggurConfig(embedding_provider="unknown")
     with pytest.raises(ValueError, match="Unknown embedding provider"):
         factory.create_embedding_provider(config)

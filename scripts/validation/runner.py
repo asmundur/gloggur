@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RetryConfig:
+    """Retry configuration for command execution."""
     max_attempts: int = 1  # 1 means no retry
     initial_backoff_ms: float = 1000.0
     max_backoff_ms: float = 30000.0
@@ -34,6 +35,7 @@ class RetryConfig:
 
 @dataclass
 class CommandResult:
+    """Result of a command execution."""
     command: List[str]
     stdout: str
     stderr: str
@@ -47,12 +49,15 @@ class CommandResult:
 
 
 class MissingDependencyError(RuntimeError):
+    """Raised when a required dependency is missing."""
     def __init__(self, module: str, message: str) -> None:
+        """Store missing module details and message."""
         super().__init__(message)
         self.module = module
 
 
 class CommandRunner:
+    """Run CLI commands with retries and JSON parsing."""
     def __init__(
         self,
         base_cmd: Optional[List[str]] = None,
@@ -62,6 +67,7 @@ class CommandRunner:
         retry_config: Optional[RetryConfig] = None,
         debug: bool = False,
     ) -> None:
+        """Initialize the command runner."""
         self.base_cmd = base_cmd or [sys.executable, "-m", "gloggur.cli.main"]
         self.cwd = cwd
         self.env = env
@@ -70,6 +76,7 @@ class CommandRunner:
         self.debug = debug
 
     def with_env(self, extra_env: Dict[str, str], *, cwd: Optional[str] = None) -> "CommandRunner":
+        """Return a new runner with merged environment variables."""
         merged_env = dict(self.env or {})
         merged_env.update(extra_env)
         return CommandRunner(
@@ -90,6 +97,7 @@ class CommandRunner:
         prefix: str = "gloggur-cache-",
         cwd: Optional[str] = None,
     ) -> Iterator["CommandRunner"]:
+        """Provide a runner with an isolated cache directory."""
         owns_cache = cache_dir is None
         if cache_dir is None:
             cache_dir = tempfile.mkdtemp(prefix=prefix)
@@ -118,6 +126,7 @@ class CommandRunner:
         timeout: Optional[float] = None,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> CommandResult:
+        """Run a command and optionally parse JSON output."""
         full_cmd = self.base_cmd + cmd
         merged_env = os.environ.copy()
         if self.env:
@@ -144,6 +153,7 @@ class CommandRunner:
         timeout: Optional[float] = None,
         extra_env: Optional[Dict[str, str]] = None,
     ) -> CommandResult:
+        """Run a command and stream stdout lines to a callback."""
         full_cmd = self.base_cmd + cmd
         merged_env = os.environ.copy()
         if self.env:
@@ -204,11 +214,13 @@ class CommandRunner:
         timeout: float,
         line_callback: Callable[[str], None],
     ) -> Tuple[str, str, bool]:
+        """Collect stdout/stderr with streaming callbacks."""
         stdout_lines: List[str] = []
         stderr_lines: List[str] = []
         lock = threading.Lock()
 
         def read_stdout() -> None:
+            """Read stdout lines into the buffer and callback."""
             if process.stdout is None:
                 return
             for line in iter(process.stdout.readline, ""):
@@ -217,6 +229,7 @@ class CommandRunner:
                 line_callback(line)
 
         def read_stderr() -> None:
+            """Read stderr lines into the buffer."""
             if process.stderr is None:
                 return
             for line in iter(process.stderr.readline, ""):
@@ -253,7 +266,9 @@ class CommandRunner:
         timeout: float,
         capture_json: bool,
     ) -> CommandResult:
+        """Execute a command with retry logic."""
         def should_retry_exit_code(exit_code: int) -> bool:
+            """Return True if the exit code should trigger a retry."""
             predicate = self.retry_config.retryable_exit_codes
             if predicate is None:
                 return self.retry_config.retry_on_nonzero_exit and exit_code != 0
@@ -262,9 +277,11 @@ class CommandRunner:
             return bool(predicate(exit_code))
 
         def should_retry_exception(exc: BaseException) -> bool:
+            """Return True if the exception should trigger a retry."""
             return isinstance(exc, self.retry_config.retryable_exceptions)
 
         def sleep_backoff(attempt_index: int) -> None:
+            """Sleep using exponential backoff."""
             backoff_delay = min(
                 self.retry_config.initial_backoff_ms * (self.retry_config.backoff_multiplier**attempt_index),
                 self.retry_config.max_backoff_ms,
@@ -364,6 +381,7 @@ class CommandRunner:
         raise RuntimeError("Command execution failed without returning a result.")
 
     def run_index(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+        """Run the index command and return JSON output."""
         cmd = ["index", path, "--json"]
         config_path = kwargs.get("config_path")
         embedding_provider = kwargs.get("embedding_provider")
@@ -375,6 +393,7 @@ class CommandRunner:
         return self._require_json(result)
 
     def run_search(self, query: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+        """Run the search command and return JSON output."""
         cmd = ["search", query, "--json"]
         config_path = kwargs.get("config_path")
         kind = kwargs.get("kind")
@@ -398,6 +417,7 @@ class CommandRunner:
         return self._require_json(result)
 
     def run_validate(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+        """Run the validate command and return JSON output."""
         cmd = ["validate", path, "--json"]
         config_path = kwargs.get("config_path")
         if config_path:
@@ -406,6 +426,7 @@ class CommandRunner:
         return self._require_json(result)
 
     def run_status(self, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+        """Run the status command and return JSON output."""
         cmd = ["status", "--json"]
         config_path = kwargs.get("config_path")
         if config_path:
@@ -414,6 +435,7 @@ class CommandRunner:
         return self._require_json(result)
 
     def run_clear_cache(self, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+        """Run the clear-cache command and return JSON output."""
         cmd = ["clear-cache", "--json"]
         config_path = kwargs.get("config_path")
         if config_path:
@@ -423,6 +445,7 @@ class CommandRunner:
 
     @staticmethod
     def _missing_dependency_message(result: CommandResult) -> Optional[tuple[str, str]]:
+        """Inspect output for missing dependency errors."""
         combined = "\n".join([result.stderr or "", result.stdout or ""]).strip()
         if not combined:
             return None
@@ -441,6 +464,7 @@ class CommandRunner:
 
     @staticmethod
     def _parse_json(stdout: str) -> Optional[object]:
+        """Parse JSON from stdout, returning None on failure."""
         if stdout == "" or stdout.isspace():
             return None
         data = stdout.strip()
@@ -453,16 +477,19 @@ class CommandRunner:
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
+        """Truncate text to a character limit."""
         if len(text) <= limit:
             return text
         return text[:limit] + "..."
 
     @staticmethod
     def _format_command(result: CommandResult) -> str:
+        """Format a command list as a string."""
         return " ".join(result.command)
 
     @staticmethod
     def _parse_stream_results(result: CommandResult) -> Dict[str, object]:
+        """Parse line-delimited JSON stream results."""
         if result.exit_code != 0:
             missing = CommandRunner._missing_dependency_message(result)
             if missing:
@@ -548,6 +575,7 @@ class CommandRunner:
 
     @staticmethod
     def _require_json(result: CommandResult) -> Dict[str, object]:
+        """Return JSON output or raise a detailed error."""
         if result.exit_code != 0:
             missing = CommandRunner._missing_dependency_message(result)
             if missing:
@@ -602,11 +630,13 @@ class CommandRunner:
         return result.json_data
 
     def _debug_enabled(self) -> bool:
+        """Return True when debug logging is enabled."""
         return self.debug or bool(os.getenv("GLOGGUR_DEBUG_LOGS"))
 
 
 @dataclass(frozen=True)
 class TestTask:
+    """Unit of work for the validation orchestrator."""
     name: str
     run: Callable[[], TestResult]
     section: str = "General"
@@ -614,18 +644,22 @@ class TestTask:
 
 @dataclass(frozen=True)
 class TestOutcome:
+    """Outcome of a test task."""
     name: str
     result: TestResult
     section: str
 
 
 class TestOrchestrator:
+    """Run validation tasks sequentially or in parallel."""
     def __init__(self, reporter: Reporter, max_workers: Optional[int] = None) -> None:
+        """Initialize the orchestrator."""
         self.reporter = reporter
         self.max_workers = max_workers
         self._logger = logging.getLogger(__name__)
 
     def run(self, tasks: Iterable[TestTask]) -> List[TestOutcome]:
+        """Execute tasks and record results in the reporter."""
         outcomes: List[TestOutcome] = []
         if self.max_workers == 1:
             for task in tasks:
@@ -649,6 +683,7 @@ class TestOrchestrator:
 
     @staticmethod
     def _run_task(task: TestTask) -> TestOutcome:
+        """Execute a task and capture failures."""
         try:
             result = task.run()
         except Exception as exc:

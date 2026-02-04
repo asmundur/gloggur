@@ -6,6 +6,7 @@ from scripts.validation.fixtures import FIXTURE_REGISTRY, FixtureFile, TestFixtu
 
 
 def test_validate_fixture_files_rejects_malformed_sources() -> None:
+    """Ensure fixture validation rejects malformed source files."""
     with TestFixtures() as fixtures:
         files = {
             "bad.py": FixtureFile("def oops(:\n    pass\n"),
@@ -23,6 +24,7 @@ def test_validate_fixture_files_rejects_malformed_sources() -> None:
 
 
 def test_fixture_registry_compose_duplicate_paths_raises() -> None:
+    """Ensure composing duplicate fixtures raises an error."""
     registry = FIXTURE_REGISTRY
     with pytest.raises(ValueError, match="Fixture composition conflict"):
         registry.compose(
@@ -33,6 +35,7 @@ def test_fixture_registry_compose_duplicate_paths_raises() -> None:
 
 
 def test_fixture_registry_compose_success() -> None:
+    """Ensure fixture composition succeeds for different fixtures."""
     registry = FIXTURE_REGISTRY
     composed = registry.compose(
         name="combined",
@@ -47,6 +50,7 @@ def test_fixture_registry_compose_success() -> None:
 
 
 def test_fixture_registry_list_and_get_with_tags() -> None:
+    """Ensure fixture registry list/get behave as expected."""
     registry = FIXTURE_REGISTRY
     templates = registry.list()
     template_names = {template.name for template in templates}

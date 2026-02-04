@@ -14,6 +14,7 @@ from scripts.validation.reporter import PerformanceMetric
 
 
 def test_command_runner_status_json() -> None:
+    """Ensure status command returns expected JSON fields."""
     with tempfile.TemporaryDirectory() as tmpdir:
         runner = CommandRunner(env={"GLOGGUR_CACHE_DIR": tmpdir})
         payload = runner.run_status()
@@ -22,6 +23,7 @@ def test_command_runner_status_json() -> None:
 
 
 def test_validators_schema_and_scores() -> None:
+    """Validate schema and similarity score checks."""
     output = {
         "query": "hello",
         "results": [{"similarity_score": 0.5}],
@@ -32,6 +34,7 @@ def test_validators_schema_and_scores() -> None:
 
 
 def test_database_symbols_validator() -> None:
+    """Validate database symbol count checks."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = CacheManager(CacheConfig(tmpdir))
         symbol = Symbol(
@@ -53,6 +56,7 @@ def test_database_symbols_validator() -> None:
 
 
 def test_reporter_outputs() -> None:
+    """Ensure reporter emits markdown and JSON summaries."""
     reporter = Reporter()
     reporter.add_section("Smoke")
     reporter.add_test_result("status", TestResult(passed=True, message="ok"))
@@ -64,6 +68,7 @@ def test_reporter_outputs() -> None:
 
 
 def test_reporter_performance_markdown_with_baseline_trends() -> None:
+    """Ensure performance markdown includes baseline comparisons."""
     reporter = Reporter()
     reporter.add_performance_metric("Phase 1 Total", duration_ms=1500.0, throughput=2.0, throughput_unit="tests/s")
     reporter.set_baseline_metrics(
@@ -78,6 +83,7 @@ def test_reporter_performance_markdown_with_baseline_trends() -> None:
 
 
 def test_fixtures_create_and_cleanup() -> None:
+    """Ensure fixtures create and cleanup temp repos and caches."""
     fixtures = TestFixtures(cache_dir=tempfile.mkdtemp(prefix="gloggur-cache-"))
     repo = fixtures.create_temp_repo({"sample.py": fixtures.create_sample_python_file()})
     assert (repo / "sample.py").exists()
@@ -86,6 +92,7 @@ def test_fixtures_create_and_cleanup() -> None:
 
 
 def test_fixtures_backup_restore() -> None:
+    """Ensure fixture cache backup and restore works."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache_dir = Path(tmpdir) / "cache"
         cache_dir.mkdir()

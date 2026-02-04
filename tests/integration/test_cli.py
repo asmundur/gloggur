@@ -14,12 +14,14 @@ pytest.importorskip("faiss")
 
 
 def _write_fallback_marker(cache_dir: str) -> None:
+    """Create the local embedding fallback marker file."""
     marker = Path(cache_dir) / ".local_embedding_fallback"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch(exist_ok=True)
 
 
 def _parse_json_output(output: str) -> dict[str, object]:
+    """Parse JSON output from CLI command output."""
     start = output.find("{")
     if start == -1:
         raise ValueError(f"No JSON object found in output: {output!r}")
@@ -27,6 +29,7 @@ def _parse_json_output(output: str) -> dict[str, object]:
 
 
 def test_cli_index_search_validate_status_and_clear_cache() -> None:
+    """End-to-end CLI smoke test for index/search/validate/status/clear-cache."""
     runner = CliRunner()
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:

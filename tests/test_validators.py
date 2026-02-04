@@ -2,6 +2,7 @@ from scripts.validation.validators import Optional, Range, Validators
 
 
 def test_optional_missing_field_ok() -> None:
+    """Optional fields may be omitted without error."""
     schema = {"required": int, "maybe": Optional(str)}
     data = {"required": 1}
     result = Validators.validate_json_structure(data, schema)
@@ -9,6 +10,7 @@ def test_optional_missing_field_ok() -> None:
 
 
 def test_optional_present_none_ok() -> None:
+    """Optional fields accept None values."""
     schema = {"required": int, "maybe": Validators.optional(str)}
     data = {"required": 1, "maybe": None}
     result = Validators.validate_json_structure(data, schema)
@@ -16,6 +18,7 @@ def test_optional_present_none_ok() -> None:
 
 
 def test_optional_wrong_type_reports_optional() -> None:
+    """Optional fields report type errors with optional label."""
     schema = {"required": int, "maybe": Validators.optional(str)}
     data = {"required": 1, "maybe": 42}
     result = Validators.validate_json_structure(data, schema)
@@ -25,6 +28,7 @@ def test_optional_wrong_type_reports_optional() -> None:
 
 
 def test_range_bounds_validation() -> None:
+    """Range validator enforces min/max bounds."""
     schema = {"score": Range(min_value=0.0, max_value=1.0)}
     good = Validators.validate_json_structure({"score": 0.5}, schema)
     low = Validators.validate_json_structure({"score": -0.1}, schema)
@@ -35,6 +39,7 @@ def test_range_bounds_validation() -> None:
 
 
 def test_range_type_mismatch() -> None:
+    """Range validator reports type mismatches."""
     schema = {"score": Range(min_value=0.0, max_value=1.0)}
     result = Validators.validate_json_structure({"score": "nope"}, schema)
     assert result.ok is False
@@ -43,6 +48,7 @@ def test_range_type_mismatch() -> None:
 
 
 def test_none_for_dict_and_list_reports_specific_message() -> None:
+    """None for dict/list fields reports specific errors."""
     dict_schema = {"meta": {"count": int}}
     list_schema = {"items": [int]}
     dict_result = Validators.validate_json_structure({"meta": None}, dict_schema)
@@ -60,6 +66,7 @@ def test_none_for_dict_and_list_reports_specific_message() -> None:
 
 
 def test_tuple_union_type_checking() -> None:
+    """Tuple types act as unions in schema validation."""
     schema = {"value": (int, float)}
     good = Validators.validate_json_structure({"value": 1.5}, schema)
     bad = Validators.validate_json_structure({"value": "nope"}, schema)

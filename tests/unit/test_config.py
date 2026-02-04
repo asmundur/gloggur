@@ -6,6 +6,7 @@ from gloggur.config import GloggurConfig
 
 
 def test_load_from_yaml_and_env_overrides(tmp_path, monkeypatch) -> None:
+    """Config loads YAML and applies env overrides."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "embedding_provider: openai\ncache_dir: file-cache\nopenai_embedding_model: model-a\n",
@@ -21,6 +22,7 @@ def test_load_from_yaml_and_env_overrides(tmp_path, monkeypatch) -> None:
 
 
 def test_load_auto_detect_json_and_overrides(tmp_path, monkeypatch) -> None:
+    """Config auto-detects JSON and applies overrides."""
     config_path = tmp_path / ".gloggur.json"
     config_path.write_text(json.dumps({"embedding_provider": "gemini"}), encoding="utf8")
     monkeypatch.chdir(tmp_path)
@@ -31,6 +33,7 @@ def test_load_auto_detect_json_and_overrides(tmp_path, monkeypatch) -> None:
 
 
 def test_load_env_values(monkeypatch) -> None:
+    """Config loads values from environment variables."""
     monkeypatch.setenv("GLOGGUR_EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("GLOGGUR_LOCAL_MODEL", "local-model")
     monkeypatch.setenv("GLOGGUR_OPENAI_MODEL", "openai-model")

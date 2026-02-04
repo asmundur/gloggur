@@ -7,6 +7,7 @@ from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 
 
 def _seed_symbols(db_path: str) -> None:
+    """Seed a metadata store database with sample symbols."""
     conn = sqlite3.connect(db_path)
     conn.executescript(
         """
@@ -72,6 +73,7 @@ def _seed_symbols(db_path: str) -> None:
 
 
 def test_metadata_store_get_list_and_filter(tmp_path) -> None:
+    """Metadata store should get, list, and filter symbols."""
     db_path = tmp_path / "index.db"
     _seed_symbols(str(db_path))
 

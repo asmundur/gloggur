@@ -10,6 +10,7 @@ from scripts.validation.fixtures import TestFixtures
 
 
 def test_indexer_indexes_repo_and_sets_metadata() -> None:
+    """Indexer should index repo and set metadata."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
@@ -30,6 +31,7 @@ def test_indexer_indexes_repo_and_sets_metadata() -> None:
 
 
 def test_indexer_skips_unchanged_files() -> None:
+    """Indexer should skip unchanged files on reindex."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})

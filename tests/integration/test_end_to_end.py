@@ -14,12 +14,14 @@ pytest.importorskip("faiss")
 
 
 def _write_fallback_marker(cache_dir: str) -> None:
+    """Create the local embedding fallback marker file."""
     marker = Path(cache_dir) / ".local_embedding_fallback"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch(exist_ok=True)
 
 
 def _run_cli(args: list[str], env: dict[str, str]) -> dict[str, object]:
+    """Run the gloggur CLI and parse JSON output."""
     command = [sys.executable, "-m", "gloggur.cli.main", *args]
     completed = subprocess.run(
         command,
@@ -33,6 +35,7 @@ def _run_cli(args: list[str], env: dict[str, str]) -> dict[str, object]:
 
 
 def test_end_to_end_index_and_search() -> None:
+    """End-to-end test for index and search commands."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})

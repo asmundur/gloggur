@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class FixtureFile:
+    """Fixture file content and metadata."""
     content: str
     language: Optional[str] = None
     validate: bool = True
@@ -33,6 +34,7 @@ class FixtureFile:
 
 @dataclass(frozen=True)
 class FixtureTemplate:
+    """Template describing a set of fixture files."""
     name: str
     description: str
     files: Dict[str, FixtureFile]
@@ -40,21 +42,26 @@ class FixtureTemplate:
 
 
 class FixtureRegistry:
+    """Registry for fixture templates used in validation tests."""
     def __init__(self) -> None:
+        """Initialize an empty fixture registry."""
         self._templates: Dict[str, FixtureTemplate] = {}
 
     def register(self, template: FixtureTemplate, overwrite: bool = False) -> None:
+        """Register a fixture template."""
         if not overwrite and template.name in self._templates:
             raise ValueError(f"Fixture template already registered: {template.name}")
         self._templates[template.name] = template
 
     def get(self, name: str) -> FixtureTemplate:
+        """Return a fixture template by name."""
         if name not in self._templates:
             available = ", ".join(sorted(self._templates))
             raise KeyError(f"Unknown fixture template: {name}. Available: {available}")
         return self._templates[name]
 
     def list(self, tags: Optional[Iterable[str]] = None) -> List[FixtureTemplate]:
+        """List fixture templates, optionally filtered by tags."""
         if not tags:
             return list(self._templates.values())
         tag_set = set(tags)
@@ -68,6 +75,7 @@ class FixtureRegistry:
         tags: Optional[Iterable[str]] = None,
         register: bool = False,
     ) -> FixtureTemplate:
+        """Compose multiple templates into a new fixture template."""
         files: Dict[str, FixtureFile] = {}
         for fixture in fixtures:
             template = self.get(fixture) if isinstance(fixture, str) else fixture
@@ -90,10 +98,12 @@ FIXTURE_REGISTRY = FixtureRegistry()
 
 
 class TestFixtures:
+    """Utilities for creating temporary repos and caches for tests."""
     __test__ = False
     registry = FIXTURE_REGISTRY
 
     def __init__(self, cache_dir: Optional[str] = None) -> None:
+        """Initialize fixture helpers with an optional cache directory."""
         if cache_dir is None:
             cache_dir = str(Path(tempfile.mkdtemp(prefix="gloggur-cache-")))
             self._owns_cache_dir = True
@@ -109,16 +119,19 @@ class TestFixtures:
 
     @property
     def cache_dir(self) -> str:
+        """Return the active cache directory."""
         return self._get_cache_dir()
 
     @cache_dir.setter
     def cache_dir(self, value: str) -> None:
+        """Set the active cache directory."""
         with self._cache_lock:
             self._cache_dir = value
             self._owns_cache_dir = False
         self._cache_dir_local.value = value
 
     def _get_cache_dir(self) -> str:
+        """Return the thread-local cache directory if available."""
         local_cache_dir = getattr(self._cache_dir_local, "value", None)
         if local_cache_dir:
             return local_cache_dir
@@ -126,9 +139,11 @@ class TestFixtures:
             return self._cache_dir
 
     def __enter__(self) -> "TestFixtures":
+        """Enter a context manager for fixture helpers."""
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        """Clean up temporary resources on context exit."""
         self.cleanup_temp_repos()
         self.cleanup_backup_dirs()
         if self._owns_cache_dir:
@@ -141,6 +156,7 @@ class TestFixtures:
         validate: bool = True,
         cache_dir: Optional[str] = None,
     ) -> Path:
+        """Create a temporary repository populated with fixture files."""
         if cache_dir is None:
             self.new_cache_dir()
         else:
@@ -159,6 +175,7 @@ class TestFixtures:
 
     @staticmethod
     def create_sample_python_file() -> str:
+        """Return a sample Python source file for fixtures."""
         return (
             "\n".join(
                 [
@@ -182,6 +199,7 @@ class TestFixtures:
 
     @staticmethod
     def create_sample_javascript_file() -> str:
+        """Return a sample JavaScript source file for fixtures."""
         return (
             "\n".join(
                 [
@@ -207,6 +225,7 @@ class TestFixtures:
 
     @staticmethod
     def create_sample_typescript_file() -> str:
+        """Return a sample TypeScript source file for fixtures."""
         return (
             "\n".join(
                 [
@@ -235,6 +254,7 @@ class TestFixtures:
 
     @staticmethod
     def create_sample_tsx_file() -> str:
+        """Return a sample TSX source file for fixtures."""
         return (
             "\n".join(
                 [
@@ -254,6 +274,7 @@ class TestFixtures:
 
     @staticmethod
     def create_sample_rust_file() -> str:
+        """Return a sample Rust source file for fixtures."""
         return (
             "\n".join(
                 [
@@ -283,6 +304,7 @@ class TestFixtures:
 
     @staticmethod
     def create_sample_go_file() -> str:
+        """Return a sample Go source file for fixtures."""
         return (
             "\n".join(
                 [
@@ -304,6 +326,7 @@ class TestFixtures:
 
     @staticmethod
     def create_sample_java_file() -> str:
+        """Return a sample Java source file for fixtures."""
         return (
             "\n".join(
                 [
@@ -327,6 +350,7 @@ class TestFixtures:
         validate: bool = True,
         cache_dir: Optional[str] = None,
     ) -> Path:
+        """Create a temp repo from a named fixture template."""
         template = self.registry.get(name)
         return self.create_temp_repo(template.files, validate=validate, cache_dir=cache_dir)
 
@@ -338,6 +362,7 @@ class TestFixtures:
         description: str = "Composed fixture",
         cache_dir: Optional[str] = None,
     ) -> Path:
+        """Create a temp repo by composing multiple fixtures."""
         template = self.registry.compose(
             name=name,
             fixtures=fixtures,
@@ -347,19 +372,23 @@ class TestFixtures:
 
     @classmethod
     def list_fixture_templates(cls, tags: Optional[Iterable[str]] = None) -> List[FixtureTemplate]:
+        """List fixture templates, optionally filtered by tags."""
         return cls.registry.list(tags=tags)
 
     @classmethod
     def get_fixture_template(cls, name: str) -> FixtureTemplate:
+        """Return a fixture template by name."""
         return cls.registry.get(name)
 
     def cleanup_cache(self) -> None:
+        """Remove the active cache directory."""
         cache_dir = self._get_cache_dir()
         if cache_dir and os.path.isdir(cache_dir):
             shutil.rmtree(cache_dir)
             logger.debug("Removed cache dir %s", cache_dir)
 
     def _cleanup_owned_cache_dir(self) -> None:
+        """Remove an owned cache directory."""
         with self._cache_lock:
             cache_dir = self._cache_dir
         if cache_dir and os.path.isdir(cache_dir):
@@ -367,6 +396,7 @@ class TestFixtures:
             logger.debug("Removed cache dir %s", cache_dir)
 
     def create_cache_dir(self, prefix: str = "gloggur-cache-") -> Path:
+        """Create and track a new cache directory."""
         with self._cache_lock:
             cache_dir = Path(tempfile.mkdtemp(prefix=prefix))
             self._cache_dirs.append(cache_dir)
@@ -374,11 +404,13 @@ class TestFixtures:
             return cache_dir
 
     def new_cache_dir(self, prefix: str = "gloggur-cache-") -> Path:
+        """Create and activate a new cache directory."""
         cache_dir = self.create_cache_dir(prefix=prefix)
         self._cache_dir_local.value = str(cache_dir)
         return cache_dir
 
     def cleanup_cache_dirs(self) -> None:
+        """Remove any tracked cache directories."""
         with self._cache_lock:
             cache_dirs = list(self._cache_dirs)
             self._cache_dirs.clear()
@@ -388,6 +420,7 @@ class TestFixtures:
                 logger.debug("Removed cache dir %s", path)
 
     def backup_cache(self) -> Optional[Path]:
+        """Create a backup copy of the active cache directory."""
         cache_path = Path(self._get_cache_dir())
         if not cache_path.exists():
             return None
@@ -399,12 +432,14 @@ class TestFixtures:
         return backup_dir
 
     def restore_cache(self, backup_path: Path) -> None:
+        """Restore the cache directory from a backup."""
         cache_path = Path(self._get_cache_dir())
         if cache_path.exists():
             shutil.rmtree(cache_path)
         shutil.copytree(backup_path, cache_path)
 
     def cleanup_temp_repos(self) -> None:
+        """Remove all temporary repositories."""
         for path in self._temp_dirs:
             if path.exists():
                 shutil.rmtree(path)
@@ -412,6 +447,7 @@ class TestFixtures:
         self._temp_dirs.clear()
 
     def cleanup_backup_dirs(self) -> None:
+        """Remove all cache backup directories."""
         for path in self._backup_dirs:
             if path.exists():
                 shutil.rmtree(path)
@@ -420,6 +456,7 @@ class TestFixtures:
 
     @staticmethod
     def _normalize_files(files: Dict[str, Union[str, FixtureFile]]) -> Dict[str, FixtureFile]:
+        """Normalize fixture file inputs into FixtureFile instances."""
         normalized: Dict[str, FixtureFile] = {}
         for path, content in files.items():
             if isinstance(content, FixtureFile):
@@ -429,6 +466,7 @@ class TestFixtures:
         return normalized
 
     def _validate_fixture_files(self, files: Dict[str, FixtureFile]) -> None:
+        """Validate fixture file contents before use."""
         errors: List[str] = []
         for path, fixture_file in files.items():
             if not fixture_file.validate:
@@ -446,10 +484,12 @@ class TestFixtures:
 
     @staticmethod
     def _infer_language(path: str) -> Optional[str]:
+        """Infer language from file extension."""
         return _LANGUAGE_BY_EXTENSION.get(Path(path).suffix.lower())
 
     @staticmethod
     def _validate_source(path: str, source: str, language: str) -> None:
+        """Validate source code syntax for a given language."""
         if language == "python":
             try:
                 ast.parse(source, filename=path)
@@ -463,6 +503,7 @@ class TestFixtures:
 
     @staticmethod
     def _tree_has_error(node) -> bool:
+        """Return True if a tree-sitter node contains errors."""
         if getattr(node, "is_error", False) or getattr(node, "is_missing", False):
             return True
         if node.type == "ERROR":
@@ -474,6 +515,7 @@ class TestFixtures:
 
 
 def _register_default_fixtures(registry: FixtureRegistry) -> None:
+    """Register built-in fixture templates in the registry."""
     python_basic = FixtureTemplate(
         name="python_basic",
         description="Single-file Python fixture with class and function.",

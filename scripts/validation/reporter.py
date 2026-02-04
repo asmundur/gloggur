@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 @dataclass
 class TestResult:
+    """Result of a single validation test."""
     __test__ = False
 
     passed: bool
@@ -17,6 +18,7 @@ class TestResult:
 
 @dataclass
 class PerformanceMetric:
+    """Performance measurement for a validation step."""
     name: str
     duration_ms: Optional[float] = None
     memory_mb: Optional[float] = None
@@ -26,6 +28,7 @@ class PerformanceMetric:
 
 @dataclass
 class PerformanceThresholds:
+    """Thresholds for performance warnings."""
     max_duration_ms: Optional[float] = None
     max_memory_mb: Optional[float] = None
     min_throughput: Optional[float] = None
@@ -33,6 +36,7 @@ class PerformanceThresholds:
 
 @dataclass
 class PerformanceTrendPoint:
+    """Single trend point for performance metrics."""
     label: str
     duration_ms: Optional[float] = None
     memory_mb: Optional[float] = None
@@ -42,12 +46,15 @@ class PerformanceTrendPoint:
 
 @dataclass
 class _Section:
+    """Section of the report containing test results."""
     title: str
     results: List[Dict[str, object]]
 
 
 class Reporter:
+    """Collects validation results and formats reports."""
     def __init__(self) -> None:
+        """Initialize an empty reporter."""
         self._sections: List[_Section] = []
         self._current: Optional[_Section] = None
         self._performance: Dict[str, PerformanceMetric] = {}
@@ -59,6 +66,7 @@ class Reporter:
         self._logger = logging.getLogger(__name__)
 
     def add_section(self, title: str) -> None:
+        """Add a new report section."""
         with self._lock:
             section = _Section(title=title, results=[])
             self._sections.append(section)
@@ -66,6 +74,7 @@ class Reporter:
             self._logger.debug("Added report section: %s", title)
 
     def add_test_result(self, name: str, result: TestResult) -> None:
+        """Add a test result to the current section."""
         with self._lock:
             if self._current is None:
                 self.add_section("General")
@@ -74,6 +83,7 @@ class Reporter:
             self._logger.info("Recorded test result: %s (passed=%s)", name, result.passed)
 
     def add_test_result_to_section(self, section_title: str, name: str, result: TestResult) -> None:
+        """Add a test result to a named section."""
         with self._lock:
             section = next((item for item in self._sections if item.title == section_title), None)
             if section is None:
@@ -92,6 +102,7 @@ class Reporter:
         throughput_unit: Optional[str] = None,
         thresholds: Optional[PerformanceThresholds] = None,
     ) -> None:
+        """Record a performance metric and evaluate thresholds."""
         with self._lock:
             metric = PerformanceMetric(
                 name=name,
@@ -114,6 +125,7 @@ class Reporter:
         max_memory_mb: Optional[float] = None,
         min_throughput: Optional[float] = None,
     ) -> None:
+        """Set thresholds for a named performance metric."""
         with self._lock:
             self._performance_thresholds[name] = PerformanceThresholds(
                 max_duration_ms=max_duration_ms,
@@ -134,6 +146,7 @@ class Reporter:
         throughput: Optional[float] = None,
         throughput_unit: Optional[str] = None,
     ) -> None:
+        """Append a trend point for a named performance metric."""
         with self._lock:
             points = self._performance_trends.setdefault(name, [])
             points.append(
@@ -147,10 +160,12 @@ class Reporter:
             )
 
     def set_baseline_metrics(self, baseline: Dict[str, PerformanceMetric]) -> None:
+        """Set baseline metrics for comparisons."""
         with self._lock:
             self._baseline = dict(baseline)
 
     def load_baseline_from_payload(self, payload: Dict[str, object]) -> None:
+        """Load baseline metrics from a JSON payload."""
         with self._lock:
             if not isinstance(payload, dict):
                 return
@@ -177,6 +192,7 @@ class Reporter:
                 self._baseline = baseline
 
     def add_baseline_trends(self, baseline_label: str = "baseline", current_label: str = "current") -> None:
+        """Add baseline and current points to trend data."""
         with self._lock:
             if not self._baseline:
                 return
@@ -202,6 +218,7 @@ class Reporter:
                 )
 
     def generate_markdown(self) -> str:
+        """Generate a markdown report of validation results."""
         with self._lock:
             total, passed, failed = self._summary_counts()
             lines = ["# Validation Report", "", "## Summary", ""]
@@ -224,6 +241,7 @@ class Reporter:
             return "\n".join(lines).strip() + "\n"
 
     def render_performance_markdown(self) -> str:
+        """Render the performance section as markdown."""
         with self._lock:
             if not self._performance:
                 return ""
@@ -257,6 +275,7 @@ class Reporter:
             return "\n".join(lines).strip()
 
     def generate_json(self) -> Dict[str, object]:
+        """Generate a JSON payload with results and metrics."""
         with self._lock:
             total, passed, failed = self._summary_counts()
             payload = {
@@ -294,6 +313,7 @@ class Reporter:
             return payload
 
     def print_summary(self) -> None:
+        """Print a colorized summary to stdout."""
         with self._lock:
             total, passed, failed = self._summary_counts()
             green = "\033[92m"
@@ -311,6 +331,7 @@ class Reporter:
                 print(f"{green}All tests passed{reset}")
 
     def _summary_counts(self) -> tuple[int, int, int]:
+        """Return total/passed/failed counts."""
         with self._lock:
             total = 0
             passed = 0
@@ -324,6 +345,7 @@ class Reporter:
             return total, passed, failed
 
     def _evaluate_thresholds(self, name: str, metric: PerformanceMetric) -> None:
+        """Evaluate a metric against thresholds and record warnings."""
         thresholds = self._performance_thresholds.get(name)
         if not thresholds:
             return
@@ -352,6 +374,7 @@ class Reporter:
                 )
 
     def _format_comparison_lines(self, name: str, metric: PerformanceMetric) -> List[str]:
+        """Format comparison lines for a metric against baseline."""
         baseline = self._baseline.get(name)
         if not baseline:
             return []
@@ -387,6 +410,7 @@ class Reporter:
         return lines
 
     def _build_comparisons_payload(self) -> Dict[str, object]:
+        """Build JSON payload for baseline comparisons."""
         comparisons: Dict[str, object] = {}
         for name, metric in self._performance.items():
             baseline = self._baseline.get(name)
@@ -400,6 +424,7 @@ class Reporter:
         return comparisons
 
     def _render_trend_charts(self) -> List[str]:
+        """Render mermaid charts for performance trends."""
         if not self._performance_trends:
             return []
         lines: List[str] = []
@@ -414,6 +439,7 @@ class Reporter:
 
 
 def _metric_payload(metric: PerformanceMetric) -> Dict[str, object]:
+    """Serialize a performance metric for JSON output."""
     return {
         "duration_ms": metric.duration_ms,
         "memory_mb": metric.memory_mb,
@@ -423,6 +449,7 @@ def _metric_payload(metric: PerformanceMetric) -> Dict[str, object]:
 
 
 def _threshold_payload(thresholds: PerformanceThresholds) -> Dict[str, object]:
+    """Serialize performance thresholds for JSON output."""
     return {
         "max_duration_ms": thresholds.max_duration_ms,
         "max_memory_mb": thresholds.max_memory_mb,
@@ -431,6 +458,7 @@ def _threshold_payload(thresholds: PerformanceThresholds) -> Dict[str, object]:
 
 
 def _trend_payload(point: PerformanceTrendPoint) -> Dict[str, object]:
+    """Serialize a trend point for JSON output."""
     return {
         "label": point.label,
         "duration_ms": point.duration_ms,
@@ -441,6 +469,7 @@ def _trend_payload(point: PerformanceTrendPoint) -> Dict[str, object]:
 
 
 def _format_metric_lines(metric: PerformanceMetric) -> List[str]:
+    """Format performance metrics as markdown lines."""
     lines: List[str] = []
     if metric.duration_ms is not None:
         lines.append(f"- Duration: {_format_duration_ms(metric.duration_ms)}")
@@ -453,6 +482,7 @@ def _format_metric_lines(metric: PerformanceMetric) -> List[str]:
 
 
 def _format_duration_ms(duration_ms: float) -> str:
+    """Format a duration in milliseconds for display."""
     if duration_ms >= 1000:
         return f"{duration_ms / 1000:.2f}s"
     return f"{duration_ms:.0f}ms"
@@ -466,6 +496,7 @@ def _format_comparison_line(
     higher_is_better: bool,
     formatter,
 ) -> Optional[str]:
+    """Format a comparison line between current and baseline values."""
     if current is None or baseline is None:
         return None
     delta = current - baseline
@@ -482,6 +513,7 @@ def _format_comparison_line(
 
 
 def _comparison_payload(current: Optional[float], baseline: Optional[float], *, higher_is_better: bool) -> Dict[str, object]:
+    """Build a comparison payload for JSON output."""
     if current is None or baseline is None:
         return {"current": current, "baseline": baseline, "delta": None, "delta_pct": None, "status": "unknown"}
     delta = current - baseline
@@ -508,6 +540,7 @@ def _render_metric_trend(
     metric_type: str,
     unit: str,
 ) -> List[str]:
+    """Render mermaid chart lines for a metric trend."""
     values: List[float] = []
     labels: List[str] = []
     for point in points:
@@ -535,15 +568,18 @@ def _render_metric_trend(
 
 
 def _format_mermaid_labels(labels: List[str]) -> str:
+    """Escape labels for mermaid charts."""
     safe = [label.replace('"', "'") for label in labels]
     return ", ".join(f'"{label}"' for label in safe)
 
 
 def _format_mermaid_values(values: List[float]) -> str:
+    """Format numeric values for mermaid charts."""
     return ", ".join(f"{value:.2f}" for value in values)
 
 
 def _trend_unit(points: List[PerformanceTrendPoint]) -> str:
+    """Pick a throughput unit from trend points."""
     for point in points:
         if point.throughput_unit:
             return point.throughput_unit
@@ -551,6 +587,7 @@ def _trend_unit(points: List[PerformanceTrendPoint]) -> str:
 
 
 def _coerce_float(value: object) -> Optional[float]:
+    """Best-effort float coercion."""
     try:
         if value is None:
             return None
@@ -560,6 +597,7 @@ def _coerce_float(value: object) -> Optional[float]:
 
 
 def _coerce_str(value: object) -> Optional[str]:
+    """Best-effort string coercion."""
     if value is None:
         return None
     return str(value)
