@@ -16,7 +16,7 @@ from gloggur.storage.vector_store import VectorStore
 
 @dataclass
 class IndexResult:
-    """Summary of an indexing run (files, symbols, skipped, duration)."""
+    """Dataclass for indexing results: indexed_files, indexed_symbols, skipped_files, duration_ms."""
     indexed_files: int
     indexed_symbols: int
     skipped_files: int
@@ -70,7 +70,7 @@ class Indexer:
         )
 
     def index_file(self, path: str) -> Optional[int]:
-        """Index a single file if it has changed."""
+        """Index a file: hash content, parse symbols, update cache/vector store, return count."""
         try:
             with open(path, "r", encoding="utf8") as handle:
                 source = handle.read()
@@ -131,12 +131,12 @@ class Indexer:
 
     @staticmethod
     def _hash_content(source: str) -> str:
-        """Hash file contents for change detection."""
+        """Return sha256 hash of UTF-8 source text for change detection."""
         return hashlib.sha256(source.encode("utf8")).hexdigest()
 
     @staticmethod
     def _symbol_text(symbol: Symbol, lines: List[str]) -> str:
-        """Build embedding text from signature, docstring, and code snippet."""
+        """Build embedding text by slicing lines (start_line-1 .. start_line+3) and joining with signature/docstring."""
         snippet_start = max(0, symbol.start_line - 1)
         snippet_end = min(len(lines), snippet_start + 3)
         snippet = "\n".join(lines[snippet_start:snippet_end]).strip()

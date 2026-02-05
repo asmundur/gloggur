@@ -10,7 +10,7 @@ import yaml
 
 @dataclass
 class GloggurConfig:
-    """Configuration for indexing, embeddings, and docstring validation."""
+    """Config dataclass for embeddings, indexing paths, and docstring validation thresholds."""
 
     embedding_provider: str = "local"
     local_embedding_model: str = "microsoft/codebert-base"

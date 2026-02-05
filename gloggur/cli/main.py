@@ -48,7 +48,7 @@ def _hash_content(source: str) -> str:
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--embedding-provider", type=str, default=None)
 def index(path: str, config_path: Optional[str], as_json: bool, embedding_provider: Optional[str]) -> None:
-    """Index a repository or file and emit counts."""
+    """Load config (optional embedding_provider override), build CacheManager/VectorStore/ParserRegistry, index path, emit counts."""
     overrides = {}
     if embedding_provider:
         overrides["embedding_provider"] = embedding_provider
@@ -122,7 +122,19 @@ def search(
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--force", is_flag=True, default=False, help="Revalidate even if unchanged since last run.")
-def validate(path: str, config_path: Optional[str], as_json: bool, force: bool) -> None:
+@click.option(
+    "--symbol-id",
+    "symbol_ids",
+    multiple=True,
+    help="Validate only the specified symbol id(s). Can be repeated.",
+)
+def validate(
+    path: str,
+    config_path: Optional[str],
+    as_json: bool,
+    force: bool,
+    symbol_ids: tuple[str, ...],
+) -> None:
     """Run docstring validation and emit warnings/reports."""
     config = _load_config(config_path)
     cache = CacheManager(CacheConfig(config.cache_dir))
@@ -158,6 +170,10 @@ def validate(path: str, config_path: Optional[str], as_json: bool, force: bool) 
         if not parser_entry:
             continue
         file_symbols = parser_entry.parser.extract_symbols(file_path, source)
+        if symbol_ids:
+            file_symbols = [symbol for symbol in file_symbols if symbol.id in symbol_ids]
+            if not file_symbols:
+                continue
         lines = source.splitlines()
         for symbol in file_symbols:
             snippet_start = max(0, symbol.start_line - 1)
@@ -183,6 +199,7 @@ def validate(path: str, config_path: Optional[str], as_json: bool, force: bool) 
     warning_reports = [report for report in reports if report.warnings]
     payload = {
         "path": path,
+        "symbol_ids": list(symbol_ids) if symbol_ids else None,
         "warnings": [report.__dict__ for report in warning_reports],
         "total": len(warning_reports),
         "reports": [report.__dict__ for report in reports],

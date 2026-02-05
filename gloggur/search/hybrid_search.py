@@ -11,7 +11,7 @@ from gloggur.storage.vector_store import VectorStore
 
 @dataclass
 class SearchResult:
-    """Search hit containing a symbol id and similarity score."""
+    """Dataclass for search hits: symbol_id and similarity_score."""
     symbol_id: str
     similarity_score: float
 
