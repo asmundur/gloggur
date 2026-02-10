@@ -1,4 +1,4 @@
-# Gloggur Validation Report
+# Gloggur Verification Report
 
 **Generated:** 2026-02-01 18:07:46
 **Status:** PASSED (6/8 passed, 2 skipped)
@@ -18,7 +18,7 @@
 - [PASS] Phase 1 Smoke Tests: Test 1.1: Basic Indexing: Indexed 30 files, 372 symbols in 878ms
 - [PASS] Phase 1 Smoke Tests: Test 1.2: Incremental Indexing: Skipped 40/40 files; speedup 94.4% (878ms -> 49ms)
 - [PASS] Phase 1 Smoke Tests: Test 1.3: Search Functionality: Search returned 5 results with valid scores and filters
-- [PASS] Phase 1 Smoke Tests: Test 1.4: Docstring Validation: Validation returned 239 warning entries
+- [PASS] Phase 1 Smoke Tests: Test 1.4: Docstring Audit: Audit returned 239 warning entries
 - [PASS] Phase 1 Smoke Tests: Test 1.5: Status & Cache Management: Status reported 374 symbols; cache cleared successfully
 
 ## Phase 2: Embedding Providers

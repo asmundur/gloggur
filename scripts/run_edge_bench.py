@@ -14,13 +14,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.validation import CommandRunner, TestFixtures, Validators
-from scripts.validation.logging_utils import configure_logging
-from scripts.validation.report_templates import (
+from scripts.verification import CommandRunner, TestFixtures, Checks
+from scripts.verification.logging_utils import configure_logging
+from scripts.verification.report_templates import (
     PhaseReport,
     TestCaseResult,
-    ValidationReport,
-    build_validation_report,
+    VerificationReport,
+    build_verification_report,
     render_json,
     render_markdown,
 )
@@ -122,13 +122,13 @@ def _parse_streaming_output(stdout: str) -> Tuple[bool, List[Dict[str, object]]]
 
 
 def _test_empty_repository(fixtures: TestFixtures) -> TestCaseResult:
-    """Validate indexing on an empty repository."""
+    """Check indexing on an empty repository."""
     repo = fixtures.create_temp_repo({})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
     try:
         output = runner.run_index(str(repo))
-        schema = Validators.validate_index_output(output)
+        schema = Checks.check_index_output(output)
         if not schema.ok:
             return TestCaseResult(name="Test 3.1: Empty Repository", status="failed", message=schema.message)
         indexed_files = int(output.get("indexed_files", 0))
@@ -157,13 +157,13 @@ def _test_empty_repository(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
-    """Validate indexing skips unsupported files."""
+    """Check indexing skips unsupported files."""
     repo = fixtures.create_temp_repo({"README.txt": "just text\n", "notes.md": "# Notes\n"})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
     try:
         output = runner.run_index(str(repo))
-        schema = Validators.validate_index_output(output)
+        schema = Checks.check_index_output(output)
         if not schema.ok:
             return TestCaseResult(name="Test 3.2: Unsupported Files", status="failed", message=schema.message)
         indexed_files = int(output.get("indexed_files", 0))
@@ -192,13 +192,13 @@ def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
-    """Validate indexing handles malformed code."""
-    repo = fixtures.create_temp_repo({"broken.py": "def broken(:\n    pass\n"}, validate=False)
+    """Check indexing handles malformed code."""
+    repo = fixtures.create_temp_repo({"broken.py": "def broken(:\n    pass\n"}, screen=False)
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
     try:
         output = runner.run_index(str(repo))
-        schema = Validators.validate_index_output(output)
+        schema = Checks.check_index_output(output)
         if not schema.ok:
             return TestCaseResult(name="Test 3.3: Malformed Code", status="failed", message=schema.message)
         return TestCaseResult(
@@ -217,13 +217,13 @@ def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _test_large_repository(fixtures: TestFixtures, file_count: int = 500) -> TestCaseResult:
-    """Validate indexing performance on a large repository."""
+    """Check indexing performance on a large repository."""
     repo = _make_large_repo(fixtures, file_count=file_count)
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir, timeout=300.0)
     try:
         output = runner.run_index(str(repo))
-        schema = Validators.validate_index_output(output)
+        schema = Checks.check_index_output(output)
         if not schema.ok:
             return TestCaseResult(name="Test 3.4: Large Repository", status="failed", message=schema.message)
         duration_ms = float(output.get("duration_ms", 0))
@@ -260,7 +260,7 @@ def _test_large_repository(fixtures: TestFixtures, file_count: int = 500) -> Tes
 
 
 def _test_streaming_results(fixtures: TestFixtures) -> TestCaseResult:
-    """Validate search streaming output format."""
+    """Check search streaming output format."""
     repo = fixtures.create_temp_repo({"sample.py": fixtures.create_sample_python_file()})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir)
@@ -299,7 +299,7 @@ def _test_streaming_results(fixtures: TestFixtures) -> TestCaseResult:
 
 
 def _run_phase3(skip_large_repo: bool) -> PhaseReport:
-    """Run phase 3 edge-case validation tests."""
+    """Run phase 3 edge-case checks."""
     fixtures = TestFixtures()
     tests: List[TestCaseResult] = []
     start = time.perf_counter()
@@ -335,7 +335,7 @@ def _benchmark_indexing_speed(repo_path: Path) -> Tuple[TestCaseResult, Dict[str
     runner = _new_runner(cache_dir, timeout=300.0)
     try:
         output = runner.run_index(str(repo_path))
-        schema = Validators.validate_index_output(output)
+        schema = Checks.check_index_output(output)
         if not schema.ok:
             return (
                 TestCaseResult(name="Benchmark 4.1: Indexing Speed", status="failed", message=schema.message),
@@ -525,21 +525,25 @@ def _run_phase4(repo_path: Path) -> PhaseReport:
     )
 
 
-def run_validation(skip_large_repo: bool, benchmark_only: bool) -> ValidationReport:
-    """Run phase 3 and/or phase 4 validation."""
-    logger.info("Phase 3/4 validation started (skip_large_repo=%s, benchmark_only=%s)", skip_large_repo, benchmark_only)
+def run_edge_bench(skip_large_repo: bool, benchmark_only: bool) -> VerificationReport:
+    """Run phase 3 edge cases and/or phase 4 benchmarks."""
+    logger.info(
+        "Phase 3/4 run started (skip_large_repo=%s, benchmark_only=%s)",
+        skip_large_repo,
+        benchmark_only,
+    )
     phases: List[PhaseReport] = []
     if not benchmark_only:
         phases.append(_run_phase3(skip_large_repo))
     phases.append(_run_phase4(PROJECT_ROOT))
-    report = build_validation_report(phases)
-    logger.info("Phase 3/4 validation completed")
+    report = build_verification_report(phases)
+    logger.info("Phase 3/4 run completed")
     return report
 
 
 def main() -> int:
-    """CLI entrypoint for phase 3/4 validation."""
-    parser = argparse.ArgumentParser(description="Run Phase 3 & 4 validation tests for gloggur.")
+    """CLI entrypoint for phase 3/4 edge and bench runs."""
+    parser = argparse.ArgumentParser(description="Run Phase 3 & 4 edge/bench checks for gloggur.")
     parser.add_argument("--skip-large-repo", action="store_true", help="Skip large repo edge case test.")
     parser.add_argument("--benchmark-only", action="store_true", help="Run only Phase 4 benchmarks.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
@@ -558,7 +562,7 @@ def main() -> int:
         force=True,
     )
 
-    report = run_validation(skip_large_repo=args.skip_large_repo, benchmark_only=args.benchmark_only)
+    report = run_edge_bench(skip_large_repo=args.skip_large_repo, benchmark_only=args.benchmark_only)
     if args.format == "json":
         print(json.dumps(render_json(report), indent=2))
     else:

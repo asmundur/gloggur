@@ -8,7 +8,7 @@ Gloggur is a symbol-level, incremental codebase indexer for semantic search and 
 - Incremental indexing with SHA-256 hashing
 - Pluggable embedding backends (local models or OpenAI)
 - FAISS vector search with SQLite metadata
-- Docstring validation with semantic similarity scoring
+- Docstring audit with semantic similarity scoring
 - JSON output for CLI automation
 
 ## Installation
@@ -53,13 +53,13 @@ Stream results as line-delimited JSON:
 gloggur search "streaming parser" --top-k 50 --json --stream
 ```
 
-Validate docstrings (semantic similarity scoring):
+Inspect docstrings (semantic similarity scoring):
 
 ```bash
-gloggur validate . --json
+gloggur inspect . --json
 ```
 
-`gloggur validate` skips unchanged files by default. Use `--force` to revalidate everything.
+`gloggur inspect` skips unchanged files by default. Use `--force` to reinspect everything.
 
 Check status:
 
@@ -73,21 +73,21 @@ Clear cache:
 gloggur clear-cache --json
 ```
 
-## Validation
+## Verification
 
-Gloggur includes a validation suite to verify functionality:
+Gloggur includes a verification suite to verify functionality:
 
 ```bash
-# Run all validation tests
-python scripts/validate_all.py
+# Run all verification tests
+python scripts/run_suite.py
 
 # Run specific phases
-python scripts/validate_phase1.py  # Smoke tests
-python scripts/validate_phase2.py  # Embedding providers
-python scripts/validate_phase3_4.py  # Edge cases & performance
+python scripts/run_smoke.py  # Smoke tests
+python scripts/run_provider_probe.py  # Embedding providers
+python scripts/run_edge_bench.py  # Edge cases & performance
 ```
 
-See `docs/VALIDATION.md` for detailed documentation.
+See `docs/VERIFICATION.md` for detailed documentation.
 See `docs/AGENT_INTEGRATION.md` for agent integration guidance.
 
 ## Configuration

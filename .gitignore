@@ -18,8 +18,8 @@ htmlcov/
 dist/
 build/
 .gloggur-cache/
-validation_report.md
-validation_report.json
+verification_report.md
+verification_report.json
 .vscode/
 .idea/
 .DS_Store

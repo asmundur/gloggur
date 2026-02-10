@@ -19,8 +19,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from gloggur.indexer.cache import CacheConfig, CacheManager
-from scripts.validation import CommandRunner, Reporter, RetryConfig, TestFixtures, TestResult, Validators
-from scripts.validation.logging_utils import configure_logging
+from scripts.verification import CommandRunner, Reporter, RetryConfig, TestFixtures, TestResult, Checks
+from scripts.verification.logging_utils import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,8 @@ def _env_float(name: str, default: Optional[float] = None) -> Optional[float]:
         return default
 
 
-def _validate_required_fields(results: List[Dict[str, object]]) -> Optional[str]:
-    """Validate search results contain required fields."""
+def _check_required_fields(results: List[Dict[str, object]]) -> Optional[str]:
+    """Check search results contain required fields."""
     required = {"symbol", "kind", "file", "line", "signature", "similarity_score"}
     for idx, item in enumerate(results):
         missing = [field for field in required if field not in item]
@@ -109,7 +109,7 @@ def test_basic_indexing(runner: CommandRunner, cache_dir: str) -> Tuple[TestResu
     except Exception as exc:
         return TestResult(passed=False, message=f"Index command failed: {exc}"), {}
 
-    schema = Validators.validate_index_output(output)
+    schema = Checks.check_index_output(output)
     if not schema.ok:
         return TestResult(passed=False, message=schema.message, details=schema.details), output
 
@@ -122,12 +122,12 @@ def test_basic_indexing(runner: CommandRunner, cache_dir: str) -> Tuple[TestResu
     if indexed_symbols <= 0:
         return TestResult(passed=False, message="No symbols indexed", details=output), output
 
-    cache_check = Validators.check_cache_exists(cache_dir)
+    cache_check = Checks.check_cache_exists(cache_dir)
     if not cache_check.ok:
         return TestResult(passed=False, message=cache_check.message, details=cache_check.details), output
 
     db_path = os.path.join(cache_dir, "index.db")
-    db_check = Validators.check_database_symbols(db_path, 1)
+    db_check = Checks.check_database_symbols(db_path, 1)
     if not db_check.ok:
         return TestResult(passed=False, message=db_check.message, details=db_check.details), output
 
@@ -224,7 +224,7 @@ def test_search_functionality(runner: CommandRunner, target_file: Path, cache_di
     except Exception as exc:
         return TestResult(passed=False, message=f"Search command failed: {exc}")
 
-    schema = Validators.validate_search_output(output)
+    schema = Checks.check_search_output(output)
     if not schema.ok:
         return TestResult(passed=False, message=schema.message, details=schema.details)
 
@@ -232,7 +232,7 @@ def test_search_functionality(runner: CommandRunner, target_file: Path, cache_di
     if not results:
         return TestResult(passed=False, message="Search returned no results", details=output)
 
-    missing_fields = _validate_required_fields(results)
+    missing_fields = _check_required_fields(results)
     if missing_fields:
         return TestResult(passed=False, message=missing_fields, details=output)
 
@@ -315,7 +315,7 @@ def _create_docstring_fixture(path: Path) -> None:
     content = (
         "\n".join(
             [
-                '"""Docstring validation fixture."""',
+                '"""Docstring audit fixture."""',
                 "",
                 "class MissingDocstring:",
                 "    def run(self) -> None:",
@@ -336,20 +336,20 @@ def _create_docstring_fixture(path: Path) -> None:
     path.write_text(content, encoding="utf8")
 
 
-def test_docstring_validation(runner: CommandRunner, fixture_path: Path) -> TestResult:
-    """Smoke test for docstring validation warnings."""
+def test_docstring_audit(runner: CommandRunner, fixture_path: Path) -> TestResult:
+    """Smoke test for docstring audit warnings."""
     try:
         _create_docstring_fixture(fixture_path)
-        output = runner.run_validate(".")
+        output = runner.run_inspect(".")
     except Exception as exc:
-        return TestResult(passed=False, message=f"Validate command failed: {exc}")
+        return TestResult(passed=False, message=f"Inspect command failed: {exc}")
     finally:
         if fixture_path.exists():
             fixture_path.unlink()
 
     warnings = output.get("warnings", [])
     if not isinstance(warnings, list) or not warnings:
-        return TestResult(passed=False, message="Validation returned no warnings", details=output)
+        return TestResult(passed=False, message="Inspection returned no warnings", details=output)
 
     missing_doc = False
     for report in warnings:
@@ -361,11 +361,11 @@ def test_docstring_validation(runner: CommandRunner, fixture_path: Path) -> Test
 
     reports = output.get("reports", [])
     if not isinstance(reports, list) or not reports:
-        return TestResult(passed=False, message="Validation returned no reports", details=output)
+        return TestResult(passed=False, message="Inspection returned no reports", details=output)
     if not any(report.get("semantic_score") is not None for report in reports if isinstance(report, dict)):
         return TestResult(passed=False, message="No semantic scores reported", details=output)
 
-    message = f"Validation returned {len(warnings)} warning entries"
+    message = f"Inspection returned {len(warnings)} warning entries"
     details = {"total_warnings": len(warnings)}
     return TestResult(passed=True, message=message, details=details)
 
@@ -427,7 +427,7 @@ def run_phase1(
     emit_summary: bool = True,
     baseline_path: Optional[str] = None,
 ) -> Tuple[int, str, Dict[str, object]]:
-    """Run phase 1 validation tests."""
+    """Run phase 1 smoke tests."""
     start = time.perf_counter()
     logger.info("Phase 1 started")
     reporter = Reporter()
@@ -537,11 +537,11 @@ def run_phase1(
             if verbose and test_result.details:
                 print(json.dumps({"test": "search_functionality", "details": test_result.details}, indent=2))
 
-            test_result = test_docstring_validation(runner, fixture_path)
-            results.append(Phase1Result("Test 1.4: Docstring Validation", test_result))
-            reporter.add_test_result("Test 1.4: Docstring Validation", test_result)
+            test_result = test_docstring_audit(runner, fixture_path)
+            results.append(Phase1Result("Test 1.4: Docstring Audit", test_result))
+            reporter.add_test_result("Test 1.4: Docstring Audit", test_result)
             if verbose and test_result.details:
-                print(json.dumps({"test": "docstring_validation", "details": test_result.details}, indent=2))
+                print(json.dumps({"test": "docstring_audit", "details": test_result.details}, indent=2))
 
             test_result = test_status_and_cache(runner)
             results.append(Phase1Result("Test 1.5: Status & Cache Management", test_result))
@@ -591,7 +591,7 @@ def run_phase1(
 
 
 def main() -> None:
-    """CLI entrypoint for phase 1 validation."""
+    """CLI entrypoint for phase 1 smoke run."""
     parser = argparse.ArgumentParser(description="Run Phase 1 smoke tests for gloggur.")
     parser.add_argument("--output", type=str, default=None, help="Write markdown report to a file")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")

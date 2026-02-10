@@ -41,8 +41,8 @@ def test_cache_round_trip_symbols_metadata_and_warnings() -> None:
     assert loaded.version == "1"
     assert loaded.indexed_files == 1
 
-    cache.set_validation_warnings(symbol.id, ["Missing docstring"])
-    warnings = cache.get_validation_warnings(symbol.id)
+    cache.set_audit_warnings(symbol.id, ["Missing docstring"])
+    warnings = cache.get_audit_warnings(symbol.id)
     assert warnings == ["Missing docstring"]
 
 

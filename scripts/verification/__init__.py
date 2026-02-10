@@ -1,7 +1,7 @@
-from scripts.validation.fixtures import FIXTURE_REGISTRY, FixtureRegistry, FixtureTemplate, TestFixtures
-from scripts.validation.logging_utils import configure_logging, get_trace_id, log_event, set_trace_id
-from scripts.validation.reporter import Reporter, TestResult
-from scripts.validation.runner import (
+from scripts.verification.fixtures import FIXTURE_REGISTRY, FixtureRegistry, FixtureTemplate, TestFixtures
+from scripts.verification.logging_utils import configure_logging, get_trace_id, log_event, set_trace_id
+from scripts.verification.reporter import Reporter, TestResult
+from scripts.verification.runner import (
     CommandResult,
     CommandRunner,
     RetryConfig,
@@ -9,7 +9,7 @@ from scripts.validation.runner import (
     TestOutcome,
     TestTask,
 )
-from scripts.validation.validators import ValidationResult, Validators
+from scripts.verification.checks import CheckResult, Checks
 
 __all__ = [
     "CommandResult",
@@ -28,6 +28,6 @@ __all__ = [
     "TestOrchestrator",
     "TestTask",
     "TestOutcome",
-    "ValidationResult",
-    "Validators",
+    "CheckResult",
+    "Checks",
 ]

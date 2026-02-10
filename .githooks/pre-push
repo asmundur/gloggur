@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-echo "Running quick validation (Phase 1) before push..."
+echo "Running quick verification (Phase 1) before push..."
 if [ -x ".venv/bin/python" ]; then
-  .venv/bin/python scripts/validate_all.py --phases 1
+  .venv/bin/python scripts/run_suite.py --phases 1
 else
-  python3 scripts/validate_all.py --phases 1
+  python3 scripts/run_suite.py --phases 1
 fi
 
-echo "Validation passed. Proceeding with push."
+echo "Verification passed. Proceeding with push."

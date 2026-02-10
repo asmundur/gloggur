@@ -1,4 +1,4 @@
-name: Validation Suite
+name: Verification Suite
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
     - cron: '0 2 * * *'
 
 jobs:
-  validate:
+  verify:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -29,27 +29,27 @@ jobs:
           pip install -e .
 
       - name: Run Phase 1 (Smoke Tests)
-        run: python scripts/validate_phase1.py
+        run: python scripts/run_smoke.py
 
       - name: Run Phase 2 (Embedding Providers)
-        run: python scripts/validate_phase2.py
+        run: python scripts/run_provider_probe.py
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: Run Phase 3 & 4 (Edge Cases & Performance)
-        run: python scripts/validate_phase3_4.py
+        run: python scripts/run_edge_bench.py
 
       - name: Generate Full Report
         if: always()
         run: |
-          python scripts/validate_all.py --output validation_report.md
+          python scripts/run_suite.py --output verification_report.md
 
       - name: Upload Report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-report-py${{ matrix.python-version }}
-          path: validation_report.md
+          name: verification-report-py${{ matrix.python-version }}
+          path: verification_report.md
 
       - name: Comment PR with Results
         if: github.event_name == 'pull_request'
@@ -57,10 +57,10 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const report = fs.readFileSync('validation_report.md', 'utf8');
+            const report = fs.readFileSync('verification_report.md', 'utf8');
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '## Validation Report\n\n' + report
+              body: '## Verification Report\n\n' + report
             });

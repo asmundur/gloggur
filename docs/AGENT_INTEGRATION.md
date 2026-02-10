@@ -16,11 +16,11 @@ This repository ships Gloggur, a symbol-level indexer intended for coding agents
    ```bash
    gloggur status --json
    ```
-4. **Validate docstrings (optional but recommended for documentation changes)**:
+4. **Inspect docstrings (optional but recommended for documentation changes)**:
    ```bash
-   gloggur validate . --json
+   gloggur inspect . --json
    ```
-   Validation skips unchanged files by default; add `--force` to revalidate everything.
+   Inspection skips unchanged files by default; add `--force` to reinspect everything.
 
 ## Tips for effective searches
 

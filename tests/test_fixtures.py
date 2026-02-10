@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.validation.fixtures import FIXTURE_REGISTRY, FixtureFile, TestFixtures
+from scripts.verification.fixtures import FIXTURE_REGISTRY, FixtureFile, TestFixtures
 
 
-def test_validate_fixture_files_rejects_malformed_sources() -> None:
-    """Ensure fixture validation rejects malformed source files."""
+def test_screen_fixture_files_rejects_malformed_sources() -> None:
+    """Ensure fixture screening rejects malformed source files."""
     with TestFixtures() as fixtures:
         files = {
             "bad.py": FixtureFile("def oops(:\n    pass\n"),
@@ -14,10 +14,10 @@ def test_validate_fixture_files_rejects_malformed_sources() -> None:
             "bad.ts": FixtureFile("export interface User { name: ; }\n"),
         }
         with pytest.raises(ValueError) as excinfo:
-            fixtures._validate_fixture_files(files)
+            fixtures._screen_fixture_files(files)
 
     message = str(excinfo.value)
-    assert "Fixture validation failed" in message
+    assert "Fixture screening failed" in message
     assert "bad.py" in message
     assert "bad.js" in message
     assert "bad.ts" in message

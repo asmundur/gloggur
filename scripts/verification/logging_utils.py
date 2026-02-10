@@ -39,7 +39,7 @@ def configure_logging(
     stream: Optional[str] = None,
     force: bool = False,
 ) -> str:
-    """Configure global logging for validation scripts."""
+    """Configure global logging for verification scripts."""
     global _CONFIGURED
     if _CONFIGURED and not force:
         return get_trace_id()

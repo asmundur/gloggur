@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 @dataclass
 class TestResult:
-    """Result of a single validation test."""
+    """Result of a single verification test."""
     __test__ = False
 
     passed: bool
@@ -18,7 +18,7 @@ class TestResult:
 
 @dataclass
 class PerformanceMetric:
-    """Performance measurement for a validation step."""
+    """Performance measurement for a verification step."""
     name: str
     duration_ms: Optional[float] = None
     memory_mb: Optional[float] = None
@@ -52,7 +52,7 @@ class _Section:
 
 
 class Reporter:
-    """Collects validation results and formats reports."""
+    """Collects verification results and formats reports."""
     def __init__(self) -> None:
         """Initialize an empty reporter."""
         self._sections: List[_Section] = []
@@ -218,10 +218,10 @@ class Reporter:
                 )
 
     def generate_markdown(self) -> str:
-        """Generate a markdown report of validation results."""
+        """Generate a markdown report of verification results."""
         with self._lock:
             total, passed, failed = self._summary_counts()
-            lines = ["# Validation Report", "", "## Summary", ""]
+            lines = ["# Verification Report", "", "## Summary", ""]
             lines.append(f"- Total: {total}")
             lines.append(f"- Passed: {passed}")
             lines.append(f"- Failed: {failed}")
@@ -320,7 +320,7 @@ class Reporter:
             red = "\033[91m"
             yellow = "\033[93m"
             reset = "\033[0m"
-            print(f"{yellow}Validation Summary{reset}: total={total} passed={passed} failed={failed}")
+            print(f"{yellow}Verification Summary{reset}: total={total} passed={passed} failed={failed}")
             if failed:
                 for section in self._sections:
                     for item in section.results:

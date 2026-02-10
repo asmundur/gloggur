@@ -11,17 +11,17 @@ from gloggur.config import GloggurConfig
 from gloggur.embeddings.factory import create_embedding_provider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.indexer import Indexer
-from gloggur.models import ValidationFileMetadata
+from gloggur.models import AuditFileMetadata
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
-from gloggur.validation.docstring_validator import validate_docstrings
+from gloggur.audit.docstring_audit import audit_docstrings
 
 
 @click.group()
 def cli() -> None:
-    """Gloggur CLI for indexing, search, and docstring validation."""
+    """Gloggur CLI for indexing, search, and docstring inspection."""
 
 
 def _emit(payload: Dict[str, object], as_json: bool) -> None:
@@ -121,21 +121,21 @@ def search(
 @click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
-@click.option("--force", is_flag=True, default=False, help="Revalidate even if unchanged since last run.")
+@click.option("--force", is_flag=True, default=False, help="Reinspect even if unchanged since last run.")
 @click.option(
     "--symbol-id",
     "symbol_ids",
     multiple=True,
-    help="Validate only the specified symbol id(s). Can be repeated.",
+    help="Inspect only the specified symbol id(s). Can be repeated.",
 )
-def validate(
+def inspect(
     path: str,
     config_path: Optional[str],
     as_json: bool,
     force: bool,
     symbol_ids: tuple[str, ...],
 ) -> None:
-    """Run docstring validation and emit warnings/reports."""
+    """Run docstring inspection and emit warnings/reports."""
     config = _load_config(config_path)
     cache = CacheManager(CacheConfig(config.cache_dir))
     parser_registry = ParserRegistry()
@@ -144,7 +144,7 @@ def validate(
     code_texts: Dict[str, str] = {}
     processed_files: List[Tuple[str, str]] = []
     skipped_files = 0
-    validated_files = 0
+    inspected_files = 0
     paths = [path]
     if os.path.isdir(path):
         paths = []
@@ -162,7 +162,7 @@ def validate(
             continue
         content_hash = _hash_content(source)
         if not force:
-            existing = cache.get_validation_file_metadata(file_path)
+            existing = cache.get_audit_file_metadata(file_path)
             if existing and existing.content_hash == content_hash:
                 skipped_files += 1
                 continue
@@ -181,8 +181,8 @@ def validate(
             code_texts[symbol.id] = "\n".join(lines[snippet_start:snippet_end])
         symbols.extend(file_symbols)
         processed_files.append((file_path, content_hash))
-        validated_files += 1
-    reports = validate_docstrings(
+        inspected_files += 1
+    reports = audit_docstrings(
         symbols,
         code_texts=code_texts,
         embedding_provider=embedding,
@@ -191,10 +191,10 @@ def validate(
         semantic_max_chars=config.docstring_semantic_max_chars,
     )
     for report in reports:
-        cache.set_validation_warnings(report.symbol_id, report.warnings)
+        cache.set_audit_warnings(report.symbol_id, report.warnings)
     for file_path, content_hash in processed_files:
-        cache.upsert_validation_file_metadata(
-            ValidationFileMetadata(path=file_path, content_hash=content_hash)
+        cache.upsert_audit_file_metadata(
+            AuditFileMetadata(path=file_path, content_hash=content_hash)
         )
     warning_reports = [report for report in reports if report.warnings]
     payload = {
@@ -204,7 +204,7 @@ def validate(
         "total": len(warning_reports),
         "reports": [report.__dict__ for report in reports],
         "reports_total": len(reports),
-        "validated_files": validated_files,
+        "inspected_files": inspected_files,
         "skipped_files": skipped_files,
     }
     _emit(payload, as_json)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.validation.fixtures import TestFixtures
+from scripts.verification.fixtures import TestFixtures
 
 pytest.importorskip("faiss")
 

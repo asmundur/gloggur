@@ -35,9 +35,9 @@ stderr: Traceback (most recent call last):
     import click
 ModuleNotFoundError: No module named 'click'
 
-## Test 1.4: Docstring Validation - FAIL
+## Test 1.4: Docstring Audit - FAIL
 
-- Validate command failed: Command failed (exit 1): /opt/homebrew/opt/python@3.13/bin/python3.13 -m gloggur.cli.main validate . --json
+- Inspect command failed: Command failed (exit 1): /opt/homebrew/opt/python@3.13/bin/python3.13 -m gloggur.cli.main inspect . --json
 stderr: Traceback (most recent call last):
   File "<frozen runpy>", line 198, in _run_module_as_main
   File "<frozen runpy>", line 88, in _run_code

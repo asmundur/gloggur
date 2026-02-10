@@ -5,13 +5,13 @@ from datetime import datetime
 import logging
 from typing import Dict, List, Optional
 
-from scripts.validation.logging_utils import log_event
+from scripts.verification.logging_utils import log_event
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class TestCaseResult:
-    """Result of a single validation test case."""
+    """Result of a single verification test case."""
     name: str
     status: str
     message: str
@@ -20,7 +20,7 @@ class TestCaseResult:
 
 @dataclass
 class PhaseReport:
-    """Summary of a validation phase."""
+    """Summary of a verification phase."""
     phase: int
     title: str
     status: str
@@ -32,8 +32,8 @@ class PhaseReport:
 
 
 @dataclass
-class ValidationReport:
-    """Aggregate report across all validation phases."""
+class VerificationReport:
+    """Aggregate report across all verification phases."""
     generated_at: str
     status: str
     summary: Dict[str, int]
@@ -43,10 +43,10 @@ class ValidationReport:
     recommendation: str
 
 
-def build_validation_report(
+def build_verification_report(
     phases: List[PhaseReport], generated_at: Optional[str] = None
-) -> ValidationReport:
-    """Build a validation report from per-phase data."""
+) -> VerificationReport:
+    """Build a verification report from per-phase data."""
     total = 0
     passed = 0
     failed = 0
@@ -88,7 +88,7 @@ def build_validation_report(
     log_event(
         logger,
         logging.INFO,
-        "validation.report.build",
+        "verification.report.build",
         total=total,
         passed=passed,
         failed=failed,
@@ -96,7 +96,7 @@ def build_validation_report(
         status=status,
         phases=len(phases),
     )
-    return ValidationReport(
+    return VerificationReport(
         generated_at=generated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         status=status,
         summary={"total": total, "passed": passed, "failed": failed, "skipped": skipped},
@@ -107,8 +107,8 @@ def build_validation_report(
     )
 
 
-def render_markdown(report: ValidationReport) -> str:
-    """Render a validation report as Markdown."""
+def render_markdown(report: VerificationReport) -> str:
+    """Render a verification report as Markdown."""
     total = report.summary["total"]
     passed = report.summary["passed"]
     failed = report.summary["failed"]
@@ -116,7 +116,7 @@ def render_markdown(report: ValidationReport) -> str:
     status_label = _status_label(report.status, total, passed, failed, skipped)
 
     lines = [
-        "# Gloggur Validation Report",
+        "# Gloggur Verification Report",
         "",
         f"**Generated:** {report.generated_at}",
         f"**Status:** {status_label}",
@@ -168,8 +168,8 @@ def render_markdown(report: ValidationReport) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def render_json(report: ValidationReport) -> Dict[str, object]:
-    """Render a validation report as JSON-compatible dict."""
+def render_json(report: VerificationReport) -> Dict[str, object]:
+    """Render a verification report as JSON-compatible dict."""
     return {
         "generated_at": report.generated_at,
         "status": report.status,

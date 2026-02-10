@@ -29,7 +29,7 @@ class FixtureFile:
     """Fixture file content and metadata."""
     content: str
     language: Optional[str] = None
-    validate: bool = True
+    screen: bool = True
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class FixtureTemplate:
 
 
 class FixtureRegistry:
-    """Registry for fixture templates used in validation tests."""
+    """Registry for fixture templates used in verification tests."""
     def __init__(self) -> None:
         """Initialize an empty fixture registry."""
         self._templates: Dict[str, FixtureTemplate] = {}
@@ -153,7 +153,7 @@ class TestFixtures:
     def create_temp_repo(
         self,
         files: Dict[str, Union[str, FixtureFile]],
-        validate: bool = True,
+        screen: bool = True,
         cache_dir: Optional[str] = None,
     ) -> Path:
         """Create a temporary repository populated with fixture files."""
@@ -162,8 +162,8 @@ class TestFixtures:
         else:
             self._cache_dir_local.value = str(cache_dir)
         normalized_files = self._normalize_files(files)
-        if validate:
-            self._validate_fixture_files(normalized_files)
+        if screen:
+            self._screen_fixture_files(normalized_files)
         repo_dir = Path(tempfile.mkdtemp(prefix="gloggur-test-"))
         for relative_path, fixture_file in normalized_files.items():
             target = repo_dir / relative_path
@@ -179,7 +179,7 @@ class TestFixtures:
         return (
             "\n".join(
                 [
-                    "\"\"\"Sample module for validation tests.\"\"\"",
+                    "\"\"\"Sample module for verification tests.\"\"\"",
                     "",
                     "class Greeter:",
                     "    \"\"\"Simple greeting class.\"\"\"",
@@ -203,7 +203,7 @@ class TestFixtures:
         return (
             "\n".join(
                 [
-                    "/** Sample module for validation tests. */",
+                    "/** Sample module for verification tests. */",
                     "",
                     "export class Greeter {",
                     "  constructor(name) {",
@@ -229,7 +229,7 @@ class TestFixtures:
         return (
             "\n".join(
                 [
-                    "/** Sample module for validation tests. */",
+                    "/** Sample module for verification tests. */",
                     "",
                     "export interface User {",
                     "  id: number;",
@@ -347,17 +347,17 @@ class TestFixtures:
     def create_temp_repo_from_fixture(
         self,
         name: str,
-        validate: bool = True,
+        screen: bool = True,
         cache_dir: Optional[str] = None,
     ) -> Path:
         """Create a temp repo from a named fixture template."""
         template = self.registry.get(name)
-        return self.create_temp_repo(template.files, validate=validate, cache_dir=cache_dir)
+        return self.create_temp_repo(template.files, screen=screen, cache_dir=cache_dir)
 
     def create_temp_repo_from_fixtures(
         self,
         fixtures: Sequence[Union[str, FixtureTemplate]],
-        validate: bool = True,
+        screen: bool = True,
         name: str = "composed",
         description: str = "Composed fixture",
         cache_dir: Optional[str] = None,
@@ -368,7 +368,7 @@ class TestFixtures:
             fixtures=fixtures,
             description=description,
         )
-        return self.create_temp_repo(template.files, validate=validate, cache_dir=cache_dir)
+        return self.create_temp_repo(template.files, screen=screen, cache_dir=cache_dir)
 
     @classmethod
     def list_fixture_templates(cls, tags: Optional[Iterable[str]] = None) -> List[FixtureTemplate]:
@@ -465,22 +465,22 @@ class TestFixtures:
                 normalized[path] = FixtureFile(content=content)
         return normalized
 
-    def _validate_fixture_files(self, files: Dict[str, FixtureFile]) -> None:
-        """Validate fixture file contents before use."""
+    def _screen_fixture_files(self, files: Dict[str, FixtureFile]) -> None:
+        """Screen fixture file contents before use."""
         errors: List[str] = []
         for path, fixture_file in files.items():
-            if not fixture_file.validate:
+            if not fixture_file.screen:
                 continue
             language = fixture_file.language or self._infer_language(path)
             if not language:
                 continue
             try:
-                self._validate_source(path, fixture_file.content, language)
+                self._screen_source(path, fixture_file.content, language)
             except ValueError as exc:
                 errors.append(str(exc))
         if errors:
-            logger.error("Fixture validation failed for %d files", len(errors))
-            raise ValueError("Fixture validation failed:\n" + "\n".join(errors))
+            logger.error("Fixture screening failed for %d files", len(errors))
+            raise ValueError("Fixture screening failed:\n" + "\n".join(errors))
 
     @staticmethod
     def _infer_language(path: str) -> Optional[str]:
@@ -488,8 +488,8 @@ class TestFixtures:
         return _LANGUAGE_BY_EXTENSION.get(Path(path).suffix.lower())
 
     @staticmethod
-    def _validate_source(path: str, source: str, language: str) -> None:
-        """Validate source code syntax for a given language."""
+    def _screen_source(path: str, source: str, language: str) -> None:
+        """Screen source code syntax for a given language."""
         if language == "python":
             try:
                 ast.parse(source, filename=path)
@@ -572,7 +572,7 @@ def _register_default_fixtures(registry: FixtureRegistry) -> None:
                 + "\n",
                 language="python",
             ),
-            "README.md": FixtureFile("# Sample Python package\n", validate=False),
+            "README.md": FixtureFile("# Sample Python package\n", screen=False),
         },
         tags=("python", "multi-file"),
     )
@@ -622,8 +622,8 @@ def _register_default_fixtures(registry: FixtureRegistry) -> None:
         name="edge_unsupported_files",
         description="Repo with unsupported file extensions only.",
         files={
-            "README.txt": FixtureFile("just text\n", validate=False),
-            "notes.md": FixtureFile("# Notes\n", validate=False),
+            "README.txt": FixtureFile("just text\n", screen=False),
+            "notes.md": FixtureFile("# Notes\n", screen=False),
         },
         tags=("edge", "unsupported"),
     )

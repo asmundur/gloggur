@@ -22,13 +22,13 @@ use .venv for running python modules.
    ```bash
    scripts/gloggur search "<query>" --top-k 5 --json
    ```
-3. **Validate your work** when appropriate:
+3. **Inspect your work** when appropriate:
    ```bash
-   gloggur validate . --json
+   gloggur inspect . --json
    ```
    Or, if needed:
    ```bash
-   scripts/gloggur validate . --json
+   scripts/gloggur inspect . --json
    ```
 
 ## Notes

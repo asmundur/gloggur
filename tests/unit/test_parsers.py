@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from gloggur.parsers.registry import EXTENSION_LANGUAGE, ParserRegistry
 from gloggur.parsers.treesitter_parser import TreeSitterParser
-from scripts.validation.fixtures import TestFixtures
+from scripts.verification.fixtures import TestFixtures
 
 
 def test_parser_registry_supports_known_extensions() -> None:

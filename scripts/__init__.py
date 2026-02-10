@@ -1,1 +1,1 @@
-"""Utility scripts for validation and testing."""
+"""Utility scripts for verification and testing."""

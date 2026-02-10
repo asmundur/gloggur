@@ -16,13 +16,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from gloggur.config import GloggurConfig
-from scripts.validation import CommandRunner, Validators
-from scripts.validation.logging_utils import configure_logging
-from scripts.validation.report_templates import (
+from scripts.verification import CommandRunner, Checks
+from scripts.verification.logging_utils import configure_logging
+from scripts.verification.report_templates import (
     PhaseReport,
     TestCaseResult,
-    ValidationReport,
-    build_validation_report,
+    VerificationReport,
+    build_verification_report,
     render_json,
     render_markdown,
 )
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def _vector_store_stats(cache_dir: str) -> Tuple[bool, str, Dict[str, object]]:
-    """Validate vector store files and return status/details."""
+    """Check vector store files and return status/details."""
     index_path = os.path.join(cache_dir, "vectors.index")
     id_map_path = os.path.join(cache_dir, "vectors.json")
     if not os.path.exists(index_path):
@@ -48,9 +48,9 @@ def _vector_store_stats(cache_dir: str) -> Tuple[bool, str, Dict[str, object]]:
     return True, "Vector store populated", {"id_count": len(ids)}
 
 
-def _validate_index_output(output: Dict[str, object]) -> Optional[Tuple[str, Dict[str, object]]]:
-    """Validate index output and return error details if any."""
-    schema = Validators.validate_index_output(output)
+def _check_index_output(output: Dict[str, object]) -> Optional[Tuple[str, Dict[str, object]]]:
+    """Check index output and return error details if any."""
+    schema = Checks.check_index_output(output)
     if not schema.ok:
         return schema.message, schema.details or {}
     indexed_files = int(output.get("indexed_files", 0))
@@ -62,9 +62,9 @@ def _validate_index_output(output: Dict[str, object]) -> Optional[Tuple[str, Dic
     return None
 
 
-def _validate_search_output(output: Dict[str, object]) -> Optional[Tuple[str, Dict[str, object]]]:
-    """Validate search output and return error details if any."""
-    schema = Validators.validate_search_output(output)
+def _check_search_output(output: Dict[str, object]) -> Optional[Tuple[str, Dict[str, object]]]:
+    """Check search output and return error details if any."""
+    schema = Checks.check_search_output(output)
     if not schema.ok:
         return schema.message, schema.details or {}
     results = output.get("results", [])
@@ -81,18 +81,18 @@ def _run_provider_test(
     runner: CommandRunner,
     model_name: Optional[str] = None,
 ) -> TestCaseResult:
-    """Run a single embedding provider validation."""
+    """Run a single embedding provider probe."""
     try:
         index_output = runner.run_index(".", embedding_provider=provider)
     except Exception as exc:
         return TestCaseResult(name=name, status="failed", message=f"Index command failed: {exc}")
 
-    index_error = _validate_index_output(index_output)
+    index_error = _check_index_output(index_output)
     if index_error:
         message, details = index_error
         return TestCaseResult(name=name, status="failed", message=message, details=details)
 
-    cache_check = Validators.check_cache_exists(cache_dir)
+    cache_check = Checks.check_cache_exists(cache_dir)
     if not cache_check.ok:
         return TestCaseResult(name=name, status="failed", message=cache_check.message, details=cache_check.details)
 
@@ -105,7 +105,7 @@ def _run_provider_test(
     except Exception as exc:
         return TestCaseResult(name=name, status="failed", message=f"Search command failed: {exc}")
 
-    search_error = _validate_search_output(search_output)
+    search_error = _check_search_output(search_output)
     if search_error:
         message, details = search_error
         return TestCaseResult(name=name, status="failed", message=message, details=details)
@@ -137,7 +137,7 @@ def _load_repo_config(repo_root: Path) -> GloggurConfig:
 
 
 def test_local_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool = False) -> TestCaseResult:
-    """Validate local embedding provider."""
+    """Check local embedding provider."""
     model_name = config.local_embedding_model
     with tempfile.TemporaryDirectory(prefix="gloggur-phase2-local-") as cache_dir:
         runner = CommandRunner(
@@ -169,7 +169,7 @@ def _missing_api_key_result(name: str, env_key: str) -> TestCaseResult:
 
 
 def test_openai_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool = False) -> TestCaseResult:
-    """Validate OpenAI embedding provider."""
+    """Check OpenAI embedding provider."""
     if not os.getenv("OPENAI_API_KEY"):
         return _missing_api_key_result("Test 2.2: OpenAI Embeddings", "OPENAI_API_KEY")
 
@@ -194,7 +194,7 @@ def test_openai_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool
 
 
 def test_gemini_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool = False) -> TestCaseResult:
-    """Validate Gemini embedding provider."""
+    """Check Gemini embedding provider."""
     env_key = None
     for candidate in ("GLOGGUR_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
         if os.getenv(candidate):
@@ -241,8 +241,8 @@ def _phase_status(summary: Dict[str, int]) -> str:
     return "passed"
 
 
-def run_phase2(verbose: bool = False) -> ValidationReport:
-    """Run phase 2 validation tests."""
+def run_phase2(verbose: bool = False) -> VerificationReport:
+    """Run phase 2 provider probes."""
     repo_root = Path(__file__).resolve().parents[1]
     config = _load_repo_config(repo_root)
     start = time.perf_counter()
@@ -263,13 +263,13 @@ def run_phase2(verbose: bool = False) -> ValidationReport:
         tests=tests,
         duration_ms=(time.perf_counter() - start) * 1000,
     )
-    report = build_validation_report([phase_report])
+    report = build_verification_report([phase_report])
     logger.info("Phase 2 completed in %.2f ms", phase_report.duration_ms)
     return report
 
 
 def main() -> int:
-    """CLI entrypoint for phase 2 validation."""
+    """CLI entrypoint for phase 2 provider probes."""
     parser = argparse.ArgumentParser(description="Run Phase 2 embedding provider tests for gloggur.")
     parser.add_argument("--output", type=str, default=None, help="Write report to a file.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")

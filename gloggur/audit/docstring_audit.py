@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class DocstringReport:
-    """Validation report for a single symbol (warnings and score)."""
+class DocstringAuditReport:
+    """Audit report for a single symbol (warnings and score)."""
     symbol_id: str
     warnings: List[str]
     semantic_score: Optional[float] = None
 
 
-def validate_docstrings(
+def audit_docstrings(
     symbols: List[Symbol],
     *,
     code_texts: Optional[Dict[str, str]] = None,
@@ -28,8 +28,8 @@ def validate_docstrings(
     semantic_threshold: Optional[float] = 0.2,
     semantic_min_chars: int = 0,
     semantic_max_chars: int = 4000,
-) -> List[DocstringReport]:
-    """Validate docstrings and compute semantic similarity scores."""
+) -> List[DocstringAuditReport]:
+    """Audit docstrings and compute semantic similarity scores."""
     semantic_scores = _compute_semantic_scores(
         symbols,
         code_texts=code_texts,
@@ -37,22 +37,24 @@ def validate_docstrings(
         min_chars=semantic_min_chars,
         max_chars=semantic_max_chars,
     )
-    reports: List[DocstringReport] = []
+    reports: List[DocstringAuditReport] = []
     for symbol in symbols:
         score = semantic_scores.get(symbol.id)
-        warnings = _validate_symbol(symbol, score, semantic_threshold)
+        warnings = _assess_symbol(symbol, score, semantic_threshold)
         if warnings or score is not None:
-            reports.append(DocstringReport(symbol_id=symbol.id, warnings=warnings, semantic_score=score))
+            reports.append(
+                DocstringAuditReport(symbol_id=symbol.id, warnings=warnings, semantic_score=score)
+            )
             if warnings:
                 logger.debug("Docstring warnings for %s: %s", symbol.id, warnings)
     warning_count = sum(1 for report in reports if report.warnings)
     logger.info(
-        "Docstring validation completed (symbols=%d, warnings=%d)", len(symbols), warning_count
+        "Docstring audit completed (symbols=%d, warnings=%d)", len(symbols), warning_count
     )
     return reports
 
 
-def _validate_symbol(
+def _assess_symbol(
     symbol: Symbol,
     semantic_score: Optional[float],
     semantic_threshold: Optional[float],

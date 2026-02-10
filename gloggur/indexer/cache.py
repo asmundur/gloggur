@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Iterator, List, Optional
 
-from gloggur.models import FileMetadata, IndexMetadata, Symbol, ValidationFileMetadata
+from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
 
 
 @dataclass
@@ -23,7 +23,7 @@ class CacheConfig:
 
 
 class CacheManager:
-    """SQLite-backed cache for symbols, files, and validations."""
+    """SQLite-backed cache for symbols, files, and audits."""
     def __init__(self, config: CacheConfig) -> None:
         """Initialize the cache and ensure the database exists."""
         self.config = config
@@ -72,14 +72,14 @@ class CacheManager:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS validations (
+                CREATE TABLE IF NOT EXISTS audits (
                     symbol_id TEXT PRIMARY KEY,
                     warnings TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS validation_files (
+                CREATE TABLE IF NOT EXISTS audit_files (
                     path TEXT PRIMARY KEY,
                     content_hash TEXT NOT NULL,
-                    last_validated TEXT NOT NULL
+                    last_audited TEXT NOT NULL
                 );
                 """
             )
@@ -197,56 +197,56 @@ class CacheManager:
                 ("index", metadata.model_dump_json()),
             )
 
-    def set_validation_warnings(self, symbol_id: str, warnings: List[str]) -> None:
-        """Store validation warnings for a symbol."""
+    def set_audit_warnings(self, symbol_id: str, warnings: List[str]) -> None:
+        """Store audit warnings for a symbol."""
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO validations (symbol_id, warnings) VALUES (?, ?)
+                INSERT INTO audits (symbol_id, warnings) VALUES (?, ?)
                 ON CONFLICT(symbol_id) DO UPDATE SET warnings = excluded.warnings
                 """,
                 (symbol_id, json.dumps(warnings)),
             )
 
-    def get_validation_warnings(self, symbol_id: str) -> List[str]:
-        """Fetch validation warnings for a symbol."""
+    def get_audit_warnings(self, symbol_id: str) -> List[str]:
+        """Fetch audit warnings for a symbol."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT warnings FROM validations WHERE symbol_id = ?", (symbol_id,)
+                "SELECT warnings FROM audits WHERE symbol_id = ?", (symbol_id,)
             ).fetchone()
             if not row:
                 return []
             return json.loads(row["warnings"])
 
-    def get_validation_file_metadata(self, path: str) -> Optional[ValidationFileMetadata]:
-        """Return cached validation metadata for a file."""
+    def get_audit_file_metadata(self, path: str) -> Optional[AuditFileMetadata]:
+        """Return cached audit metadata for a file."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM validation_files WHERE path = ?", (path,)
+                "SELECT * FROM audit_files WHERE path = ?", (path,)
             ).fetchone()
             if not row:
                 return None
-            return ValidationFileMetadata(
+            return AuditFileMetadata(
                 path=row["path"],
                 content_hash=row["content_hash"],
-                last_validated=datetime.fromisoformat(row["last_validated"]),
+                last_audited=datetime.fromisoformat(row["last_audited"]),
             )
 
-    def upsert_validation_file_metadata(self, metadata: ValidationFileMetadata) -> None:
-        """Insert or update validation metadata for a file."""
+    def upsert_audit_file_metadata(self, metadata: AuditFileMetadata) -> None:
+        """Insert or update audit metadata for a file."""
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO validation_files (path, content_hash, last_validated)
+                INSERT INTO audit_files (path, content_hash, last_audited)
                 VALUES (?, ?, ?)
                 ON CONFLICT(path) DO UPDATE SET
                     content_hash = excluded.content_hash,
-                    last_validated = excluded.last_validated
+                    last_audited = excluded.last_audited
                 """,
                 (
                     metadata.path,
                     metadata.content_hash,
-                    metadata.last_validated.isoformat(),
+                    metadata.last_audited.isoformat(),
                 ),
             )
 
@@ -255,8 +255,8 @@ class CacheManager:
         with self._connect() as conn:
             conn.executescript(
                 """
-                DELETE FROM validations;
-                DELETE FROM validation_files;
+                DELETE FROM audits;
+                DELETE FROM audit_files;
                 DELETE FROM symbols;
                 DELETE FROM files;
                 DELETE FROM metadata;

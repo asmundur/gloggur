@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.models import Symbol
-from gloggur.validation.docstring_validator import validate_docstrings
+from gloggur.audit.docstring_audit import audit_docstrings
 
 
 def _symbol(
@@ -13,7 +13,7 @@ def _symbol(
     signature: str | None = None,
     docstring: str | None = None,
 ) -> Symbol:
-    """Create a sample Symbol for validation tests."""
+    """Create a sample Symbol for audit tests."""
     return Symbol(
         id=symbol_id,
         name=name,
@@ -48,23 +48,23 @@ class FakeEmbeddingProvider(EmbeddingProvider):
         return 2
 
 
-def test_validation_reports_missing_docstring() -> None:
+def test_audit_reports_missing_docstring() -> None:
     """Missing docstrings should emit warnings."""
     symbol = _symbol(symbol_id="s1", name="add", signature="def add(a, b):", docstring=None)
-    reports = validate_docstrings([symbol])
+    reports = audit_docstrings([symbol])
     assert len(reports) == 1
     assert reports[0].warnings == ["Missing docstring"]
 
 
-def test_validation_includes_private_symbols() -> None:
-    """Private symbols are still validated for docstrings."""
+def test_audit_includes_private_symbols() -> None:
+    """Private symbols are still inspected for docstrings."""
     symbol = _symbol(symbol_id="s2", name="_internal", signature="def _internal():", docstring=None)
-    reports = validate_docstrings([symbol])
+    reports = audit_docstrings([symbol])
     assert len(reports) == 1
     assert reports[0].warnings == ["Missing docstring"]
 
 
-def test_validation_flags_low_semantic_similarity() -> None:
+def test_audit_flags_low_semantic_similarity() -> None:
     """Low semantic similarity should be flagged."""
     symbol = _symbol(
         symbol_id="s3",
@@ -73,7 +73,7 @@ def test_validation_flags_low_semantic_similarity() -> None:
         docstring="Read a file from disk.",
     )
     code_texts = {symbol.id: "def compute(a, b):\n    return a + b"}
-    reports = validate_docstrings(
+    reports = audit_docstrings(
         [symbol],
         code_texts=code_texts,
         embedding_provider=FakeEmbeddingProvider(),

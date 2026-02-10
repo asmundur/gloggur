@@ -8,7 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from gloggur.cli.main import cli
-from scripts.validation.fixtures import TestFixtures
+from scripts.verification.fixtures import TestFixtures
 
 pytest.importorskip("faiss")
 
@@ -28,8 +28,8 @@ def _parse_json_output(output: str) -> dict[str, object]:
     return json.loads(output[start:])
 
 
-def test_cli_index_search_validate_status_and_clear_cache() -> None:
-    """End-to-end CLI smoke test for index/search/validate/status/clear-cache."""
+def test_cli_index_search_inspect_status_and_clear_cache() -> None:
+    """End-to-end CLI smoke test for index/search/inspect/status/clear-cache."""
     runner = CliRunner()
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
@@ -54,10 +54,10 @@ def test_cli_index_search_validate_status_and_clear_cache() -> None:
         search_payload = _parse_json_output(search_result.output)
         assert search_payload["metadata"]["total_results"] > 0
 
-        validate_result = runner.invoke(cli, ["validate", str(repo), "--json"], env=env)
-        assert validate_result.exit_code == 0
-        validate_payload = _parse_json_output(validate_result.output)
-        assert validate_payload["total"] >= 1
+        inspect_result = runner.invoke(cli, ["inspect", str(repo), "--json"], env=env)
+        assert inspect_result.exit_code == 0
+        inspect_payload = _parse_json_output(inspect_result.output)
+        assert inspect_payload["total"] >= 1
 
         clear_result = runner.invoke(cli, ["clear-cache", "--json"], env=env)
         assert clear_result.exit_code == 0

@@ -6,7 +6,7 @@ from gloggur.config import GloggurConfig
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.indexer import Indexer
 from gloggur.parsers.registry import ParserRegistry
-from scripts.validation.fixtures import TestFixtures
+from scripts.verification.fixtures import TestFixtures
 
 
 def test_indexer_indexes_repo_and_sets_metadata() -> None:

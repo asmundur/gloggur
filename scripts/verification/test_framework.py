@@ -9,8 +9,8 @@ import pytest
 
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.models import Symbol
-from scripts.validation import CommandRunner, Reporter, TestFixtures, TestResult, Validators
-from scripts.validation.reporter import PerformanceMetric
+from scripts.verification import CommandRunner, Reporter, TestFixtures, TestResult, Checks
+from scripts.verification.reporter import PerformanceMetric
 
 
 def test_command_runner_status_json() -> None:
@@ -22,19 +22,19 @@ def test_command_runner_status_json() -> None:
         assert "total_symbols" in payload
 
 
-def test_validators_schema_and_scores() -> None:
-    """Validate schema and similarity score checks."""
+def test_checks_schema_and_scores() -> None:
+    """Check schema and similarity score ranges."""
     output = {
         "query": "hello",
         "results": [{"similarity_score": 0.5}],
         "metadata": {"total_results": 1, "search_time_ms": 10},
     }
-    result = Validators.validate_search_output(output)
+    result = Checks.check_search_output(output)
     assert result.ok, result.message
 
 
-def test_database_symbols_validator() -> None:
-    """Validate database symbol count checks."""
+def test_database_symbols_check() -> None:
+    """Check database symbol count bounds."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = CacheManager(CacheConfig(tmpdir))
         symbol = Symbol(
@@ -51,7 +51,7 @@ def test_database_symbols_validator() -> None:
             language="python",
         )
         cache.upsert_symbols([symbol])
-        result = Validators.check_database_symbols(os.path.join(tmpdir, "index.db"), 1)
+        result = Checks.check_database_symbols(os.path.join(tmpdir, "index.db"), 1)
         assert result.ok, result.message
 
 
@@ -63,7 +63,7 @@ def test_reporter_outputs() -> None:
     reporter.add_test_result("search", TestResult(passed=False, message="fail"))
     markdown = reporter.generate_markdown()
     payload = reporter.generate_json()
-    assert "Validation Report" in markdown
+    assert "Verification Report" in markdown
     assert payload["summary"]["failed"] == 1
 
 

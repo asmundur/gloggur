@@ -13,7 +13,7 @@ from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
-from scripts.validation.fixtures import TestFixtures
+from scripts.verification.fixtures import TestFixtures
 
 pytest.importorskip("faiss")
 

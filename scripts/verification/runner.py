@@ -16,8 +16,8 @@ import shutil
 import tempfile
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
-from scripts.validation.logging_utils import log_event
-from scripts.validation.reporter import Reporter, TestResult
+from scripts.verification.logging_utils import log_event
+from scripts.verification.reporter import Reporter, TestResult
 
 logger = logging.getLogger(__name__)
 
@@ -416,9 +416,9 @@ class CommandRunner:
             return self._parse_stream_results(result)
         return self._require_json(result)
 
-    def run_validate(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
-        """Run the validate command and return JSON output."""
-        cmd = ["validate", path, "--json"]
+    def run_inspect(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+        """Run the inspect command and return JSON output."""
+        cmd = ["inspect", path, "--json"]
         config_path = kwargs.get("config_path")
         if config_path:
             cmd += ["--config", str(config_path)]
@@ -458,7 +458,7 @@ class CommandRunner:
             install_hint = "pip install -e '.[dev]'"
         message = (
             f"Missing dependency '{module}'. Install project requirements (e.g. {install_hint}) "
-            "and re-run the validation."
+            "and re-run the inspection."
         )
         return module, message
 
@@ -636,7 +636,7 @@ class CommandRunner:
 
 @dataclass(frozen=True)
 class TestTask:
-    """Unit of work for the validation orchestrator."""
+    """Unit of work for the suite orchestrator."""
     name: str
     run: Callable[[], TestResult]
     section: str = "General"
@@ -651,7 +651,7 @@ class TestOutcome:
 
 
 class TestOrchestrator:
-    """Run validation tasks sequentially or in parallel."""
+    """Run verification tasks sequentially or in parallel."""
     def __init__(self, reporter: Reporter, max_workers: Optional[int] = None) -> None:
         """Initialize the orchestrator."""
         self.reporter = reporter

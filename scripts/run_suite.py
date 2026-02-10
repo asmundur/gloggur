@@ -19,12 +19,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.validation.logging_utils import configure_logging, log_event
-from scripts.validation.report_templates import (
+from scripts.verification.logging_utils import configure_logging, log_event
+from scripts.verification.report_templates import (
     PhaseReport,
     TestCaseResult,
-    ValidationReport,
-    build_validation_report,
+    VerificationReport,
+    build_verification_report,
     render_json,
     render_markdown,
 )
@@ -32,23 +32,23 @@ from scripts.validation.report_templates import (
 
 @dataclass(frozen=True)
 class _PhaseDefinition:
-    """Metadata describing a validation phase."""
+    """Metadata describing a verification phase."""
     title: str
     script: Path
 
 
 PHASE_DEFINITIONS: Dict[int, _PhaseDefinition] = {
-    1: _PhaseDefinition(title="Smoke Tests", script=Path("scripts/validate_phase1.py")),
-    2: _PhaseDefinition(title="Embedding Providers", script=Path("scripts/validate_phase2.py")),
-    3: _PhaseDefinition(title="Edge Cases", script=Path("scripts/validate_phase3_4.py")),
-    4: _PhaseDefinition(title="Performance Benchmarks", script=Path("scripts/validate_phase3_4.py")),
+    1: _PhaseDefinition(title="Smoke Tests", script=Path("scripts/run_smoke.py")),
+    2: _PhaseDefinition(title="Embedding Providers", script=Path("scripts/run_provider_probe.py")),
+    3: _PhaseDefinition(title="Edge Cases", script=Path("scripts/run_edge_bench.py")),
+    4: _PhaseDefinition(title="Performance Benchmarks", script=Path("scripts/run_edge_bench.py")),
 }
 
 logger = logging.getLogger(__name__)
 
 
-class ValidationRunner:
-    """Orchestrate running validation phases."""
+class SuiteRunner:
+    """Orchestrate running verification phases."""
     def __init__(
         self,
         phases: Optional[List[int]] = None,
@@ -57,14 +57,14 @@ class ValidationRunner:
         parallel: bool = True,
         max_workers: Optional[int] = None,
     ) -> None:
-        """Initialize the validation runner."""
+        """Initialize the suite runner."""
         self.phases = phases
         self.quick = quick
         self.verbose = verbose
         self.parallel = parallel
         self.max_workers = max_workers
 
-    def run_all_phases(self) -> ValidationReport:
+    def run_all_phases(self) -> VerificationReport:
         """Run all requested phases and build a report."""
         phases = self._resolve_phases()
         if self.parallel and len(phases) > 1:
@@ -81,11 +81,11 @@ class ValidationRunner:
                 return report
         return _missing_phase_report(phase_num, PHASE_DEFINITIONS[phase_num].title, "Phase output missing.")
 
-    def generate_comprehensive_report(self, report: ValidationReport) -> str:
+    def generate_comprehensive_report(self, report: VerificationReport) -> str:
         """Render the full report as markdown."""
         return render_markdown(report)
 
-    def save_report(self, report: ValidationReport, path: str, fmt: str) -> None:
+    def save_report(self, report: VerificationReport, path: str, fmt: str) -> None:
         """Write the report to disk."""
         output_path = Path(path)
         if fmt == "json":
@@ -126,7 +126,7 @@ class ValidationRunner:
             verbose=self.verbose,
         )
 
-    def _run_all_phases_serial(self, phases: List[int]) -> ValidationReport:
+    def _run_all_phases_serial(self, phases: List[int]) -> VerificationReport:
         """Run phases serially and build a report."""
         phase_reports: List[PhaseReport] = []
         handle_phase34 = any(phase in (3, 4) for phase in phases)
@@ -140,9 +140,9 @@ class ValidationRunner:
             phase_reports.extend(self._run_single_phase(phase))
         phase_reports = [report for report in phase_reports if report.phase in phases]
         phase_reports.sort(key=lambda report: report.phase)
-        return build_validation_report(phase_reports)
+        return build_verification_report(phase_reports)
 
-    def _run_all_phases_parallel(self, phases: List[int]) -> ValidationReport:
+    def _run_all_phases_parallel(self, phases: List[int]) -> VerificationReport:
         """Run phases in parallel and build a report."""
         tasks = self._build_parallel_tasks(phases)
         phase_reports: List[PhaseReport] = []
@@ -165,7 +165,7 @@ class ValidationRunner:
                 phase_reports.extend(future.result())
         phase_reports = [report for report in phase_reports if report.phase in phases]
         phase_reports.sort(key=lambda report: report.phase)
-        return build_validation_report(phase_reports)
+        return build_verification_report(phase_reports)
 
     def _build_parallel_tasks(self, phases: List[int]) -> List[Dict[str, object]]:
         """Build task definitions for parallel execution."""
@@ -215,7 +215,7 @@ def _execute_phase_script(
     if verbose:
         cmd.append("--verbose")
 
-    cache_dir = tempfile.mkdtemp(prefix="gloggur-validate-")
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-verify-")
     env = os.environ.copy()
     env["GLOGGUR_CACHE_DIR"] = cache_dir
     if os.getenv("GLOGGUR_LOG_FILE"):
@@ -463,7 +463,7 @@ def _missing_dependency_message(stdout: str, stderr: str) -> Optional[str]:
         install_hint = "pip install -e '.[dev]'"
     return (
         f"Missing dependency '{module}'. Install project requirements (e.g. {install_hint}) "
-        "and re-run the validation."
+        "and re-run the suite."
     )
 
 
@@ -501,12 +501,12 @@ def _parse_phases(raw: Optional[str]) -> Optional[List[int]]:
 
 def main() -> int:
     """CLI entrypoint for running all phases."""
-    parser = argparse.ArgumentParser(description="Run all gloggur validation phases.")
+    parser = argparse.ArgumentParser(description="Run all gloggur verification phases.")
     parser.add_argument("--phases", type=str, default=None, help="Comma-separated phase list, e.g. 1,2,4")
     parser.add_argument("--output", type=str, default=None, help="Write report to file.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
-    parser.add_argument("--quick", action="store_true", help="Run quick validation (phases 1-2).")
+    parser.add_argument("--quick", action="store_true", help="Run quick verification (phases 1-2).")
     parser.add_argument("--serial", action="store_true", help="Disable parallel phase execution.")
     parser.add_argument("--jobs", type=int, default=None, help="Max parallel workers for phase execution.")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
@@ -528,7 +528,7 @@ def main() -> int:
     if phases and any(phase not in PHASE_DEFINITIONS for phase in phases):
         invalid = ", ".join(str(phase) for phase in phases if phase not in PHASE_DEFINITIONS)
         raise SystemExit(f"Unknown phase(s): {invalid}")
-    runner = ValidationRunner(
+    runner = SuiteRunner(
         phases=phases,
         quick=args.quick,
         verbose=args.verbose,

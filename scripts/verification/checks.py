@@ -8,21 +8,21 @@ from typing import Any, Dict, List, Optional as TypingOptional, Tuple, Union
 
 
 @dataclass
-class ValidationResult:
-    """Result of schema or validation checks."""
+class CheckResult:
+    """Result of schema or output checks."""
     ok: bool
     message: str
     details: TypingOptional[Dict[str, object]] = None
 
     @staticmethod
-    def success(message: str = "ok", details: TypingOptional[Dict[str, object]] = None) -> "ValidationResult":
-        """Create a successful validation result."""
-        return ValidationResult(ok=True, message=message, details=details)
+    def success(message: str = "ok", details: TypingOptional[Dict[str, object]] = None) -> "CheckResult":
+        """Create a successful check result."""
+        return CheckResult(ok=True, message=message, details=details)
 
     @staticmethod
-    def failure(message: str, details: TypingOptional[Dict[str, object]] = None) -> "ValidationResult":
-        """Create a failed validation result."""
-        return ValidationResult(ok=False, message=message, details=details)
+    def failure(message: str, details: TypingOptional[Dict[str, object]] = None) -> "CheckResult":
+        """Create a failed check result."""
+        return CheckResult(ok=False, message=message, details=details)
 
 
 class Optional:
@@ -59,23 +59,23 @@ class Range:
 SchemaType = Union[type, Tuple[type, ...], Dict[str, Any], List[Any], Optional, Range]
 
 
-class Validators:
-    """Static helpers for validating schema outputs."""
+class Checks:
+    """Static helpers for checking schema outputs."""
     logger = logging.getLogger(__name__)
     @staticmethod
-    def validate_index_output(output: Dict[str, object]) -> ValidationResult:
-        """Validate index command output schema."""
+    def check_index_output(output: Dict[str, object]) -> CheckResult:
+        """Check index command output schema."""
         schema = {
             "indexed_files": int,
             "indexed_symbols": int,
             "skipped_files": int,
             "duration_ms": (int, float),
         }
-        return Validators.validate_json_structure(output, schema)
+        return Checks.check_json_structure(output, schema)
 
     @staticmethod
-    def validate_search_output(output: Dict[str, object]) -> ValidationResult:
-        """Validate search command output schema."""
+    def check_search_output(output: Dict[str, object]) -> CheckResult:
+        """Check search command output schema."""
         schema = {
             "query": str,
             "results": list,
@@ -84,29 +84,29 @@ class Validators:
                 "search_time_ms": int,
             },
         }
-        base = Validators.validate_json_structure(output, schema)
+        base = Checks.check_json_structure(output, schema)
         if not base.ok:
             return base
         results = output.get("results", [])
-        return Validators.validate_similarity_scores(results)
+        return Checks.check_similarity_scores(results)
 
     @staticmethod
-    def validate_similarity_scores(results: List[Dict[str, object]]) -> ValidationResult:
-        """Validate similarity score ranges in search results."""
+    def check_similarity_scores(results: List[Dict[str, object]]) -> CheckResult:
+        """Check similarity score ranges in search results."""
         invalid: List[Dict[str, object]] = []
         result_schema = {"similarity_score": Range(min_value=0.0, max_value=1.0)}
         for idx, result in enumerate(results):
-            validation = Validators.validate_json_structure(result, result_schema)
-            if not validation.ok:
-                invalid.append({"index": idx, "reason": validation.message})
+            check = Checks.check_json_structure(result, result_schema)
+            if not check.ok:
+                invalid.append({"index": idx, "reason": check.message})
         if invalid:
-            Validators.logger.warning("Similarity score validation failed for %d results", len(invalid))
-            return ValidationResult.failure("Invalid similarity scores", {"errors": invalid})
-        return ValidationResult.success("Similarity scores valid")
+            Checks.logger.warning("Similarity score check failed for %d results", len(invalid))
+            return CheckResult.failure("Invalid similarity scores", {"errors": invalid})
+        return CheckResult.success("Similarity scores within bounds")
 
     @staticmethod
-    def validate_json_structure(data: Dict[str, object], schema: Dict[str, SchemaType]) -> ValidationResult:
-        """Validate a nested JSON-like dict against a schema.
+    def check_json_structure(data: Dict[str, object], schema: Dict[str, SchemaType]) -> CheckResult:
+        """Check a nested JSON-like dict against a schema.
 
         Schema examples:
             {"count": int, "scores": [int]}
@@ -156,7 +156,7 @@ class Validators:
             return preview
 
         def check(value: object, expected: SchemaType, path: str) -> None:
-            """Validate a value against the schema."""
+            """Check a value against the schema."""
             optional_expected = False
             if isinstance(expected, Optional):
                 optional_expected = True
@@ -324,12 +324,12 @@ class Validators:
             check(data[key], expected, key)
 
         if errors:
-            Validators.logger.debug("Schema validation failed with %d errors", len(errors))
+            Checks.logger.debug("Schema check failed with %d errors", len(errors))
             categories: Dict[str, List[Dict[str, Any]]] = {}
             for error in errors:
                 categories.setdefault(error["message"], []).append(error)
             summary_parts = [f"{len(items)} {name}" for name, items in categories.items()]
-            summary = f"Schema validation failed ({len(errors)} errors: {', '.join(summary_parts)})"
+            summary = f"Schema check failed ({len(errors)} errors: {', '.join(summary_parts)})"
             lines = [summary]
             for name, items in categories.items():
                 lines.append(f"{name.title()}:")
@@ -342,38 +342,38 @@ class Validators:
                         lines.append(
                             f"{idx}. {item['path']}: expected {item['expected']}, got {item['actual']}{preview_text}"
                         )
-            return ValidationResult.failure("\n".join(lines), {"errors": errors})
-        return ValidationResult.success("Schema validation passed")
+            return CheckResult.failure("\n".join(lines), {"errors": errors})
+        return CheckResult.success("Schema check passed")
 
     @staticmethod
     def optional(schema: SchemaType) -> Optional:
-        """Wrap a schema as optional, e.g. Validators.optional(int)."""
+        """Wrap a schema as optional, e.g. Checks.optional(int)."""
         return Optional(schema)
 
     @staticmethod
-    def check_database_symbols(db_path: str, expected_min: int) -> ValidationResult:
+    def check_database_symbols(db_path: str, expected_min: int) -> CheckResult:
         """Check the symbol table count meets a minimum."""
         if not os.path.exists(db_path):
-            return ValidationResult.failure("Database not found", {"db_path": db_path})
+            return CheckResult.failure("Database not found", {"db_path": db_path})
         try:
             with sqlite3.connect(db_path) as conn:
                 row = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()
                 total = int(row[0]) if row else 0
         except sqlite3.Error as exc:
-            return ValidationResult.failure("Database query failed", {"error": str(exc)})
+            return CheckResult.failure("Database query failed", {"error": str(exc)})
         if total < expected_min:
-            return ValidationResult.failure(
+            return CheckResult.failure(
                 "Symbol count below expected minimum",
                 {"expected_min": expected_min, "actual": total},
             )
-        return ValidationResult.success("Database symbols validated", {"actual": total})
+        return CheckResult.success("Database symbols checked", {"actual": total})
 
     @staticmethod
-    def check_cache_exists(cache_dir: str) -> ValidationResult:
+    def check_cache_exists(cache_dir: str) -> CheckResult:
         """Ensure the cache directory and database exist."""
         if not os.path.isdir(cache_dir):
-            return ValidationResult.failure("Cache directory missing", {"cache_dir": cache_dir})
+            return CheckResult.failure("Cache directory missing", {"cache_dir": cache_dir})
         db_path = os.path.join(cache_dir, "index.db")
         if not os.path.exists(db_path):
-            return ValidationResult.failure("Cache database missing", {"db_path": db_path})
-        return ValidationResult.success("Cache exists", {"db_path": db_path})
+            return CheckResult.failure("Cache database missing", {"db_path": db_path})
+        return CheckResult.success("Cache exists", {"db_path": db_path})

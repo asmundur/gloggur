@@ -43,8 +43,8 @@ class IndexMetadata(BaseModel):
     indexed_files: int = 0
 
 
-class ValidationFileMetadata(BaseModel):
-    """Validation metadata for a file (hash and last validated time)."""
+class AuditFileMetadata(BaseModel):
+    """Audit metadata for a file (hash and last audited time)."""
     path: str
     content_hash: str
-    last_validated: datetime = Field(default_factory=_utc_now)
+    last_audited: datetime = Field(default_factory=_utc_now)
