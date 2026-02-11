@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from contextlib import closing
 
 from gloggur.indexer.cache import CACHE_SCHEMA_VERSION, CacheConfig, CacheManager
 from gloggur.models import IndexMetadata, Symbol
@@ -70,7 +71,7 @@ def test_cache_auto_resets_legacy_tables() -> None:
     """Legacy table layouts should trigger automatic cache recreation."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     db_path = os.path.join(cache_dir, "index.db")
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.executescript(
             """
             CREATE TABLE validations (

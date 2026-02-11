@@ -1,11 +1,6 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-echo "Running quick verification (Phase 1) before push..."
-if [ -x ".venv/bin/python" ]; then
-  .venv/bin/python scripts/run_suite.py --phases 1
-else
-  python3 scripts/run_suite.py --phases 1
-fi
-
-echo "Verification passed. Proceeding with push."
+echo "Running pytest before push..."
+PYTHONPATH="${PYTHONPATH:-.}" .venv/bin/pytest -q
+echo "Tests passed. Proceeding with push."

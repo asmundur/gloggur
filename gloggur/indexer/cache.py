@@ -342,7 +342,8 @@ class CacheManager:
             return None
 
         try:
-            with sqlite3.connect(self.config.db_path) as conn:
+            conn = sqlite3.connect(self.config.db_path)
+            try:
                 existing_tables = self._list_tables(conn)
                 legacy_tables = sorted(existing_tables & LEGACY_TABLES)
                 if legacy_tables:
@@ -368,6 +369,8 @@ class CacheManager:
                         "schema version mismatch "
                         f"(found {found}, expected {CACHE_SCHEMA_VERSION})"
                     )
+            finally:
+                conn.close()
         except sqlite3.DatabaseError as exc:
             return f"invalid sqlite database ({exc})"
 

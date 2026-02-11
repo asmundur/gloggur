@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional as TypingOptional, Tuple, Union
 
@@ -356,7 +357,7 @@ class Checks:
         if not os.path.exists(db_path):
             return CheckResult.failure("Database not found", {"db_path": db_path})
         try:
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn:
                 row = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()
                 total = int(row[0]) if row else 0
         except sqlite3.Error as exc:

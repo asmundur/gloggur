@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,7 @@ def test_smoke_basic_indexing() -> None:
 
         db_path = Path(cache_dir) / "index.db"
         assert db_path.exists()
-        with sqlite3.connect(db_path) as conn:
+        with closing(sqlite3.connect(db_path)) as conn:
             row = conn.execute("SELECT COUNT(*) FROM symbols").fetchone()
         assert int(row[0]) == indexed_symbols
 
