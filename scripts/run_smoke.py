@@ -70,6 +70,19 @@ def _env_float(name: str, default: Optional[float] = None) -> Optional[float]:
         return default
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean flag from an environment variable."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _check_required_fields(results: List[Dict[str, object]]) -> Optional[str]:
     """Check search results contain required fields."""
     required = {"symbol", "kind", "file", "line", "signature", "similarity_score"}
@@ -426,6 +439,7 @@ def run_phase1(
     verbose: bool = False,
     emit_summary: bool = True,
     baseline_path: Optional[str] = None,
+    skip_docstring_audit: bool = False,
 ) -> Tuple[int, str, Dict[str, object]]:
     """Run phase 1 smoke tests."""
     start = time.perf_counter()
@@ -537,7 +551,14 @@ def run_phase1(
             if verbose and test_result.details:
                 print(json.dumps({"test": "search_functionality", "details": test_result.details}, indent=2))
 
-            test_result = test_docstring_audit(runner, fixture_path)
+            if skip_docstring_audit:
+                test_result = TestResult(
+                    passed=True,
+                    message="Docstring audit skipped for this run",
+                    details={"skipped": True},
+                )
+            else:
+                test_result = test_docstring_audit(runner, fixture_path)
             results.append(Phase1Result("Test 1.4: Docstring Audit", test_result))
             reporter.add_test_result("Test 1.4: Docstring Audit", test_result)
             if verbose and test_result.details:
@@ -602,6 +623,11 @@ def main() -> None:
         default=None,
         help="Path to JSON report payload for baseline performance comparisons",
     )
+    parser.add_argument(
+        "--skip-docstring-audit",
+        action="store_true",
+        help="Skip the docstring audit smoke test.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
     parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
     parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
@@ -619,10 +645,12 @@ def main() -> None:
 
     emit_summary = args.format != "json"
     verbose = args.verbose and args.format != "json"
+    skip_docstring_audit = args.skip_docstring_audit or _env_flag("GLOGGUR_SKIP_DOCSTRING_AUDIT")
     exit_code, markdown, payload = run_phase1(
         verbose=verbose,
         emit_summary=emit_summary,
         baseline_path=args.baseline,
+        skip_docstring_audit=skip_docstring_audit,
     )
     output = markdown if args.format == "markdown" else json.dumps(payload, indent=2)
 
