@@ -49,3 +49,14 @@ def test_load_env_values(monkeypatch) -> None:
     assert config.gemini_embedding_model == "gemini-model"
     assert config.gemini_api_key == "gemini-key"
     assert config.cache_dir == "cache-dir"
+
+
+def test_embedding_profile_uses_active_provider_model() -> None:
+    """Embedding profile should encode active provider and its configured model."""
+    local = GloggurConfig(embedding_provider="local", local_embedding_model="local-a")
+    openai = GloggurConfig(embedding_provider="openai", openai_embedding_model="openai-a")
+    gemini = GloggurConfig(embedding_provider="gemini", gemini_embedding_model="gemini-a")
+
+    assert local.embedding_profile() == "local:local-a"
+    assert openai.embedding_profile() == "openai:openai-a"
+    assert gemini.embedding_profile() == "gemini:gemini-a"

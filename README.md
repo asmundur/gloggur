@@ -73,6 +73,10 @@ Clear cache:
 gloggur clear-cache --json
 ```
 
+Cache compatibility is automatic:
+- If cache schema changes, Gloggur rebuilds `.gloggur-cache/index.db` automatically.
+- If embedding provider/model changes, the next `gloggur index ...` run rebuilds cache and vectors automatically.
+
 ## Verification
 
 Gloggur includes a verification suite to verify functionality:

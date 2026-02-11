@@ -59,6 +59,7 @@ class Indexer:
             indexed_files=indexed_files,
         )
         self.cache.set_index_metadata(metadata)
+        self.cache.set_index_profile(self.config.embedding_profile())
         if self.vector_store:
             self.vector_store.save()
         duration_ms = int((time.time() - start) * 1000)
@@ -97,6 +98,7 @@ class Indexer:
         )
         if self.vector_store and symbols:
             self.vector_store.add_vectors(symbols)
+        self.cache.set_index_profile(self.config.embedding_profile())
         return len(symbols)
 
     def _iter_source_files(self, root: str) -> Iterable[str]:

@@ -35,3 +35,4 @@ You can tailor indexing and embedding behavior via `.gloggur.yaml` or `.gloggur.
 ## Cache handling
 
 Gloggur stores its cache in `.gloggur-cache`. This directory is **local-only** and should never be committed.
+`gloggur status --json` includes `schema_version` and `needs_reindex` so agents can detect stale cache state without manual cleanup.

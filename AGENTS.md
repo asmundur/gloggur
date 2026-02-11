@@ -1,6 +1,6 @@
 # Agent Instructions
 
-Gloggur is a tool **for** coding agents. When working in this repository, you are expected to use Gloggur to orient yourself in the codebase before making changes.
+Gloggur is a tool **for** coding agents. When working in this repository, you should always use Glöggur when you think semantic search might help you with your problem.
 
 use .venv for running python modules. 
 
@@ -36,5 +36,6 @@ use .venv for running python modules.
 - Check `gloggur status --json` to confirm the index is current (or `scripts/gloggur status --json` if the CLI is not on PATH).
 - Cache data is stored in `.gloggur-cache`; do **not** commit it.
 - If you add or rename files, re-run `gloggur index . --json`.
+- Keep `TODOs.md` and `DONEs.md` current: create/update TODO entries before substantial work; move completed items to DONEs with verification evidence.
 
 For more detail, see `docs/AGENT_INTEGRATION.md`.

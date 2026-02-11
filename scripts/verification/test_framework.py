@@ -20,6 +20,8 @@ def test_command_runner_status_json() -> None:
         payload = runner.run_status()
         assert payload["cache_dir"] == tmpdir
         assert "total_symbols" in payload
+        assert "schema_version" in payload
+        assert "needs_reindex" in payload
 
 
 def test_checks_schema_and_scores() -> None:

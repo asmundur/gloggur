@@ -39,6 +39,19 @@ class GloggurConfig:
     )
     index_version: str = "1"
 
+    def embedding_profile(self) -> str:
+        """Return a stable profile string for the active embedding configuration."""
+        provider = self.embedding_provider
+        if provider == "local":
+            model = self.local_embedding_model
+        elif provider == "openai":
+            model = self.openai_embedding_model
+        elif provider == "gemini":
+            model = self.gemini_embedding_model
+        else:
+            model = "unknown"
+        return f"{provider}:{model}"
+
     @classmethod
     def load(
         cls,

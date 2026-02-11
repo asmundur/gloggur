@@ -3,12 +3,40 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, Iterator, List, Optional
 
 from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
+
+SCHEMA_VERSION_KEY = "schema_version"
+INDEX_PROFILE_KEY = "index_profile"
+CACHE_SCHEMA_VERSION = "2"
+
+REQUIRED_TABLES = {"files", "symbols", "metadata", "audits", "audit_files", "meta"}
+LEGACY_TABLES = {"validations", "validation_files"}
+REQUIRED_COLUMNS = {
+    "files": {"path", "language", "content_hash", "last_indexed"},
+    "symbols": {
+        "id",
+        "name",
+        "kind",
+        "file_path",
+        "start_line",
+        "end_line",
+        "signature",
+        "docstring",
+        "body_hash",
+        "embedding_vector",
+        "language",
+    },
+    "metadata": {"key", "value"},
+    "audits": {"symbol_id", "warnings"},
+    "audit_files": {"path", "content_hash", "last_audited"},
+    "meta": {"key", "value"},
+}
 
 
 @dataclass
@@ -24,9 +52,11 @@ class CacheConfig:
 
 class CacheManager:
     """SQLite-backed cache for symbols, files, and audits."""
+
     def __init__(self, config: CacheConfig) -> None:
         """Initialize the cache and ensure the database exists."""
         self.config = config
+        self.last_reset_reason: Optional[str] = None
         os.makedirs(self.config.cache_dir, exist_ok=True)
         self._init_db()
 
@@ -46,6 +76,9 @@ class CacheManager:
 
     def _init_db(self) -> None:
         """Create database tables if they do not exist."""
+        reset_reason = self._schema_reset_reason()
+        if reset_reason:
+            self._reset_database(reset_reason)
         with self._connect() as conn:
             conn.executescript(
                 """
@@ -72,6 +105,10 @@ class CacheManager:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS audits (
                     symbol_id TEXT PRIMARY KEY,
                     warnings TEXT NOT NULL
@@ -82,6 +119,13 @@ class CacheManager:
                     last_audited TEXT NOT NULL
                 );
                 """
+            )
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (SCHEMA_VERSION_KEY, CACHE_SCHEMA_VERSION),
             )
 
     def get_file_metadata(self, path: str) -> Optional[FileMetadata]:
@@ -197,6 +241,27 @@ class CacheManager:
                 ("index", metadata.model_dump_json()),
             )
 
+    def get_schema_version(self) -> Optional[str]:
+        """Return the cache schema version marker."""
+        with self._connect() as conn:
+            return self._read_meta_value(conn, SCHEMA_VERSION_KEY)
+
+    def get_index_profile(self) -> Optional[str]:
+        """Return the cached index profile marker."""
+        with self._connect() as conn:
+            return self._read_meta_value(conn, INDEX_PROFILE_KEY)
+
+    def set_index_profile(self, profile: str) -> None:
+        """Persist the active index profile marker."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (INDEX_PROFILE_KEY, profile),
+            )
+
     def set_audit_warnings(self, symbol_id: str, warnings: List[str]) -> None:
         """Store audit warnings for a symbol."""
         with self._connect() as conn:
@@ -262,6 +327,89 @@ class CacheManager:
                 DELETE FROM metadata;
                 """
             )
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (SCHEMA_VERSION_KEY, CACHE_SCHEMA_VERSION),
+            )
+            conn.execute("DELETE FROM meta WHERE key = ?", (INDEX_PROFILE_KEY,))
+
+    def _schema_reset_reason(self) -> Optional[str]:
+        """Return a reason to reset the cache if current schema is incompatible."""
+        if not os.path.exists(self.config.db_path):
+            return None
+
+        try:
+            with sqlite3.connect(self.config.db_path) as conn:
+                existing_tables = self._list_tables(conn)
+                legacy_tables = sorted(existing_tables & LEGACY_TABLES)
+                if legacy_tables:
+                    return f"legacy tables present ({', '.join(legacy_tables)})"
+
+                missing_tables = sorted(REQUIRED_TABLES - existing_tables)
+                if missing_tables:
+                    return f"required tables missing ({', '.join(missing_tables)})"
+
+                for table, expected_columns in REQUIRED_COLUMNS.items():
+                    existing_columns = self._list_columns(conn, table)
+                    missing_columns = sorted(expected_columns - existing_columns)
+                    if missing_columns:
+                        return (
+                            f"table '{table}' missing columns "
+                            f"({', '.join(missing_columns)})"
+                        )
+
+                version = self._read_schema_version(conn)
+                if version != CACHE_SCHEMA_VERSION:
+                    found = version if version is not None else "none"
+                    return (
+                        "schema version mismatch "
+                        f"(found {found}, expected {CACHE_SCHEMA_VERSION})"
+                    )
+        except sqlite3.DatabaseError as exc:
+            return f"invalid sqlite database ({exc})"
+
+        return None
+
+    def _reset_database(self, reason: str) -> None:
+        """Remove incompatible SQLite database files so schema can be recreated."""
+        self.last_reset_reason = reason
+        db_path = self.config.db_path
+        for path in (db_path, f"{db_path}-wal", f"{db_path}-shm"):
+            if os.path.exists(path):
+                os.remove(path)
+        sys.stderr.write(
+            f"Cache schema changed; rebuilding cache at {db_path} ({reason}).\n"
+        )
+
+    def _list_tables(self, conn: sqlite3.Connection) -> set[str]:
+        """Return all non-internal table names in the SQLite database."""
+        rows = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def _list_columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
+        """Return column names for a table."""
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+
+    def _read_schema_version(self, conn: sqlite3.Connection) -> Optional[str]:
+        """Read the schema version from the meta table."""
+        return self._read_meta_value(conn, SCHEMA_VERSION_KEY)
+
+    def _read_meta_value(self, conn: sqlite3.Connection, key: str) -> Optional[str]:
+        """Read a metadata value from the meta table."""
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        return str(row[0])
 
     def _list_symbol_ids(self, conn: sqlite3.Connection, path: str) -> List[str]:
         """Return symbol ids for a file (internal helper)."""

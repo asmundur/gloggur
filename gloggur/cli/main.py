@@ -42,6 +42,24 @@ def _hash_content(source: str) -> str:
     return hashlib.sha256(source.encode("utf8")).hexdigest()
 
 
+def _profile_reindex_reason(
+    metadata_present: bool,
+    cached_profile: Optional[str],
+    expected_profile: str,
+) -> Optional[str]:
+    """Return a reason why cached index data should be rebuilt."""
+    if cached_profile is None:
+        if metadata_present:
+            return "cached embedding profile is unknown"
+        return None
+    if cached_profile != expected_profile:
+        return (
+            "embedding profile changed "
+            f"(cached={cached_profile}, current={expected_profile})"
+        )
+    return None
+
+
 @cli.command()
 @click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.option("--config", "config_path", type=click.Path(), default=None)
@@ -55,9 +73,22 @@ def index(path: str, config_path: Optional[str], as_json: bool, embedding_provid
     config = _load_config(config_path)
     if overrides:
         config = GloggurConfig.load(path=config_path, overrides=overrides)
+    expected_profile = config.embedding_profile()
     click.echo("Indexing...", err=True)
     cache = CacheManager(CacheConfig(config.cache_dir))
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
+    if cache.last_reset_reason:
+        vector_store.clear()
+    metadata_present = cache.get_index_metadata() is not None
+    cached_profile = cache.get_index_profile()
+    reindex_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
+    if reindex_reason:
+        click.echo(
+            f"Embedding settings changed; rebuilding cache at {config.cache_dir} ({reindex_reason}).",
+            err=True,
+        )
+        cache.clear()
+        vector_store.clear()
     embedding = create_embedding_provider(config) if config.embedding_provider else None
     indexer = Indexer(
         config=config,
@@ -100,8 +131,30 @@ def search(
 ) -> None:
     """Search indexed symbols with optional filters."""
     config = _load_config(config_path)
+    expected_profile = config.embedding_profile()
+    cache = CacheManager(CacheConfig(config.cache_dir))
+    metadata_present = cache.get_index_metadata() is not None
+    cached_profile = cache.get_index_profile()
+    reindex_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
+    if reindex_reason:
+        payload = {
+            "query": query,
+            "results": [],
+            "metadata": {
+                "total_results": 0,
+                "search_time_ms": 0,
+                "needs_reindex": True,
+                "reindex_reason": reindex_reason,
+                "expected_index_profile": expected_profile,
+                "cached_index_profile": cached_profile,
+            },
+        }
+        _emit(payload, as_json)
+        return
     embedding = create_embedding_provider(config)
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
+    if cache.last_reset_reason:
+        vector_store.clear()
     metadata_store = MetadataStore(MetadataStoreConfig(config.cache_dir))
     searcher = HybridSearch(embedding, vector_store, metadata_store)
     filters = {}
@@ -216,11 +269,29 @@ def inspect(
 def status(config_path: Optional[str], as_json: bool) -> None:
     """Show index statistics and metadata."""
     config = _load_config(config_path)
+    expected_profile = config.embedding_profile()
     cache = CacheManager(CacheConfig(config.cache_dir))
     metadata = cache.get_index_metadata()
+    schema_version = cache.get_schema_version()
+    cached_profile = cache.get_index_profile()
+    reindex_reason = _profile_reindex_reason(
+        metadata_present=metadata is not None,
+        cached_profile=cached_profile,
+        expected_profile=expected_profile,
+    )
+    if cache.last_reset_reason:
+        reindex_reason = (
+            "cache schema rebuilt "
+            f"({cache.last_reset_reason})"
+        )
     payload = {
         "cache_dir": config.cache_dir,
         "metadata": metadata.model_dump(mode="json") if metadata else None,
+        "schema_version": schema_version,
+        "expected_index_profile": expected_profile,
+        "cached_index_profile": cached_profile,
+        "needs_reindex": metadata is None or reindex_reason is not None,
+        "reindex_reason": reindex_reason,
         "total_symbols": len(cache.list_symbols()),
     }
     _emit(payload, as_json)

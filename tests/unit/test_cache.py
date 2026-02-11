@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
+import sqlite3
 import tempfile
 
-from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.indexer.cache import CACHE_SCHEMA_VERSION, CacheConfig, CacheManager
 from gloggur.models import IndexMetadata, Symbol
 
 
@@ -54,3 +56,40 @@ def test_cache_clear_removes_entries() -> None:
     cache.clear()
     assert cache.list_symbols() == []
     assert cache.get_index_metadata() is None
+
+
+def test_cache_schema_version_persists_across_clear() -> None:
+    """Schema version marker should remain after clear for future compatibility checks."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.clear()
+    assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
+
+
+def test_cache_auto_resets_legacy_tables() -> None:
+    """Legacy table layouts should trigger automatic cache recreation."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    db_path = os.path.join(cache_dir, "index.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE validations (
+                symbol_id TEXT PRIMARY KEY,
+                warnings TEXT NOT NULL
+            );
+            """
+        )
+    cache = CacheManager(CacheConfig(cache_dir))
+    assert cache.last_reset_reason is not None
+    assert "legacy tables present" in cache.last_reset_reason
+    assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
+
+
+def test_cache_index_profile_round_trip_and_clear() -> None:
+    """Index profile should round-trip and clear should remove stale profile markers."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.set_index_profile("local:model-a")
+    assert cache.get_index_profile() == "local:model-a"
+    cache.clear()
+    assert cache.get_index_profile() is None
