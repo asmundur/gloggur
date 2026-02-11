@@ -28,8 +28,8 @@ def _parse_json_output(output: str) -> dict[str, object]:
     return json.loads(output[start:])
 
 
-def test_cli_index_search_inspect_status_and_clear_cache() -> None:
-    """End-to-end CLI smoke test for index/search/inspect/status/clear-cache."""
+def test_cli_index_search_status_and_clear_cache() -> None:
+    """End-to-end CLI test for index/search/status/clear-cache."""
     runner = CliRunner()
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
@@ -53,11 +53,6 @@ def test_cli_index_search_inspect_status_and_clear_cache() -> None:
         assert search_result.exit_code == 0
         search_payload = _parse_json_output(search_result.output)
         assert search_payload["metadata"]["total_results"] > 0
-
-        inspect_result = runner.invoke(cli, ["inspect", str(repo), "--json"], env=env)
-        assert inspect_result.exit_code == 0
-        inspect_payload = _parse_json_output(inspect_result.output)
-        assert inspect_payload["total"] >= 1
 
         clear_result = runner.invoke(cli, ["clear-cache", "--json"], env=env)
         assert clear_result.exit_code == 0

@@ -79,14 +79,19 @@ Cache compatibility is automatic:
 
 ## Verification
 
-Gloggur includes a verification suite to verify functionality:
+Core behavior checks run in `pytest` (including smoke tests):
 
 ```bash
-# Run all verification tests
+pytest
+```
+
+Additional verification probes are available for provider/edge/performance checks:
+
+```bash
+# Run non-test verification phases (providers, edge cases, performance)
 python scripts/run_suite.py
 
 # Run specific phases
-python scripts/run_smoke.py  # Smoke tests
 python scripts/run_provider_probe.py  # Embedding providers
 python scripts/run_edge_bench.py  # Edge cases & performance
 ```

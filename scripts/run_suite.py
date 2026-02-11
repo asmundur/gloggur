@@ -38,7 +38,6 @@ class _PhaseDefinition:
 
 
 PHASE_DEFINITIONS: Dict[int, _PhaseDefinition] = {
-    1: _PhaseDefinition(title="Smoke Tests", script=Path("scripts/run_smoke.py")),
     2: _PhaseDefinition(title="Embedding Providers", script=Path("scripts/run_provider_probe.py")),
     3: _PhaseDefinition(title="Edge Cases", script=Path("scripts/run_edge_bench.py")),
     4: _PhaseDefinition(title="Performance Benchmarks", script=Path("scripts/run_edge_bench.py")),
@@ -99,8 +98,8 @@ class SuiteRunner:
         if self.phases:
             return sorted(set(self.phases))
         if self.quick:
-            return [1, 2]
-        return [1, 2, 3, 4]
+            return [2]
+        return [2, 3, 4]
 
     def _run_single_phase(self, phase: int) -> List[PhaseReport]:
         """Run a single phase script."""
@@ -502,11 +501,11 @@ def _parse_phases(raw: Optional[str]) -> Optional[List[int]]:
 def main() -> int:
     """CLI entrypoint for running all phases."""
     parser = argparse.ArgumentParser(description="Run all gloggur verification phases.")
-    parser.add_argument("--phases", type=str, default=None, help="Comma-separated phase list, e.g. 1,2,4")
+    parser.add_argument("--phases", type=str, default=None, help="Comma-separated phase list, e.g. 2,3,4")
     parser.add_argument("--output", type=str, default=None, help="Write report to file.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
-    parser.add_argument("--quick", action="store_true", help="Run quick verification (phases 1-2).")
+    parser.add_argument("--quick", action="store_true", help="Run quick verification (phase 2 only).")
     parser.add_argument("--serial", action="store_true", help="Disable parallel phase execution.")
     parser.add_argument("--jobs", type=int, default=None, help="Max parallel workers for phase execution.")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
