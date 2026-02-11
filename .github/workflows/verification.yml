@@ -1,4 +1,4 @@
-name: Verification Suite
+name: CI
 
 on:
   push:
@@ -6,28 +6,59 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Run daily at 2 AM UTC
+    # Run verification daily at 2 AM UTC.
     - cron: '0 2 * * *'
+  workflow_dispatch:
 
 jobs:
-  verify:
+  tests:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     env:
-      GLOGGUR_SKIP_DOCSTRING_AUDIT: "1"
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: "."
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Test Suite
+        run: pytest
+
+  verification:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GLOGGUR_SKIP_DOCSTRING_AUDIT: "1"
+      PYTHONPATH: "."
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
           pip install -e .
 
       - name: Run Phase 1 (Smoke Tests)
@@ -52,17 +83,3 @@ jobs:
         with:
           name: verification-report-py${{ matrix.python-version }}
           path: verification_report.md
-
-      - name: Comment PR with Results
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            const report = fs.readFileSync('verification_report.md', 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '## Verification Report\n\n' + report
-            });

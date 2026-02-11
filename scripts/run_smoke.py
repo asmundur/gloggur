@@ -115,6 +115,32 @@ def _create_search_fixture() -> Tuple[Path, Path, str]:
     return fixture_dir, fixture_file, query
 
 
+def _create_incremental_target_fixture() -> Path:
+    """Create an ephemeral fixture file for incremental indexing checks."""
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf8",
+        suffix=".py",
+        prefix=".gloggur-phase1-",
+        dir=str(PROJECT_ROOT),
+        delete=False,
+    )
+    with handle:
+        handle.write(
+            textwrap.dedent(
+                """\
+                \"\"\"Ephemeral fixture for phase 1 incremental indexing checks.\"\"\"
+
+                def phase1_incremental_target() -> int:
+                    \"\"\"Return a stable integer value.\"\"\"
+                    return 7
+                """
+            ).strip()
+            + "\n"
+        )
+    return Path(handle.name)
+
+
 def test_basic_indexing(runner: CommandRunner, cache_dir: str) -> Tuple[TestResult, Dict[str, object]]:
     """Smoke test for indexing a repository."""
     try:
@@ -465,14 +491,16 @@ def run_phase1(
         retry_config=retry_config,
     )
 
-    target_file = Path("gloggur/cli/main.py")
+    search_target_file = Path("gloggur/cli/main.py")
     fixture_path = Path("tests/fixtures/phase1_docstring_fixture.py")
 
     with TestFixtures(cache_dir=cache_dir) as fixtures:
         backup_path: Optional[Path] = None
+        incremental_target_file: Optional[Path] = None
         try:
             backup_path = fixtures.backup_cache()
             fixtures.cleanup_cache()
+            incremental_target_file = _create_incremental_target_fixture()
 
             test_result, first_run = test_basic_indexing(runner, cache_dir)
             results.append(Phase1Result("Test 1.1: Basic Indexing", test_result))
@@ -497,7 +525,10 @@ def run_phase1(
             if verbose and test_result.details:
                 print(json.dumps({"test": "basic_indexing", "details": test_result.details}, indent=2))
 
-            test_result = test_incremental_indexing(runner, first_run, target_file)
+            if incremental_target_file is None:
+                test_result = TestResult(passed=False, message="Incremental fixture setup failed")
+            else:
+                test_result = test_incremental_indexing(runner, first_run, incremental_target_file)
             results.append(Phase1Result("Test 1.2: Incremental Indexing", test_result))
             reporter.add_test_result("Test 1.2: Incremental Indexing", test_result)
             if isinstance(test_result.details, dict):
@@ -528,7 +559,7 @@ def run_phase1(
             if verbose and test_result.details:
                 print(json.dumps({"test": "incremental_indexing", "details": test_result.details}, indent=2))
 
-            test_result = test_search_functionality(runner, target_file, cache_dir)
+            test_result = test_search_functionality(runner, search_target_file, cache_dir)
             results.append(Phase1Result("Test 1.3: Search Functionality", test_result))
             reporter.add_test_result("Test 1.3: Search Functionality", test_result)
             if isinstance(test_result.details, dict):
@@ -578,6 +609,8 @@ def run_phase1(
                 fixtures.cleanup_cache()
             if fixture_path.exists():
                 fixture_path.unlink()
+            if incremental_target_file is not None and incremental_target_file.exists():
+                incremental_target_file.unlink()
 
     if emit_summary:
         reporter.print_summary()
