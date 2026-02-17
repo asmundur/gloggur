@@ -1,41 +1,79 @@
-# Agent Instructions
-
-Gloggur is a tool **for** coding agents. When working in this repository, you should always use Glöggur when you think semantic search might help you with your problem.
-
-use .venv for running python modules. 
-
 ## Required workflow
 
-1. **Index the repository** (first time per workspace):
-   ```bash
-   gloggur index . --json
-   ```
-   If `gloggur` is not on PATH (e.g., codex-cli), use:
-   ```bash
-   scripts/gloggur index . --json
-   ```
-2. **Search for relevant symbols** before editing files:
-   ```bash
-   gloggur search "<query>" --top-k 5 --json
-   ```
-   Or, if needed:
-   ```bash
-   scripts/gloggur search "<query>" --top-k 5 --json
-   ```
-3. **Inspect your work** when appropriate:
-   ```bash
-   gloggur inspect . --json
-   ```
-   Or, if needed:
-   ```bash
-   scripts/gloggur inspect . --json
-   ```
+### 1) Ensure the index is current (cheap check)
+
+Run this at the start of a session, and any time you suspect the index might be stale:
+
+```bash
+gloggur status --json
+```
+
+If the index is missing or stale, update it:
+
+```bash
+gloggur index . --json
+```
+
+If `gloggur` is not on PATH (e.g., codex-cli), use:
+
+```bash
+scripts/gloggur status --json
+scripts/gloggur index . --json
+```
+
+Re-index only when:
+- Files were added/renamed/moved
+- Large refactors touched many files
+- The cache was deleted or the status check reports stale
+
+
+### 2) Use semantic search selectively (avoid the slowdown tax)
+
+Use semantic search **only** when it materially reduces uncertainty, e.g.:
+- You don’t know where a symbol is defined
+- You need to locate where a concept is implemented
+- You’re dealing with cross-cutting behavior across multiple modules
+
+```bash
+gloggur search "<query>" --top-k 5 --json
+```
+
+If `gloggur` is not on PATH:
+
+```bash
+scripts/gloggur search "<query>" --top-k 5 --json
+```
+
+Do **not** use semantic search for:
+- Editing files you already have open
+- Small local refactors
+- Obvious symbol locations (prefer normal text search / jump-to-definition)
+
+
+### 3) Inspect strategically
+
+Use inspect when:
+- You finished substantial changes
+- You need a quick sanity check across the repo
+- You suspect unintended cross-file impact
+
+```bash
+gloggur inspect . --json
+```
+
+If `gloggur` is not on PATH:
+
+```bash
+scripts/gloggur inspect . --json
+```
+
 
 ## Notes
 
+- Use `.venv` for running Python modules.
 - Check `gloggur status --json` to confirm the index is current (or `scripts/gloggur status --json` if the CLI is not on PATH).
 - Cache data is stored in `.gloggur-cache`; do **not** commit it.
 - If you add or rename files, re-run `gloggur index . --json`.
-- Keep `TODOs.md` and `DONEs.md` current: create/update TODO entries before substantial work; move completed items to DONEs with verification evidence.
+- Keep `TODOs.md` and `DONEs.md` for tasks the user mentions that need to be done later; move completed items to DONEs with verification evidence.
 
 For more detail, see `docs/AGENT_INTEGRATION.md`.
