@@ -159,8 +159,63 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ---
 
+## R4 - Perfect Reliability: Bootstrap, Preflight, and Self-Healing CLI Execution
+
+**Status**: planned
+**Priority**: P0
+**Owner**: codex
+
+**Problem**
+- Operator workflows depend on `gloggur` or `scripts/gloggur`, but bootstrap assumptions are fragile across fresh worktrees.
+- A missing `.venv` (or missing dependencies in `.venv`) causes immediate command failure before users can run `status`, `index`, or `search`.
+- Failures are currently binary ("works" or "command not found/no such file"), with limited recovery guidance.
+
+**Goal**
+- Make command execution reliable in fresh and long-lived worktrees by adding deterministic preflight checks and self-healing fallback behavior.
+
+**Scope**
+- Add a bootstrap preflight command path used by `scripts/gloggur` that validates:
+  - Python interpreter availability
+  - virtualenv presence/health
+  - required package importability (`gloggur`)
+- Implement safe fallback order with explicit logs:
+  - use repo `.venv` when healthy
+  - otherwise use system `python -m gloggur` when available
+  - otherwise fail with one actionable setup block
+- Add a single canonical setup helper (`scripts/bootstrap_gloggur_env.sh`) that can create/repair `.venv` and install required extras for local dev.
+- Ensure all early failures return structured JSON when `--json` is set, including:
+  - `error_code` (`missing_venv`, `missing_python`, `missing_package`, `broken_environment`)
+  - remediation steps
+  - detected environment details
+- Document expected bootstrap behavior and recovery flow in `README.md` and `docs/AGENT_INTEGRATION.md`.
+
+**Out of Scope**
+- Installing global system packages automatically without explicit user action.
+- Replacing the Python packaging strategy (`pipx` vs `pip` vs editable installs).
+
+**Acceptance Criteria**
+- In a fresh clone with no `.venv`, `scripts/gloggur status --json` either succeeds via fallback or fails with deterministic JSON + clear remediation.
+- In a broken `.venv` (missing `gloggur`), tool does not crash with raw traceback by default; it provides guided recovery.
+- In healthy env, startup overhead remains low (preflight <200ms on warm path).
+- Agent-required workflows in `AGENTS.md` run successfully after one documented bootstrap command.
+
+**Tests Required**
+- Unit tests for preflight detection matrix:
+  - missing `.venv`
+  - missing interpreter
+  - missing package
+  - healthy environment
+- Integration tests for wrapper behavior:
+  - fallback to system python path
+  - deterministic failure payload with `--json`
+  - human-readable stderr guidance without `--json`
+- Regression test to ensure wrapper exit codes are stable across failure classes.
+
+---
+
 ## Ordering / Priority
 
-1. R2 (corruption recovery) - highest operational risk, easiest to misdiagnose.
-2. R1 (OS-level failure handling) - critical for CI/dev ergonomics and safe operations.
-3. R3 (concurrency hardening) - important for robustness, likely broader design work.
+1. R4 (bootstrap/preflight reliability) - blocks all workflows if environment is not runnable.
+2. R2 (corruption recovery) - highest operational risk after bootstrap, easiest to misdiagnose.
+3. R1 (OS-level failure handling) - critical for CI/dev ergonomics and safe operations.
+4. R3 (concurrency hardening) - important for robustness, likely broader design work.
