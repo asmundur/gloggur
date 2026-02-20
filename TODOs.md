@@ -219,3 +219,42 @@ These tasks track reliability hardening for cache/index operations after the sch
 2. R2 (corruption recovery) - highest operational risk after bootstrap, easiest to misdiagnose.
 3. R1 (OS-level failure handling) - critical for CI/dev ergonomics and safe operations.
 4. R3 (concurrency hardening) - important for robustness, likely broader design work.
+
+---
+
+## F1 - Configurable On-Save Incremental Indexing (Watch Mode)
+
+**Status**: ready_for_review
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Incremental indexing currently requires explicit command runs and does not update automatically on file save.
+- Reindexing changed files can leave stale vectors/results when symbol IDs shift, because vector entries are append-only today.
+
+**Goal**
+- Add first-class watch mode with background lifecycle commands and correct vector upsert/removal semantics.
+
+**Scope**
+- Add `watch` CLI commands (`init`, `start`, `stop`, `status`) and watch config keys/env overrides.
+- Implement watcher runtime with file filtering, debounce/coalescing, hash-based skip, and heartbeat state.
+- Add vector removal/upsert support for FAISS and fallback paths with legacy migration handling.
+- Add cache helpers for file metadata deletion and file counts.
+- Update README + agent docs and add tests for watch lifecycle and vector correctness.
+
+**Out of Scope**
+- IDE plugin development.
+- Full OS autostart installers.
+
+**Acceptance Criteria**
+- Save-triggered updates index changed files without manual `gloggur index`.
+- Unchanged content does not re-embed.
+- Deleted/renamed symbols do not appear as stale search hits.
+- Watch lifecycle commands report and manage running state predictably.
+
+**Tests Required**
+- Unit coverage for vector `remove_ids`/`upsert_vectors` and watcher processing behavior.
+- Integration coverage for `watch init/start/status/stop` and stale-result regression scenarios.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree

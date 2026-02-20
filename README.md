@@ -67,6 +67,20 @@ Check status:
 gloggur status --json
 ```
 
+Enable save-triggered indexing (one-time setup):
+
+```bash
+gloggur watch init . --json
+gloggur watch start --daemon --json
+```
+
+Check or stop watcher:
+
+```bash
+gloggur watch status --json
+gloggur watch stop --json
+```
+
 Clear cache:
 
 ```bash
@@ -76,6 +90,15 @@ gloggur clear-cache --json
 Cache compatibility is automatic:
 - If cache schema changes, Gloggur rebuilds `.gloggur-cache/index.db` automatically.
 - If embedding provider/model changes, the next `gloggur index ...` run rebuilds cache and vectors automatically.
+
+## On-Save Indexing (Watch Mode)
+
+Watch mode keeps the index updated in the background as files are saved.
+
+- Filesystem events are debounced (`watch_debounce_ms`, default `300`) to coalesce save bursts.
+- Content hashing avoids re-parsing/re-embedding unchanged files.
+- Deleted/changed symbol vectors are removed before upsert to prevent stale search hits.
+- Runtime state is written to `.gloggur-cache/watch_state.json` by default.
 
 ## Verification
 
@@ -109,6 +132,13 @@ local_embedding_model: microsoft/codebert-base
 openai_embedding_model: text-embedding-3-large
 gemini_embedding_model: gemini-embedding-001
 cache_dir: .gloggur-cache
+watch_enabled: false
+watch_path: .
+watch_debounce_ms: 300
+watch_mode: daemon
+watch_state_file: .gloggur-cache/watch_state.json
+watch_pid_file: .gloggur-cache/watch.pid
+watch_log_file: .gloggur-cache/watch.log
 docstring_semantic_threshold: 0.2
 docstring_semantic_max_chars: 4000
 supported_extensions:
@@ -127,6 +157,10 @@ Environment variables:
 - `GLOGGUR_GEMINI_MODEL`
 - `GLOGGUR_GEMINI_API_KEY`
 - `GLOGGUR_CACHE_DIR`
+- `GLOGGUR_WATCH_ENABLED`
+- `GLOGGUR_WATCH_PATH`
+- `GLOGGUR_WATCH_DEBOUNCE_MS`
+- `GLOGGUR_WATCH_MODE`
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
 
 ## Output Schema

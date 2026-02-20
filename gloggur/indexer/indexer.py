@@ -56,7 +56,7 @@ class Indexer:
         metadata = IndexMetadata(
             version=self.config.index_version,
             total_symbols=len(self.cache.list_symbols()),
-            indexed_files=indexed_files,
+            indexed_files=self.cache.count_files(),
         )
         self.cache.set_index_metadata(metadata)
         self.cache.set_index_profile(self.config.embedding_profile())
@@ -84,6 +84,9 @@ class Indexer:
         parser_entry = self.parser_registry.get_parser_for_path(path)
         if not parser_entry:
             return None
+        previous_symbol_ids = existing.symbols if existing else []
+        if self.vector_store and previous_symbol_ids:
+            self.vector_store.remove_ids(previous_symbol_ids)
         symbols = parser_entry.parser.extract_symbols(path, source)
         symbols = self._apply_embeddings(symbols, source)
         self.cache.delete_symbols_for_file(path)
@@ -97,7 +100,7 @@ class Indexer:
             )
         )
         if self.vector_store and symbols:
-            self.vector_store.add_vectors(symbols)
+            self.vector_store.upsert_vectors(symbols)
         self.cache.set_index_profile(self.config.embedding_profile())
         return len(symbols)
 

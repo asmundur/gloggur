@@ -3,10 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
+import subprocess
+import sys
+import time
 from typing import Dict, List, Optional, Tuple
 
 import click
+import yaml
 
+from gloggur.audit.docstring_audit import audit_docstrings
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.factory import create_embedding_provider
 from gloggur.indexer.cache import CacheConfig, CacheManager
@@ -16,7 +22,7 @@ from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
-from gloggur.audit.docstring_audit import audit_docstrings
+from gloggur.watch.service import WatchService, is_process_running, load_watch_state, utc_now_iso
 
 
 @click.group()
@@ -60,21 +66,96 @@ def _profile_reindex_reason(
     return None
 
 
-@cli.command()
-@click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
-@click.option("--config", "config_path", type=click.Path(), default=None)
-@click.option("--json", "as_json", is_flag=True, default=False)
-@click.option("--embedding-provider", type=str, default=None)
-def index(path: str, config_path: Optional[str], as_json: bool, embedding_provider: Optional[str]) -> None:
-    """Load config (optional embedding_provider override), build CacheManager/VectorStore/ParserRegistry, index path, emit counts."""
-    overrides = {}
+def _resolve_config_file_path(config_path: Optional[str]) -> str:
+    """Resolve config file path for watch init updates."""
+    if config_path:
+        return config_path
+    for candidate in (".gloggur.yaml", ".gloggur.yml", ".gloggur.json"):
+        if os.path.exists(candidate):
+            return candidate
+    return ".gloggur.yaml"
+
+
+def _read_config_payload(path: str) -> Dict[str, object]:
+    """Load config file payload (yaml/json), returning empty dict if missing."""
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf8") as handle:
+        if path.endswith(".json"):
+            payload = json.load(handle)
+        else:
+            payload = yaml.safe_load(handle) or {}
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _write_config_payload(path: str, payload: Dict[str, object]) -> None:
+    """Persist config payload using yaml/json by file extension."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf8") as handle:
+        if path.endswith(".json"):
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            return
+        yaml.safe_dump(payload, handle, sort_keys=False)
+
+
+def _read_pid_file(path: str) -> Optional[int]:
+    """Read PID from pid file."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf8") as handle:
+            value = handle.read().strip()
+        if not value:
+            return None
+        return int(value)
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pid_file(path: str, pid: int) -> None:
+    """Write PID to file."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf8") as handle:
+        handle.write(f"{pid}\n")
+
+
+def _remove_file(path: str) -> None:
+    """Best-effort file removal helper."""
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def _write_watch_state(path: str, updates: Dict[str, object]) -> None:
+    """Merge watcher state updates and persist JSON."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = load_watch_state(path)
+    payload.update(updates)
+    with open(path, "w", encoding="utf8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
+def _create_runtime(
+    config_path: Optional[str],
+    embedding_provider: Optional[str] = None,
+    rebuild_on_profile_change: bool = False,
+) -> tuple[GloggurConfig, CacheManager, VectorStore]:
+    """Create config/cache/vector runtime and apply profile rebuild logic."""
+    overrides: Dict[str, str] = {}
     if embedding_provider:
         overrides["embedding_provider"] = embedding_provider
     config = _load_config(config_path)
     if overrides:
         config = GloggurConfig.load(path=config_path, overrides=overrides)
     expected_profile = config.embedding_profile()
-    click.echo("Indexing...", err=True)
     cache = CacheManager(CacheConfig(config.cache_dir))
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
     if cache.last_reset_reason:
@@ -82,13 +163,35 @@ def index(path: str, config_path: Optional[str], as_json: bool, embedding_provid
     metadata_present = cache.get_index_metadata() is not None
     cached_profile = cache.get_index_profile()
     reindex_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
-    if reindex_reason:
+    if reindex_reason and rebuild_on_profile_change:
         click.echo(
-            f"Embedding settings changed; rebuilding cache at {config.cache_dir} ({reindex_reason}).",
+            "Embedding settings changed; rebuilding cache at "
+            f"{config.cache_dir} ({reindex_reason}).",
             err=True,
         )
         cache.clear()
         vector_store.clear()
+    return config, cache, vector_store
+
+
+@cli.command()
+@click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--embedding-provider", type=str, default=None)
+def index(
+    path: str,
+    config_path: Optional[str],
+    as_json: bool,
+    embedding_provider: Optional[str],
+) -> None:
+    """Load config/runtime, index path, and emit summary counts."""
+    config, cache, vector_store = _create_runtime(
+        config_path=config_path,
+        embedding_provider=embedding_provider,
+        rebuild_on_profile_change=True,
+    )
+    click.echo("Indexing...", err=True)
     embedding = create_embedding_provider(config) if config.embedding_provider else None
     indexer = Indexer(
         config=config,
@@ -130,9 +233,8 @@ def search(
     stream: bool,
 ) -> None:
     """Search indexed symbols with optional filters."""
-    config = _load_config(config_path)
+    config, cache, vector_store = _create_runtime(config_path=config_path)
     expected_profile = config.embedding_profile()
-    cache = CacheManager(CacheConfig(config.cache_dir))
     metadata_present = cache.get_index_metadata() is not None
     cached_profile = cache.get_index_profile()
     reindex_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
@@ -152,9 +254,6 @@ def search(
         _emit(payload, as_json)
         return
     embedding = create_embedding_provider(config)
-    vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
-    if cache.last_reset_reason:
-        vector_store.clear()
     metadata_store = MetadataStore(MetadataStoreConfig(config.cache_dir))
     searcher = HybridSearch(embedding, vector_store, metadata_store)
     filters = {}
@@ -174,7 +273,12 @@ def search(
 @click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
-@click.option("--force", is_flag=True, default=False, help="Reinspect even if unchanged since last run.")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Reinspect even if unchanged since last run.",
+)
 @click.option(
     "--symbol-id",
     "symbol_ids",
@@ -260,6 +364,205 @@ def inspect(
         "inspected_files": inspected_files,
         "skipped_files": skipped_files,
     }
+    _emit(payload, as_json)
+
+
+@cli.group()
+def watch() -> None:
+    """Manage save-triggered incremental indexing."""
+
+
+@watch.command("init")
+@click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def watch_init(path: str, config_path: Optional[str], as_json: bool) -> None:
+    """Enable watch mode defaults in config for a repository path."""
+
+    config_file = _resolve_config_file_path(config_path)
+    payload = _read_config_payload(config_file)
+    payload["watch_enabled"] = True
+    payload["watch_path"] = os.path.abspath(path)
+    payload.setdefault("watch_debounce_ms", 300)
+    payload.setdefault("watch_mode", "daemon")
+    payload.setdefault("watch_state_file", ".gloggur-cache/watch_state.json")
+    payload.setdefault("watch_pid_file", ".gloggur-cache/watch.pid")
+    payload.setdefault("watch_log_file", ".gloggur-cache/watch.log")
+    _write_config_payload(config_file, payload)
+    response = {
+        "initialized": True,
+        "config_file": config_file,
+        "watch_path": payload["watch_path"],
+        "watch_mode": payload["watch_mode"],
+        "next_steps": ["gloggur watch start", "gloggur watch status"],
+    }
+    _emit(response, as_json)
+
+
+@watch.command("start")
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--foreground", "force_foreground", is_flag=True, default=False)
+@click.option("--daemon", "force_daemon", is_flag=True, default=False)
+def watch_start(
+    config_path: Optional[str],
+    as_json: bool,
+    force_foreground: bool,
+    force_daemon: bool,
+) -> None:
+    """Start watcher in foreground or daemon mode."""
+
+    if force_foreground and force_daemon:
+        raise click.ClickException("Use only one of --foreground or --daemon.")
+
+    config, cache, vector_store = _create_runtime(
+        config_path=config_path,
+        rebuild_on_profile_change=True,
+    )
+    watch_path = os.path.abspath(config.watch_path)
+    if not os.path.exists(watch_path):
+        raise click.ClickException(f"Watch path does not exist: {watch_path}")
+
+    mode = config.watch_mode
+    if force_foreground:
+        mode = "foreground"
+    if force_daemon:
+        mode = "daemon"
+    if mode not in {"foreground", "daemon"}:
+        raise click.ClickException(f"Unsupported watch mode: {mode}")
+
+    pid_path = config.watch_pid_file
+    pid = _read_pid_file(pid_path)
+    if is_process_running(pid):
+        _emit({"started": False, "reason": "already_running", "pid": pid}, as_json)
+        return
+
+    embedding = create_embedding_provider(config) if config.embedding_provider else None
+    service = WatchService(
+        config=config,
+        embedding_provider=embedding,
+        cache=cache,
+        vector_store=vector_store,
+    )
+
+    if mode == "daemon":
+        log_file = config.watch_log_file
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        cmd = [sys.executable, "-m", "gloggur.cli.main", "watch", "start", "--foreground"]
+        if config_path:
+            cmd.extend(["--config", config_path])
+        with open(log_file, "a", encoding="utf8") as log_handle:
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_handle,
+                stderr=log_handle,
+                start_new_session=True,
+            )
+        _write_pid_file(pid_path, process.pid)
+        _write_watch_state(
+            config.watch_state_file,
+            {
+                "running": True,
+                "status": "starting",
+                "pid": process.pid,
+                "watch_path": watch_path,
+                "last_heartbeat": utc_now_iso(),
+            },
+        )
+        _emit(
+            {
+                "started": True,
+                "mode": "daemon",
+                "pid": process.pid,
+                "watch_path": watch_path,
+                "log_file": log_file,
+            },
+            as_json,
+        )
+        return
+
+    _write_pid_file(pid_path, os.getpid())
+    try:
+        result = service.run_forever(watch_path)
+    finally:
+        _remove_file(pid_path)
+    _emit(
+        {
+            "started": True,
+            "mode": "foreground",
+            "pid": os.getpid(),
+            **result,
+        },
+        as_json,
+    )
+
+
+@watch.command("stop")
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def watch_stop(config_path: Optional[str], as_json: bool) -> None:
+    """Stop watcher process identified by pid file."""
+
+    config = _load_config(config_path)
+    pid = _read_pid_file(config.watch_pid_file)
+    if not is_process_running(pid):
+        _remove_file(config.watch_pid_file)
+        _write_watch_state(
+            config.watch_state_file,
+            {
+                "running": False,
+                "status": "stopped",
+                "stopped_at": utc_now_iso(),
+            },
+        )
+        _emit({"stopped": False, "running": False, "pid": pid}, as_json)
+        return
+
+    assert pid is not None
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(30):
+        if not is_process_running(pid):
+            break
+        time.sleep(0.1)
+
+    running = is_process_running(pid)
+    if not running:
+        _remove_file(config.watch_pid_file)
+    _write_watch_state(
+        config.watch_state_file,
+        {
+            "running": running,
+            "status": "stopped" if not running else "stopping",
+            "stopped_at": utc_now_iso() if not running else None,
+            "pid": pid,
+        },
+    )
+    _emit({"stopped": not running, "running": running, "pid": pid}, as_json)
+
+
+@watch.command("status")
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def watch_status(config_path: Optional[str], as_json: bool) -> None:
+    """Show watcher process and heartbeat status."""
+
+    config = _load_config(config_path)
+    pid = _read_pid_file(config.watch_pid_file)
+    running = is_process_running(pid)
+    state = load_watch_state(config.watch_state_file)
+    payload: Dict[str, object] = {
+        "watch_enabled": config.watch_enabled,
+        "watch_path": os.path.abspath(config.watch_path),
+        "mode": config.watch_mode,
+        "pid": pid,
+        "running": running,
+        "state_file": config.watch_state_file,
+        "log_file": config.watch_log_file,
+    }
+    payload.update(state)
+    payload["running"] = running
     _emit(payload, as_json)
 
 

@@ -8,6 +8,11 @@ This repository ships Gloggur, a symbol-level indexer intended for coding agents
    ```bash
    gloggur index . --json
    ```
+   Optional one-time setup for background save-triggered indexing:
+   ```bash
+   gloggur watch init . --json
+   gloggur watch start --daemon --json
+   ```
 2. **Locate relevant code** with semantic search:
    ```bash
    gloggur search "<query>" --top-k 5 --json
@@ -15,6 +20,10 @@ This repository ships Gloggur, a symbol-level indexer intended for coding agents
 3. **Confirm coverage**:
    ```bash
    gloggur status --json
+   ```
+   Watcher runtime health:
+   ```bash
+   gloggur watch status --json
    ```
 4. **Inspect docstrings (optional but recommended for documentation changes)**:
    ```bash
@@ -36,3 +45,4 @@ You can tailor indexing and embedding behavior via `.gloggur.yaml` or `.gloggur.
 
 Gloggur stores its cache in `.gloggur-cache`. This directory is **local-only** and should never be committed.
 `gloggur status --json` includes `schema_version` and `needs_reindex` so agents can detect stale cache state without manual cleanup.
+Watch mode writes runtime files (`watch_state.json`, `watch.pid`, `watch.log`) under `.gloggur-cache` by default.

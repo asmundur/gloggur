@@ -168,6 +168,11 @@ class CacheManager:
         with self._connect() as conn:
             conn.execute("DELETE FROM symbols WHERE file_path = ?", (path,))
 
+    def delete_file_metadata(self, path: str) -> None:
+        """Delete cached file metadata for a path."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM files WHERE path = ?", (path,))
+
     def upsert_symbols(self, symbols: Iterable[Symbol]) -> None:
         """Insert or update a batch of symbols."""
         with self._connect() as conn:
@@ -212,6 +217,12 @@ class CacheManager:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM symbols").fetchall()
             return [self._row_to_symbol(row) for row in rows]
+
+    def count_files(self) -> int:
+        """Return the number of indexed files."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()
+            return int(row["count"] if row else 0)
 
     def list_symbols_for_file(self, path: str) -> List[Symbol]:
         """Return cached symbols for a file path."""
