@@ -8,12 +8,11 @@ version = "0.1.0"
 description = "Symbol-level, incremental codebase indexer for semantic search and precedent retrieval."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {file = "LICENSE"}
+license = "MIT"
 authors = [{name = "Gloggur Contributors"}]
 keywords = ["code-search", "indexer", "tree-sitter", "embeddings", "cli"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent"
 ]
 
@@ -49,6 +48,13 @@ dev = [
 
 [project.scripts]
 gloggur = "gloggur.cli.main:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["gloggur*"]
 
 [tool.ruff]
 line-length = 100

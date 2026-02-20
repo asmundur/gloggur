@@ -1,6 +1,6 @@
 # Semantic Search Embedding Breakdown
 
-Example file: `gloggur/embeddings/base.py`
+Example file: `src/gloggur/embeddings/base.py`
 
 ## What is embedded
 
@@ -20,8 +20,8 @@ chunk_text = "\n".join([signature, docstring, snippet])
 
 This behavior comes from:
 
-- `gloggur/parsers/treesitter_parser.py` (symbol extraction + metadata)
-- `gloggur/indexer/indexer.py` (`_symbol_text` and `_apply_embeddings`)
+- `src/gloggur/parsers/treesitter_parser.py` (symbol extraction + metadata)
+- `src/gloggur/indexer/indexer.py` (`_symbol_text` and `_apply_embeddings`)
 
 ## Runtime embedding provider in this workspace
 
@@ -45,10 +45,10 @@ Source file has 4 extracted symbols, so 4 embedding chunks.
 
 Parser/index annotations:
 
-- `id`: `gloggur/embeddings/base.py:6:EmbeddingProvider`
+- `id`: `src/gloggur/embeddings/base.py:6:EmbeddingProvider`
 - `name`: `EmbeddingProvider`
 - `kind`: `class`
-- `file_path`: `gloggur/embeddings/base.py`
+- `file_path`: `src/gloggur/embeddings/base.py`
 - `start_line`: `7`
 - `end_line`: `22`
 - `signature`: `class EmbeddingProvider(ABC):`
@@ -72,10 +72,10 @@ class EmbeddingProvider(ABC):
 
 Parser/index annotations:
 
-- `id`: `gloggur/embeddings/base.py:9:embed_text`
+- `id`: `src/gloggur/embeddings/base.py:9:embed_text`
 - `name`: `embed_text`
 - `kind`: `function`
-- `file_path`: `gloggur/embeddings/base.py`
+- `file_path`: `src/gloggur/embeddings/base.py`
 - `start_line`: `10`
 - `end_line`: `12`
 - `signature`: `def embed_text(self, text: str) -> list[float]:`
@@ -99,10 +99,10 @@ def embed_text(self, text: str) -> list[float]:
 
 Parser/index annotations:
 
-- `id`: `gloggur/embeddings/base.py:14:embed_batch`
+- `id`: `src/gloggur/embeddings/base.py:14:embed_batch`
 - `name`: `embed_batch`
 - `kind`: `function`
-- `file_path`: `gloggur/embeddings/base.py`
+- `file_path`: `src/gloggur/embeddings/base.py`
 - `start_line`: `15`
 - `end_line`: `17`
 - `signature`: `def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:`
@@ -126,10 +126,10 @@ def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
 
 Parser/index annotations:
 
-- `id`: `gloggur/embeddings/base.py:19:get_dimension`
+- `id`: `src/gloggur/embeddings/base.py:19:get_dimension`
 - `name`: `get_dimension`
 - `kind`: `function`
-- `file_path`: `gloggur/embeddings/base.py`
+- `file_path`: `src/gloggur/embeddings/base.py`
 - `start_line`: `20`
 - `end_line`: `22`
 - `signature`: `def get_dimension(self) -> int:`

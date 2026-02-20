@@ -1,7 +1,7 @@
 # Semantic Search Embedding Breakdown
 
 Generated: `2026-02-17T21:58:22.941703+00:00`
-Source file: `gloggur/embeddings/base.py`
+Source file: `src/gloggur/embeddings/base.py`
 
 ## Embedding Setup
 
@@ -27,10 +27,10 @@ chunk_text = join_non_empty([signature, docstring, 3_line_snippet_from_start_lin
 ### Chunk 1: `EmbeddingProvider` (class)
 
 - Annotations:
-  - `id`: `gloggur/embeddings/base.py:6:EmbeddingProvider`
+  - `id`: `src/gloggur/embeddings/base.py:6:EmbeddingProvider`
   - `name`: `EmbeddingProvider`
   - `kind`: `class`
-  - `file_path`: `gloggur/embeddings/base.py`
+  - `file_path`: `src/gloggur/embeddings/base.py`
   - `start_line`: `7`
   - `end_line`: `22`
   - `signature`: `class EmbeddingProvider(ABC):`
@@ -55,10 +55,10 @@ class EmbeddingProvider(ABC):
 ### Chunk 2: `embed_text` (function)
 
 - Annotations:
-  - `id`: `gloggur/embeddings/base.py:9:embed_text`
+  - `id`: `src/gloggur/embeddings/base.py:9:embed_text`
   - `name`: `embed_text`
   - `kind`: `function`
-  - `file_path`: `gloggur/embeddings/base.py`
+  - `file_path`: `src/gloggur/embeddings/base.py`
   - `start_line`: `10`
   - `end_line`: `12`
   - `signature`: `def embed_text(self, text: str) -> list[float]:`
@@ -83,10 +83,10 @@ def embed_text(self, text: str) -> list[float]:
 ### Chunk 3: `embed_batch` (function)
 
 - Annotations:
-  - `id`: `gloggur/embeddings/base.py:14:embed_batch`
+  - `id`: `src/gloggur/embeddings/base.py:14:embed_batch`
   - `name`: `embed_batch`
   - `kind`: `function`
-  - `file_path`: `gloggur/embeddings/base.py`
+  - `file_path`: `src/gloggur/embeddings/base.py`
   - `start_line`: `15`
   - `end_line`: `17`
   - `signature`: `def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:`
@@ -111,10 +111,10 @@ def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
 ### Chunk 4: `get_dimension` (function)
 
 - Annotations:
-  - `id`: `gloggur/embeddings/base.py:19:get_dimension`
+  - `id`: `src/gloggur/embeddings/base.py:19:get_dimension`
   - `name`: `get_dimension`
   - `kind`: `function`
-  - `file_path`: `gloggur/embeddings/base.py`
+  - `file_path`: `src/gloggur/embeddings/base.py`
   - `start_line`: `20`
   - `end_line`: `22`
   - `signature`: `def get_dimension(self) -> int:`

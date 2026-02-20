@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,7 @@ def test_end_to_end_index_and_search() -> None:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = dict(**{"GLOGGUR_CACHE_DIR": cache_dir}, **{"PYTHONPATH": str(Path.cwd())})
+        env = {**os.environ, "GLOGGUR_CACHE_DIR": cache_dir}
 
         index_payload = _run_cli(["index", str(repo), "--json"], env=env)
         assert index_payload["indexed_files"] == 1
