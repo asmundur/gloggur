@@ -3,5 +3,74 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV_PYTHON="${REPO_ROOT}/.venv/bin/python"
 
-exec "${REPO_ROOT}/.venv/bin/python" -m gloggur.cli.main "$@"
+is_json=0
+for arg in "$@"; do
+  if [[ "$arg" == "--json" ]]; then
+    is_json=1
+    break
+  fi
+done
+
+emit_missing_python() {
+  local python3_path="${1:-}"
+  local python_path="${2:-}"
+  if [[ $is_json -eq 1 ]]; then
+    printf '{\n'
+    printf '  "operation": "preflight",\n'
+    printf '  "error_code": "missing_python",\n'
+    printf '  "message": "No usable Python interpreter was found for gloggur preflight.",\n'
+    printf '  "remediation": [\n'
+    printf '    "Install Python 3.10+ and ensure python3 is available on PATH.",\n'
+    printf '    "Run %s/scripts/bootstrap_gloggur_env.sh to create/repair .venv and install dependencies."\n' "$REPO_ROOT"
+    printf '  ],\n'
+    printf '  "detected_environment": {\n'
+    printf '    "repo_root": "%s",\n' "$REPO_ROOT"
+    printf '    "venv_python": "%s",\n' "$VENV_PYTHON"
+    if [[ -n "$python3_path" ]]; then
+      printf '    "python3": "%s",\n' "$python3_path"
+    else
+      printf '    "python3": null,\n'
+    fi
+    if [[ -n "$python_path" ]]; then
+      printf '    "python": "%s"\n' "$python_path"
+    else
+      printf '    "python": null\n'
+    fi
+    printf '  }\n'
+    printf '}\n'
+  else
+    >&2 echo "gloggur preflight failed (missing_python): No usable Python interpreter was found."
+    >&2 echo "Install Python 3.10+ and run ${REPO_ROOT}/scripts/bootstrap_gloggur_env.sh."
+  fi
+}
+
+choose_python() {
+  local python3_path=""
+  local python_path=""
+  if command -v python3 >/dev/null 2>&1; then
+    python3_path="$(command -v python3)"
+  fi
+  if command -v python >/dev/null 2>&1; then
+    python_path="$(command -v python)"
+  fi
+
+  if [[ -x "$VENV_PYTHON" ]]; then
+    PYTHON_BIN="$VENV_PYTHON"
+  elif [[ -n "$python3_path" ]]; then
+    PYTHON_BIN="$python3_path"
+  elif [[ -n "$python_path" ]]; then
+    PYTHON_BIN="$python_path"
+  fi
+
+  if [[ -z "${PYTHON_BIN:-}" ]]; then
+    emit_missing_python "$python3_path" "$python_path"
+    return 1
+  fi
+}
+
+cd "$REPO_ROOT"
+PYTHON_BIN=""
+choose_python || exit 3
+exec "$PYTHON_BIN" -m gloggur.bootstrap_launcher "$@"
