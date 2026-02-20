@@ -33,6 +33,18 @@ pipx install "gloggur[gemini]"
 pipx install "gloggur[local]"
 ```
 
+For local development worktrees, use the repo wrapper/bootstrap flow:
+
+```bash
+scripts/bootstrap_gloggur_env.sh
+scripts/gloggur status --json
+```
+
+`scripts/gloggur` now runs a preflight check before launching the CLI:
+- prefers `.venv/bin/python` when healthy
+- otherwise falls back to system Python with repo-root `PYTHONPATH`
+- returns structured `--json` failures with `operation=preflight`
+
 ## Quickstart
 
 Index a repository:
@@ -192,6 +204,13 @@ Search results are returned as JSON:
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+scripts/bootstrap_gloggur_env.sh
+scripts/gloggur status --json
 pytest
 ```
+
+If bootstrap/preflight fails with `--json`, error payloads include:
+- `error_code`: `missing_venv`, `missing_python`, `missing_package`, `broken_environment`
+- `message`
+- `remediation` steps
+- `detected_environment` details

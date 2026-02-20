@@ -161,7 +161,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## R4 - Perfect Reliability: Bootstrap, Preflight, and Self-Healing CLI Execution
 
-**Status**: planned
+**Status**: ready_for_review
 **Priority**: P0
 **Owner**: codex
 
@@ -210,6 +210,17 @@ These tasks track reliability hardening for cache/index operations after the sch
   - deterministic failure payload with `--json`
   - human-readable stderr guidance without `--json`
 - Regression test to ensure wrapper exit codes are stable across failure classes.
+
+**Verification Evidence**
+- Commands run:
+  - `scripts/gloggur status --json`
+  - `GLOGGUR_PREFLIGHT_DRY_RUN=1 GLOGGUR_PREFLIGHT_VENV_PYTHON=/tmp/does-not-exist/bin/python GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS=$(command -v python3) GLOGGUR_PREFLIGHT_PROBE_MODULE=gloggur.bootstrap_launcher scripts/gloggur status --json`
+  - `python3 -m gloggur.bootstrap_launcher status --json`
+  - `python3 -m compileall gloggur tests/integration/test_bootstrap_wrapper.py tests/unit/test_bootstrap_launcher.py`
+- Results:
+  - Wrapper now emits structured preflight JSON with deterministic `error_code` and remediation details.
+  - Dry-run preflight confirms deterministic system fallback selection and timing payload.
+  - Added files compile cleanly with Python 3.13 in this workspace.
 
 ---
 
