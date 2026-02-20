@@ -161,7 +161,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## R4 - Perfect Reliability: Bootstrap, Preflight, and Self-Healing CLI Execution
 
-**Status**: ready_for_review
+**Status**: blocked
 **Priority**: P0
 **Owner**: codex
 
@@ -222,6 +222,11 @@ These tasks track reliability hardening for cache/index operations after the sch
   - Dry-run preflight confirms deterministic system fallback selection and timing payload.
   - Added files compile cleanly with Python 3.13 in this workspace.
 
+**Blockers (2026-02-20)**
+- `gloggur` is not guaranteed on PATH in agent sessions; only `scripts/gloggur` is currently reliable in this workspace.
+- Warm-path timing acceptance is `<200ms`, but automated regression check currently enforces only `<2000ms` in `tests/integration/test_bootstrap_wrapper.py`.
+- Do not move to `DONEs.md` until PATH ergonomics expectation is explicitly resolved (or acceptance criteria narrowed) and timing guard matches the stated threshold.
+
 ---
 
 ## Ordering / Priority
@@ -235,7 +240,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## F1 - Configurable On-Save Incremental Indexing (Watch Mode)
 
-**Status**: ready_for_review
+**Status**: blocked
 **Priority**: P1
 **Owner**: codex
 
@@ -269,3 +274,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
+
+**Blockers (2026-02-20)**
+- Scope includes "watch config keys/env overrides", but env overrides for `watch_state_file`, `watch_pid_file`, and `watch_log_file` are not implemented in `src/gloggur/config.py`.
+- Do not move to `DONEs.md` until scope is either implemented fully or narrowed explicitly in this TODO item.
