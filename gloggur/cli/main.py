@@ -43,6 +43,33 @@ def _load_config(config_path: Optional[str]) -> GloggurConfig:
     return GloggurConfig.load(path=config_path)
 
 
+def _normalize_config_path(config_path: Optional[str]) -> Optional[str]:
+    """Return an absolute config path when provided."""
+    if not config_path:
+        return None
+    return os.path.abspath(os.path.expanduser(config_path))
+
+
+def _resolve_relative_to(base_dir: str, value: str) -> str:
+    """Resolve value relative to base_dir when it is not absolute."""
+    expanded = os.path.expanduser(value)
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
+    return os.path.abspath(os.path.join(base_dir, expanded))
+
+
+def _normalize_watch_paths(config: GloggurConfig, config_path: Optional[str]) -> GloggurConfig:
+    """Resolve watch path fields relative to config file directory."""
+    if not config_path:
+        return config
+    config_dir = os.path.dirname(config_path)
+    config.watch_path = _resolve_relative_to(config_dir, config.watch_path)
+    config.watch_state_file = _resolve_relative_to(config_dir, config.watch_state_file)
+    config.watch_pid_file = _resolve_relative_to(config_dir, config.watch_pid_file)
+    config.watch_log_file = _resolve_relative_to(config_dir, config.watch_log_file)
+    return config
+
+
 def _hash_content(source: str) -> str:
     """Hash content to detect changes."""
     return hashlib.sha256(source.encode("utf8")).hexdigest()
@@ -149,12 +176,14 @@ def _create_runtime(
     rebuild_on_profile_change: bool = False,
 ) -> tuple[GloggurConfig, CacheManager, VectorStore]:
     """Create config/cache/vector runtime and apply profile rebuild logic."""
+    resolved_config_path = _normalize_config_path(config_path)
     overrides: Dict[str, str] = {}
     if embedding_provider:
         overrides["embedding_provider"] = embedding_provider
-    config = _load_config(config_path)
+    config = _load_config(resolved_config_path)
     if overrides:
-        config = GloggurConfig.load(path=config_path, overrides=overrides)
+        config = GloggurConfig.load(path=resolved_config_path, overrides=overrides)
+    config = _normalize_watch_paths(config, resolved_config_path)
     expected_profile = config.embedding_profile()
     cache = CacheManager(CacheConfig(config.cache_dir))
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
@@ -379,7 +408,8 @@ def watch() -> None:
 def watch_init(path: str, config_path: Optional[str], as_json: bool) -> None:
     """Enable watch mode defaults in config for a repository path."""
 
-    config_file = _resolve_config_file_path(config_path)
+    config_file = _normalize_config_path(_resolve_config_file_path(config_path))
+    assert config_file is not None
     payload = _read_config_payload(config_file)
     payload["watch_enabled"] = True
     payload["watch_path"] = os.path.abspath(path)
@@ -415,8 +445,9 @@ def watch_start(
     if force_foreground and force_daemon:
         raise click.ClickException("Use only one of --foreground or --daemon.")
 
+    resolved_config_path = _normalize_config_path(config_path)
     config, cache, vector_store = _create_runtime(
-        config_path=config_path,
+        config_path=resolved_config_path,
         rebuild_on_profile_change=True,
     )
     watch_path = os.path.abspath(config.watch_path)
@@ -451,8 +482,8 @@ def watch_start(
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
         cmd = [sys.executable, "-m", "gloggur.cli.main", "watch", "start", "--foreground"]
-        if config_path:
-            cmd.extend(["--config", config_path])
+        if resolved_config_path:
+            cmd.extend(["--config", resolved_config_path])
         with open(log_file, "a", encoding="utf8") as log_handle:
             process = subprocess.Popen(
                 cmd,
@@ -505,7 +536,8 @@ def watch_start(
 def watch_stop(config_path: Optional[str], as_json: bool) -> None:
     """Stop watcher process identified by pid file."""
 
-    config = _load_config(config_path)
+    resolved_config_path = _normalize_config_path(config_path)
+    config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
     pid = _read_pid_file(config.watch_pid_file)
     if not is_process_running(pid):
         _remove_file(config.watch_pid_file)
@@ -548,7 +580,8 @@ def watch_stop(config_path: Optional[str], as_json: bool) -> None:
 def watch_status(config_path: Optional[str], as_json: bool) -> None:
     """Show watcher process and heartbeat status."""
 
-    config = _load_config(config_path)
+    resolved_config_path = _normalize_config_path(config_path)
+    config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
     pid = _read_pid_file(config.watch_pid_file)
     running = is_process_running(pid)
     state = load_watch_state(config.watch_state_file)

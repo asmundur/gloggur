@@ -51,6 +51,30 @@ def test_load_env_values(monkeypatch) -> None:
     assert config.cache_dir == "cache-dir"
 
 
+def test_load_env_watch_values(monkeypatch) -> None:
+    """Config loads watch settings from environment variables."""
+    monkeypatch.setenv("GLOGGUR_WATCH_ENABLED", "true")
+    monkeypatch.setenv("GLOGGUR_WATCH_PATH", "/tmp/repo")
+    monkeypatch.setenv("GLOGGUR_WATCH_MODE", "foreground")
+    monkeypatch.setenv("GLOGGUR_WATCH_DEBOUNCE_MS", "150")
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.watch_enabled is True
+    assert config.watch_path == "/tmp/repo"
+    assert config.watch_mode == "foreground"
+    assert config.watch_debounce_ms == 150
+
+
+def test_load_env_invalid_watch_debounce_keeps_default(monkeypatch) -> None:
+    """Invalid debounce env should not override the default value."""
+    monkeypatch.setenv("GLOGGUR_WATCH_DEBOUNCE_MS", "not-a-number")
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.watch_debounce_ms == 300
+
+
 def test_embedding_profile_uses_active_provider_model() -> None:
     """Embedding profile should encode active provider and its configured model."""
     local = GloggurConfig(embedding_provider="local", local_embedding_model="local-a")
