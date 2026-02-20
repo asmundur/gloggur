@@ -6,7 +6,7 @@ Gloggur is a symbol-level, incremental codebase indexer for semantic search and 
 
 - Tree-sitter parsing for multi-language symbol extraction
 - Incremental indexing with SHA-256 hashing
-- Pluggable embedding backends (local models or OpenAI)
+- Pluggable embedding backends (local models, OpenAI, or Gemini)
 - FAISS vector search with SQLite metadata
 - Docstring audit with semantic similarity scoring
 - JSON output for CLI automation
@@ -117,7 +117,7 @@ Watch mode keeps the index updated in the background as files are saved.
 Core behavior checks run in `pytest` (including smoke tests):
 
 ```bash
-pytest
+.venv/bin/pytest
 ```
 
 Additional verification probes are available for provider/edge/performance checks:
@@ -155,10 +155,22 @@ docstring_semantic_threshold: 0.2
 docstring_semantic_max_chars: 4000
 supported_extensions:
   - .py
+  - .js
+  - .jsx
   - .ts
+  - .tsx
+  - .rs
+  - .go
+  - .java
 excluded_dirs:
+  - .git
   - node_modules
+  - venv
   - .venv
+  - .gloggur-cache
+  - dist
+  - build
+  - htmlcov
 ```
 
 Environment variables:
@@ -166,6 +178,7 @@ Environment variables:
 - `GLOGGUR_EMBEDDING_PROVIDER`
 - `GLOGGUR_LOCAL_MODEL`
 - `GLOGGUR_OPENAI_MODEL`
+- `OPENAI_API_KEY`
 - `GLOGGUR_GEMINI_MODEL`
 - `GLOGGUR_GEMINI_API_KEY`
 - `GLOGGUR_CACHE_DIR`
@@ -173,6 +186,7 @@ Environment variables:
 - `GLOGGUR_WATCH_PATH`
 - `GLOGGUR_WATCH_DEBOUNCE_MS`
 - `GLOGGUR_WATCH_MODE`
+- `GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS`
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
 
 ## Output Schema
@@ -206,7 +220,7 @@ Search results are returned as JSON:
 ```bash
 scripts/bootstrap_gloggur_env.sh
 scripts/gloggur status --json
-pytest
+.venv/bin/pytest
 ```
 
 If bootstrap/preflight fails with `--json`, error payloads include:
