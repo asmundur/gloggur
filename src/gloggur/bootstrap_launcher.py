@@ -61,16 +61,26 @@ def _is_json_mode(args: Sequence[str]) -> bool:
 
 
 def _repo_root() -> str:
-    return str(Path(__file__).resolve().parent.parent)
+    module_dir = Path(__file__).resolve().parent
+    if module_dir.parent.name == "src":
+        return str(module_dir.parent.parent)
+    return str(module_dir.parent)
+
+
+def _import_root(repo_root: str) -> str:
+    src_root = os.path.join(repo_root, "src")
+    if os.path.isdir(src_root):
+        return src_root
+    return repo_root
 
 
 def _prepend_pythonpath(env: Dict[str, str], repo_root: str) -> Dict[str, str]:
     result = dict(env)
+    import_root = _import_root(repo_root)
     existing = result.get("PYTHONPATH", "")
-    if existing:
-        result["PYTHONPATH"] = os.pathsep.join([repo_root, existing])
-    else:
-        result["PYTHONPATH"] = repo_root
+    parts = [entry for entry in existing.split(os.pathsep) if entry]
+    parts = [entry for entry in parts if entry != import_root]
+    result["PYTHONPATH"] = os.pathsep.join([import_root, *parts])
     return result
 
 
