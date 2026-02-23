@@ -93,7 +93,15 @@ exec "${REPO_ROOT}/scripts/gloggur" "$@"
 SH
 chmod +x "$BIN/gloggur"
 
-# 3) Ensure ~/.local/bin is on PATH for zsh
+# 3) Install into a PATH dir Codex already sees (best effort)
+for CANDIDATE in /opt/homebrew/bin /usr/local/bin; do
+  if [ -d "$CANDIDATE" ] && [ -w "$CANDIDATE" ]; then
+    ln -sf "$BIN/gloggur" "$CANDIDATE/gloggur"
+    break
+  fi
+done
+
+# 4) Ensure ~/.local/bin is on PATH for zsh
 BINLINE='export PATH="$HOME/.local/bin:$PATH"'
 grep -qxF "$BINLINE" "$ZSHRC" || echo "$BINLINE" >> "$ZSHRC"
 '''
