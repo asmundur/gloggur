@@ -6,20 +6,38 @@ name = "gloggur"
 script = '''
 set -euo pipefail
 
-# Ensure Python exists
-command -v python3 >/dev/null
+# 0) Avoid pip cache permission weirdness
+export PIP_CACHE_DIR="$HOME/.cache/pip"
+mkdir -p "$PIP_CACHE_DIR"
 
-# Bootstrap dev env if missing
+# 1) Ensure a venv exists
 if [ ! -d .venv ]; then
   python3 -m venv .venv
 fi
 
+# 2) Install project deps into the venv (repo dev loop)
 . .venv/bin/activate
 python -m pip install -U pip
-
-# Install project in editable mode (fast dev loop)
 python -m pip install -e ".[dev]"
 
-# Make repo-local commands discoverable
-export PATH="$PWD:$PATH"
+# 3) Ensure future zsh shells can find scripts/gloggur as `gloggur`
+ZSHRC="$HOME/.zshrc"
+touch "$ZSHRC"
+LINE='export PATH="$PWD/scripts:$PATH"'
+grep -qxF "$LINE" "$ZSHRC" || echo "$LINE" >> "$ZSHRC"
+
+# 4) Also drop a stable wrapper into ~/.local/bin (helps when shells ignore rc files)
+BIN="$HOME/.local/bin"
+mkdir -p "$BIN"
+cat > "$BIN/gloggur" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+exec "__WORKTREE__/scripts/gloggur" "$@"
+SH
+perl -pi -e "s|__WORKTREE__|$PWD|g" "$BIN/gloggur"
+chmod +x "$BIN/gloggur"
+
+# Ensure ~/.local/bin is on PATH for zsh
+BINLINE='export PATH="$HOME/.local/bin:$PATH"'
+grep -qxF "$BINLINE" "$ZSHRC" || echo "$BINLINE" >> "$ZSHRC"
 '''
