@@ -6,38 +6,94 @@ name = "gloggur"
 script = '''
 set -euo pipefail
 
-# 0) Avoid pip cache permission weirdness
-export PIP_CACHE_DIR="$HOME/.cache/pip"
-mkdir -p "$PIP_CACHE_DIR"
-
-# 1) Ensure a venv exists
-if [ ! -d .venv ]; then
-  python3 -m venv .venv
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+COMMON_GIT_DIR="$(git rev-parse --git-common-dir)"
+if [ "${COMMON_GIT_DIR#/}" = "${COMMON_GIT_DIR}" ]; then
+  COMMON_GIT_DIR="$(cd "${REPO_ROOT}/${COMMON_GIT_DIR}" && pwd)"
 fi
 
-# 2) Install project deps into the venv (repo dev loop)
-. .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -e ".[dev]"
+# 0) Shared cache + shared venv (once per repo, not once per worktree)
+export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
+mkdir -p "$PIP_CACHE_DIR"
+SHARED_VENV="${COMMON_GIT_DIR}/gloggur-venv"
+INSTALL_SPEC="${GLOGGUR_SETUP_INSTALL_SPEC:-.}"
 
-# 3) Ensure future zsh shells can find scripts/gloggur as `gloggur`
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="$(command -v python)"
+else
+  echo "No python interpreter found. Install Python 3.10+ and retry." >&2
+  exit 3
+fi
+
+if [ ! -x "${SHARED_VENV}/bin/python" ]; then
+  "$PYTHON_BIN" -m venv "${SHARED_VENV}"
+fi
+
+if command -v shasum >/dev/null 2>&1; then
+  REQ_HASH="$(shasum -a 256 "${REPO_ROOT}/pyproject.toml" | awk '{print $1}')"
+elif command -v sha256sum >/dev/null 2>&1; then
+  REQ_HASH="$(sha256sum "${REPO_ROOT}/pyproject.toml" | awk '{print $1}')"
+else
+  echo "Missing shasum/sha256sum; cannot compute dependency stamp." >&2
+  exit 4
+fi
+
+STAMP_FILE="${SHARED_VENV}/.install-hash"
+NEEDS_INSTALL=0
+if [ ! -f "${STAMP_FILE}" ]; then
+  NEEDS_INSTALL=1
+elif [ "$(cat "${STAMP_FILE}")" != "${REQ_HASH}" ]; then
+  NEEDS_INSTALL=1
+fi
+
+if [ "${NEEDS_INSTALL}" -eq 1 ]; then
+  cd "${REPO_ROOT}"
+  "${SHARED_VENV}/bin/python" -m pip install --upgrade pip setuptools wheel
+  "${SHARED_VENV}/bin/python" -m pip install -e "${INSTALL_SPEC}"
+  printf '%s' "${REQ_HASH}" > "${STAMP_FILE}"
+fi
+
+# 1) Ensure user shell PATH is stable
 ZSHRC="$HOME/.zshrc"
 touch "$ZSHRC"
-LINE='export PATH="$PWD/scripts:$PATH"'
-grep -qxF "$LINE" "$ZSHRC" || echo "$LINE" >> "$ZSHRC"
+BADLINE='export PATH="$PWD/scripts:$PATH"'
+if grep -qxF "$BADLINE" "$ZSHRC"; then
+  TMP_ZSHRC="$(mktemp)"
+  grep -vxF "$BADLINE" "$ZSHRC" > "$TMP_ZSHRC"
+  cat "$TMP_ZSHRC" > "$ZSHRC"
+  rm -f "$TMP_ZSHRC"
+fi
 
-# 4) Also drop a stable wrapper into ~/.local/bin (helps when shells ignore rc files)
+# 2) Stable wrapper that works in any worktree
 BIN="$HOME/.local/bin"
 mkdir -p "$BIN"
 cat > "$BIN/gloggur" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-exec "__WORKTREE__/scripts/gloggur" "$@"
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "${REPO_ROOT}" ] || [ ! -x "${REPO_ROOT}/scripts/gloggur" ]; then
+  echo "gloggur wrapper: run inside a gloggur git worktree." >&2
+  exit 1
+fi
+
+COMMON_GIT_DIR="$(git -C "${REPO_ROOT}" rev-parse --git-common-dir)"
+if [ "${COMMON_GIT_DIR#/}" = "${COMMON_GIT_DIR}" ]; then
+  COMMON_GIT_DIR="$(cd "${REPO_ROOT}/${COMMON_GIT_DIR}" && pwd)"
+fi
+
+SHARED_VENV="${COMMON_GIT_DIR}/gloggur-venv"
+if [ -x "${SHARED_VENV}/bin/python" ]; then
+  export GLOGGUR_PREFLIGHT_VENV_PYTHON="${SHARED_VENV}/bin/python"
+fi
+
+exec "${REPO_ROOT}/scripts/gloggur" "$@"
 SH
-perl -pi -e "s|__WORKTREE__|$PWD|g" "$BIN/gloggur"
 chmod +x "$BIN/gloggur"
 
-# Ensure ~/.local/bin is on PATH for zsh
+# 3) Ensure ~/.local/bin is on PATH for zsh
 BINLINE='export PATH="$HOME/.local/bin:$PATH"'
 grep -qxF "$BINLINE" "$ZSHRC" || echo "$BINLINE" >> "$ZSHRC"
 '''
