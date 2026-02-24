@@ -432,3 +432,60 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## F4 - Expand GitHub Actions Python Coverage to 3.13 and 3.14
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Importance Assessment**
+- High importance for forward-compatibility and contributor confidence because Python minor releases now outpace static CI matrices.
+- Not P0 because current supported lanes (`3.10`-`3.12`) still protect primary development flow; this is proactive reliability, not an active outage.
+
+**Priority Assessment**
+- Recommended priority: `P1` (next-cycle reliability hardening).
+- Escalate to `P0` if any of these are true:
+  - users or CI runners already default to `3.13`/`3.14`
+  - dependency resolver or runtime incompatibilities are reported
+  - project support policy is updated to require latest Python minors immediately
+
+**Problem**
+- Current CI verification runs only on Python `3.10`, `3.11`, and `3.12` in `.github/workflows/verification.yml`.
+- Python `3.13` and `3.14` compatibility is not continuously validated, so breakage can ship unnoticed.
+- Without an explicit support policy, contributors cannot tell whether failures on newer runtimes are blocking or informational.
+
+**Goal**
+- Add explicit GitHub Actions coverage for Python `3.13` and `3.14` with a clear pass/fail policy aligned to project support guarantees.
+
+**Scope**
+- Update verification workflow matrix to include `3.13` and `3.14`.
+- Define runtime support tiers in docs:
+  - required versions (blocking CI)
+  - provisional/experimental versions (if temporary `continue-on-error` is needed)
+- Ensure dependency install and test commands are stable across the expanded matrix.
+- Add fast diagnostics in CI logs for interpreter version, pip resolver output, and failing package constraints.
+- Document how to evolve the matrix when new Python minors are released.
+
+**Out of Scope**
+- Dropping support for existing versions (`3.10`-`3.12`) in this task.
+- Rewriting test architecture or significantly increasing test suite runtime beyond matrix changes.
+- Packaging/distribution metadata overhauls unless required by CI failures.
+
+**Acceptance Criteria**
+- GitHub Actions runs verification jobs on Python `3.10`, `3.11`, `3.12`, `3.13`, and `3.14`.
+- CI policy clearly indicates which versions are required vs provisional, and that policy is documented.
+- If any version is provisional, the reason and graduation criteria are documented.
+- A PR touching Python code surfaces compatibility regressions for supported versions before merge.
+- No hidden matrix exclusions; workflow file reflects the published support policy.
+
+**Tests Required**
+- Workflow validation check (for example `act` or YAML schema/lint) for updated matrix syntax.
+- CI run evidence from at least one PR/branch showing all matrix jobs triggered.
+- If provisional mode is used, a regression test ensuring provisional failures do not mask required-version failures.
+- Local smoke run on newest interpreter available in repo toolchain (`3.13` or `3.14`) for core test subset.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
