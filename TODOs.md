@@ -129,6 +129,8 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## R3 - Concurrency and Race-Condition Hardening for Cache/Vector Operations
 
+**Status**: ready_for_review
+
 **Problem**
 - Concurrent command execution (multiple `index/search/status` processes) can cause lock contention, stale assumptions, and race windows.
 - Current behavior is mostly single-process friendly; explicit concurrency guarantees are not documented or tested.

@@ -6,11 +6,12 @@ import signal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event
-from typing import Dict, Iterable, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.indexer.concurrency import cache_write_lock
 from gloggur.indexer.indexer import Indexer
 from gloggur.models import IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
@@ -193,21 +194,40 @@ class WatchService:
                     operations[path] = "changed"
 
         result = BatchResult()
-        for path, operation in operations.items():
-            if operation == "deleted":
-                self._process_deleted(path, result)
-            else:
-                self._process_changed(path, result)
+        metadata_invalidated = False
 
-        if result.changed_files or result.deleted_files:
-            self.vector_store.save()
-            metadata = IndexMetadata(
-                version=self.config.index_version,
-                total_symbols=len(self.cache.list_symbols()),
-                indexed_files=self.cache.count_files(),
-            )
-            self.cache.set_index_metadata(metadata)
-            self.cache.set_index_profile(self.config.embedding_profile())
+        def _invalidate_metadata() -> None:
+            nonlocal metadata_invalidated
+            if metadata_invalidated:
+                return
+            self.cache.delete_index_metadata()
+            metadata_invalidated = True
+
+        if operations:
+            with cache_write_lock(self.config.cache_dir):
+                for path, operation in operations.items():
+                    if operation == "deleted":
+                        self._process_deleted(
+                            path,
+                            result,
+                            invalidate_metadata=_invalidate_metadata,
+                        )
+                    else:
+                        self._process_changed(
+                            path,
+                            result,
+                            invalidate_metadata=_invalidate_metadata,
+                        )
+
+                if metadata_invalidated:
+                    self.vector_store.save()
+                    metadata = IndexMetadata(
+                        version=self.config.index_version,
+                        total_symbols=len(self.cache.list_symbols()),
+                        indexed_files=self.cache.count_files(),
+                    )
+                    self.cache.set_index_metadata(metadata)
+                    self.cache.set_index_profile(self.config.embedding_profile())
         return result
 
     def _watch_changes(self, watch_target: str):
@@ -227,13 +247,20 @@ class WatchService:
             yield_on_timeout=False,
         )
 
-    def _process_deleted(self, path: str, result: BatchResult) -> None:
+    def _process_deleted(
+        self,
+        path: str,
+        result: BatchResult,
+        *,
+        invalidate_metadata: Callable[[], None],
+    ) -> None:
         """Delete stale symbols/vectors for a removed file."""
 
         existing = self.cache.get_file_metadata(path)
         if not existing:
             result.skipped_files += 1
             return
+        invalidate_metadata()
         if existing.symbols:
             self.vector_store.remove_ids(existing.symbols)
         self.cache.delete_symbols_for_file(path)
@@ -241,7 +268,13 @@ class WatchService:
         result.deleted_files += 1
         result.indexed_files += 1
 
-    def _process_changed(self, path: str, result: BatchResult) -> None:
+    def _process_changed(
+        self,
+        path: str,
+        result: BatchResult,
+        *,
+        invalidate_metadata: Callable[[], None],
+    ) -> None:
         """Index a changed file if content hash changed."""
 
         try:
@@ -258,6 +291,7 @@ class WatchService:
             result.skipped_files += 1
             return
 
+        invalidate_metadata()
         count = self.indexer.index_file(path)
         if count is None:
             result.skipped_files += 1

@@ -15,6 +15,10 @@ from gloggur.io_failures import wrap_io_error
 SCHEMA_VERSION_KEY = "schema_version"
 INDEX_PROFILE_KEY = "index_profile"
 CACHE_SCHEMA_VERSION = "2"
+SQLITE_BUSY_TIMEOUT_MS = 5_000
+SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
+SQLITE_JOURNAL_MODE = "WAL"
+SQLITE_SYNCHRONOUS = "NORMAL"
 
 REQUIRED_TABLES = {"files", "symbols", "metadata", "audits", "audit_files", "meta"}
 LEGACY_TABLES = {"validations", "validation_files"}
@@ -80,7 +84,10 @@ class CacheManager:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         """Context manager for a transactional database connection."""
         try:
-            conn = sqlite3.connect(self.config.db_path)
+            conn = sqlite3.connect(
+                self.config.db_path,
+                timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
+            )
         except (OSError, sqlite3.OperationalError) as exc:
             raise wrap_io_error(
                 exc,
@@ -88,6 +95,11 @@ class CacheManager:
                 path=self.config.db_path,
             ) from exc
         conn.row_factory = sqlite3.Row
+        try:
+            self._configure_connection(conn)
+        except Exception:
+            conn.close()
+            raise
         try:
             yield conn
             conn.commit()
@@ -105,6 +117,19 @@ class CacheManager:
             raise
         finally:
             conn.close()
+
+    def _configure_connection(self, conn: sqlite3.Connection) -> None:
+        """Apply SQLite pragmas for safer concurrent reader/writer behavior."""
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+            conn.execute(f"PRAGMA journal_mode = {SQLITE_JOURNAL_MODE}")
+            conn.execute(f"PRAGMA synchronous = {SQLITE_SYNCHRONOUS}")
+        except sqlite3.OperationalError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="configure cache database pragmas",
+                path=self.config.db_path,
+            ) from exc
 
     def _init_db(self) -> None:
         """Create database tables if they do not exist."""
@@ -284,6 +309,11 @@ class CacheManager:
                 ("index", metadata.model_dump_json()),
             )
 
+    def delete_index_metadata(self) -> None:
+        """Remove index-level metadata (used while a rebuild is in progress)."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM metadata WHERE key = ?", ("index",))
+
     def get_schema_version(self) -> Optional[str]:
         """Return the cache schema version marker."""
         with self._connect() as conn:
@@ -385,8 +415,12 @@ class CacheManager:
             return None
 
         try:
-            conn = sqlite3.connect(self.config.db_path)
+            conn = sqlite3.connect(
+                self.config.db_path,
+                timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
+            )
             try:
+                self._configure_connection(conn)
                 integrity_issue = self._integrity_issue(conn)
                 if integrity_issue:
                     return _ResetPlan(

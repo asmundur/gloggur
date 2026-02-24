@@ -11,6 +11,9 @@ import numpy as np
 from gloggur.io_failures import wrap_io_error
 from gloggur.models import Symbol
 
+SQLITE_BUSY_TIMEOUT_MS = 5_000
+SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
+
 
 @dataclass
 class VectorStoreConfig:
@@ -146,9 +149,12 @@ class VectorStore:
         if self._faiss_available and self._index is not None:
             import faiss
 
+            temp_path = self._temp_path(self.config.index_path)
             try:
-                faiss.write_index(self._index, self.config.index_path)
+                faiss.write_index(self._index, temp_path)
+                os.replace(temp_path, self.config.index_path)
             except OSError as exc:
+                self._remove_file(temp_path)
                 raise wrap_io_error(
                     exc,
                     operation="write faiss index file",
@@ -166,14 +172,7 @@ class VectorStore:
                 [self._fallback_vectors[symbol_id] for symbol_id in self._fallback_order],
                 dtype="float32",
             )
-            try:
-                np.save(self._fallback_path, matrix)
-            except OSError as exc:
-                raise wrap_io_error(
-                    exc,
-                    operation="write fallback vector matrix",
-                    path=self._fallback_path,
-                ) from exc
+            self._save_fallback_matrix(matrix)
         else:
             self._remove_file(self._fallback_path)
         self._touch_index_placeholder()
@@ -255,15 +254,11 @@ class VectorStore:
             "symbol_to_vector_id": self._symbol_to_vector_id,
             "fallback_order": self._fallback_order,
         }
-        try:
-            with open(self.config.id_map_path, "w", encoding="utf8") as handle:
-                json.dump(payload, handle)
-        except OSError as exc:
-            raise wrap_io_error(
-                exc,
-                operation="write vector id map",
-                path=self.config.id_map_path,
-            ) from exc
+        self._atomic_write_json(
+            payload,
+            operation="write vector id map",
+            path=self.config.id_map_path,
+        )
 
     def _load_id_map(self) -> bool:
         """Read id mapping from disk. Returns True when legacy format is detected."""
@@ -364,8 +359,11 @@ class VectorStore:
         if not os.path.exists(db_path):
             return []
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(db_path, timeout=SQLITE_CONNECT_TIMEOUT_SECONDS)
+            conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         except (OSError, sqlite3.OperationalError) as exc:
+            if "conn" in locals():
+                conn.close()
             raise wrap_io_error(
                 exc,
                 operation="open cache database for vector migration",
@@ -431,12 +429,54 @@ class VectorStore:
 
         if os.path.exists(self.config.index_path):
             return
+        self._atomic_write_bytes(
+            b"FAISS_UNAVAILABLE\n",
+            operation="write vector index placeholder",
+            path=self.config.index_path,
+        )
+
+    def _save_fallback_matrix(self, matrix: np.ndarray) -> None:
+        """Atomically persist fallback vector matrix to avoid torn writes."""
+
+        temp_path = self._temp_path(self._fallback_path)
         try:
-            with open(self.config.index_path, "wb") as handle:
-                handle.write(b"FAISS_UNAVAILABLE\n")
+            with open(temp_path, "wb") as handle:
+                np.save(handle, matrix)
+            os.replace(temp_path, self._fallback_path)
         except OSError as exc:
+            self._remove_file(temp_path)
             raise wrap_io_error(
                 exc,
-                operation="write vector index placeholder",
-                path=self.config.index_path,
+                operation="write fallback vector matrix",
+                path=self._fallback_path,
             ) from exc
+
+    def _atomic_write_json(self, payload: object, *, operation: str, path: str) -> None:
+        """Atomically write JSON payloads by replace-on-success."""
+
+        temp_path = self._temp_path(path)
+        try:
+            with open(temp_path, "w", encoding="utf8") as handle:
+                json.dump(payload, handle)
+            os.replace(temp_path, path)
+        except OSError as exc:
+            self._remove_file(temp_path)
+            raise wrap_io_error(exc, operation=operation, path=path) from exc
+
+    def _atomic_write_bytes(self, payload: bytes, *, operation: str, path: str) -> None:
+        """Atomically write binary payloads by replace-on-success."""
+
+        temp_path = self._temp_path(path)
+        try:
+            with open(temp_path, "wb") as handle:
+                handle.write(payload)
+            os.replace(temp_path, path)
+        except OSError as exc:
+            self._remove_file(temp_path)
+            raise wrap_io_error(exc, operation=operation, path=path) from exc
+
+    @staticmethod
+    def _temp_path(target: str) -> str:
+        """Return deterministic temp path in the target directory."""
+
+        return f"{target}.tmp.{os.getpid()}"

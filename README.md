@@ -126,6 +126,11 @@ Cache compatibility is automatic:
 - If cache schema changes, Gloggur rebuilds `.gloggur-cache/index.db` automatically.
 - If embedding provider/model changes, the next `gloggur index ...` run rebuilds cache and vectors automatically.
 
+Concurrency behavior:
+- Readers (`status`, `search`) are safe to run concurrently.
+- Cache writers (`index`, `clear-cache`, watch updates) are serialized via `.gloggur-cache/.cache-write.lock`.
+- Writer lock acquisition is bounded (default `5000ms` total wait) and fails fast with structured JSON on timeout.
+
 ## On-Save Indexing (Watch Mode)
 
 Watch mode keeps the index updated in the background as files are saved.

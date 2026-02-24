@@ -85,3 +85,37 @@ You can tailor indexing and embedding behavior via `.gloggur.yaml` or `.gloggur.
 Gloggur stores its cache in `.gloggur-cache`. This directory is **local-only** and should never be committed.
 `gloggur status --json` includes `schema_version` and `needs_reindex` so agents can detect stale cache state without manual cleanup.
 Watch mode writes runtime files (`watch_state.json`, `watch.pid`, `watch.log`) under `.gloggur-cache` by default.
+
+## Concurrency contract
+
+Gloggur supports concurrent reader/writer usage with explicit guarantees:
+
+- Safe concurrently:
+  - multiple readers (`status`, `search`)
+  - one writer (`index`, `clear-cache`, watch batch updates) plus any number of readers
+- Not allowed concurrently:
+  - multiple cache writers in parallel for the same `.gloggur-cache`
+  - writers are serialized by a cache write lock at `.gloggur-cache/.cache-write.lock`
+
+Writer lock behavior:
+
+- lock acquisition is non-blocking with bounded retry/backoff
+- default policy: `5000ms` total wait, exponential delays (`25ms` initial, capped at `250ms`)
+- timeout exits non-zero with structured JSON error (`operation: acquire cache write lock`)
+- tunables:
+  - `GLOGGUR_CACHE_LOCK_TIMEOUT_MS`
+  - `GLOGGUR_CACHE_LOCK_INITIAL_BACKOFF_MS`
+  - `GLOGGUR_CACHE_LOCK_MAX_BACKOFF_MS`
+  - `GLOGGUR_CACHE_LOCK_BACKOFF_MULTIPLIER`
+
+SQLite behavior under contention:
+
+- cache DB uses `journal_mode=WAL` and `busy_timeout=5000ms`
+- read/write contention should not hang indefinitely
+- lock contention surfaces as bounded fail/retry outcomes
+
+Publication consistency:
+
+- index metadata is cleared before a rebuild starts
+- metadata/profile are published only after vector artifacts are saved
+- if a writer is interrupted, `status`/`search` report `needs_reindex=true` instead of advertising a healthy partial state

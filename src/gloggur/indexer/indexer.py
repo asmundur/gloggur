@@ -43,6 +43,7 @@ class Indexer:
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
         start = time.time()
+        self.cache.delete_index_metadata()
         indexed_files = 0
         indexed_symbols = 0
         skipped_files = 0
@@ -53,6 +54,8 @@ class Indexer:
                 indexed_symbols += result
             else:
                 skipped_files += 1
+        if self.vector_store:
+            self.vector_store.save()
         metadata = IndexMetadata(
             version=self.config.index_version,
             total_symbols=len(self.cache.list_symbols()),
@@ -60,8 +63,6 @@ class Indexer:
         )
         self.cache.set_index_metadata(metadata)
         self.cache.set_index_profile(self.config.embedding_profile())
-        if self.vector_store:
-            self.vector_store.save()
         duration_ms = int((time.time() - start) * 1000)
         return IndexResult(
             indexed_files=indexed_files,
@@ -101,7 +102,6 @@ class Indexer:
         )
         if self.vector_store and symbols:
             self.vector_store.upsert_vectors(symbols)
-        self.cache.set_index_profile(self.config.embedding_profile())
         return len(symbols)
 
     def _iter_source_files(self, root: str) -> Iterable[str]:

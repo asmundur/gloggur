@@ -65,7 +65,7 @@ if hasattr(errno, "EDQUOT"):
     _DISK_ERRNOS.add(errno.EDQUOT)
 
 
-@dataclass(frozen=True)
+@dataclass
 class StorageIOError(RuntimeError):
     """Structured I/O failure for deterministic user/CI handling."""
 

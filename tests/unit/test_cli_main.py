@@ -10,11 +10,11 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from gloggur.cli import main as cli_main
-from gloggur.cli.main import _profile_reindex_reason
-from gloggur.indexer.cache import CacheRecoveryError
 import gloggur.indexer.cache as cache_module
 import gloggur.storage.vector_store as vector_store_module
+from gloggur.cli import main as cli_main
+from gloggur.cli.main import _metadata_reindex_reason, _profile_reindex_reason
+from gloggur.indexer.cache import CacheRecoveryError
 
 
 def test_profile_reindex_reason_no_metadata_and_no_profile() -> None:
@@ -54,6 +54,19 @@ def test_profile_reindex_reason_profile_matches() -> None:
         cached_profile="local:model-a",
         expected_profile="local:model-a",
     )
+    assert reason is None
+
+
+def test_metadata_reindex_reason_missing_metadata() -> None:
+    """Missing index metadata should report an explicit rebuild reason."""
+    reason = _metadata_reindex_reason(metadata_present=False)
+    assert reason is not None
+    assert "index metadata missing" in reason
+
+
+def test_metadata_reindex_reason_present_metadata() -> None:
+    """Existing metadata should not add metadata-specific reindex reason."""
+    reason = _metadata_reindex_reason(metadata_present=True)
     assert reason is None
 
 
@@ -119,7 +132,7 @@ def test_status_json_reports_structured_io_failures(
     """status --json should emit stable machine-readable payloads for IO failure categories."""
     runner = CliRunner()
 
-    def _raise_connect(_path: str) -> sqlite3.Connection:
+    def _raise_connect(*_args: object, **_kwargs: object) -> sqlite3.Connection:
         raise exception_factory()
 
     monkeypatch.setattr(cache_module.sqlite3, "connect", _raise_connect)
@@ -148,7 +161,7 @@ def test_status_plain_output_includes_actionable_io_guidance(
     """status (non-json) should include stable actionable guidance on stderr."""
     runner = CliRunner()
 
-    def _raise_connect(_path: str) -> sqlite3.Connection:
+    def _raise_connect(*_args: object, **_kwargs: object) -> sqlite3.Connection:
         raise PermissionError(errno.EACCES, "permission denied")
 
     monkeypatch.setattr(cache_module.sqlite3, "connect", _raise_connect)

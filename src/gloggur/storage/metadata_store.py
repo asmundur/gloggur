@@ -8,6 +8,9 @@ from typing import Iterator, List, Optional
 
 from gloggur.models import Symbol
 
+SQLITE_BUSY_TIMEOUT_MS = 5_000
+SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
+
 
 @dataclass
 class MetadataStoreConfig:
@@ -67,7 +70,15 @@ class MetadataStore:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         """Context manager for database access."""
-        conn = sqlite3.connect(self.config.db_path)
+        conn = sqlite3.connect(
+            self.config.db_path,
+            timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
+        )
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        except sqlite3.OperationalError:
+            conn.close()
+            raise
         conn.row_factory = sqlite3.Row
         try:
             yield conn

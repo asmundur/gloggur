@@ -17,9 +17,10 @@ from gloggur.audit.docstring_audit import audit_docstrings
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.factory import create_embedding_provider
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
+from gloggur.indexer.concurrency import cache_write_lock
 from gloggur.io_failures import StorageIOError, format_io_error_message
 from gloggur.indexer.indexer import Indexer
-from gloggur.models import AuditFileMetadata
+from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
@@ -124,6 +125,13 @@ def _profile_reindex_reason(
     return None
 
 
+def _metadata_reindex_reason(metadata_present: bool) -> Optional[str]:
+    """Return reason when index metadata is missing/incomplete."""
+    if metadata_present:
+        return None
+    return "index metadata missing (index build in progress, interrupted, or never completed)"
+
+
 def _resolve_config_file_path(config_path: Optional[str]) -> str:
     """Resolve config file path for watch init updates."""
     if config_path:
@@ -205,6 +213,7 @@ def _create_runtime(
     config_path: Optional[str],
     embedding_provider: Optional[str] = None,
     rebuild_on_profile_change: bool = False,
+    write_locked: bool = False,
 ) -> tuple[GloggurConfig, CacheManager, VectorStore]:
     """Create config/cache/vector runtime and apply profile rebuild logic."""
     resolved_config_path = _normalize_config_path(config_path)
@@ -229,8 +238,13 @@ def _create_runtime(
             f"{config.cache_dir} ({reindex_reason}).",
             err=True,
         )
-        cache.clear()
-        vector_store.clear()
+        if write_locked:
+            cache.clear()
+            vector_store.clear()
+        else:
+            with cache_write_lock(config.cache_dir):
+                cache.clear()
+                vector_store.clear()
     return config, cache, vector_store
 
 
@@ -255,33 +269,47 @@ def index(
     embedding_provider: Optional[str],
 ) -> None:
     """Load config/runtime, index path, and emit summary counts."""
-    config, cache, vector_store = _create_runtime(
-        config_path=config_path,
-        embedding_provider=embedding_provider,
-        rebuild_on_profile_change=True,
-    )
-    click.echo("Indexing...", err=True)
-    embedding = create_embedding_provider(config) if config.embedding_provider else None
-    indexer = Indexer(
-        config=config,
-        cache=cache,
-        parser_registry=ParserRegistry(),
-        embedding_provider=embedding,
-        vector_store=vector_store,
-    )
-    if os.path.isdir(path):
-        result = indexer.index_repository(path)
-    else:
-        count = indexer.index_file(path) or 0
+    resolved_config_path = _normalize_config_path(config_path)
+    lock_config = _load_config(resolved_config_path)
+    with cache_write_lock(lock_config.cache_dir):
+        config, cache, vector_store = _create_runtime(
+            config_path=resolved_config_path,
+            embedding_provider=embedding_provider,
+            rebuild_on_profile_change=True,
+            write_locked=True,
+        )
+        click.echo("Indexing...", err=True)
+        embedding = create_embedding_provider(config) if config.embedding_provider else None
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=embedding,
+            vector_store=vector_store,
+        )
+        if os.path.isdir(path):
+            result = indexer.index_repository(path)
+            _emit(result.__dict__, as_json)
+            return
+
+        cache.delete_index_metadata()
+        indexed = indexer.index_file(path)
+        if vector_store and indexed is not None:
+            vector_store.save()
+        metadata = IndexMetadata(
+            version=config.index_version,
+            total_symbols=len(cache.list_symbols()),
+            indexed_files=cache.count_files(),
+        )
+        cache.set_index_metadata(metadata)
+        cache.set_index_profile(config.embedding_profile())
         result = {
-            "indexed_files": 1 if count else 0,
-            "indexed_symbols": count,
-            "skipped_files": 0 if count else 1,
+            "indexed_files": 1 if indexed is not None else 0,
+            "indexed_symbols": indexed or 0,
+            "skipped_files": 0 if indexed is not None else 1,
             "duration_ms": 0,
         }
         _emit(result, as_json)
-        return
-    _emit(result.__dict__, as_json)
 
 
 @cli.command()
@@ -307,8 +335,10 @@ def search(
     expected_profile = config.embedding_profile()
     metadata_present = cache.get_index_metadata() is not None
     cached_profile = cache.get_index_profile()
-    reindex_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
-    if reindex_reason:
+    metadata_reason = _metadata_reindex_reason(metadata_present)
+    profile_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
+    reindex_reason = metadata_reason or profile_reason
+    if reindex_reason is not None:
         payload = {
             "query": query,
             "results": [],
@@ -653,11 +683,13 @@ def status(config_path: Optional[str], as_json: bool) -> None:
     metadata = cache.get_index_metadata()
     schema_version = cache.get_schema_version()
     cached_profile = cache.get_index_profile()
-    reindex_reason = _profile_reindex_reason(
+    metadata_reason = _metadata_reindex_reason(metadata is not None)
+    profile_reason = _profile_reindex_reason(
         metadata_present=metadata is not None,
         cached_profile=cached_profile,
         expected_profile=expected_profile,
     )
+    reindex_reason = metadata_reason or profile_reason
     if cache.last_reset_reason:
         reset_label = "cache schema rebuilt"
         if "cache corruption detected" in cache.last_reset_reason:
@@ -685,11 +717,13 @@ def status(config_path: Optional[str], as_json: bool) -> None:
 @_with_io_failure_handling
 def clear_cache(config_path: Optional[str], as_json: bool) -> None:
     """Clear the index cache."""
-    config = _load_config(config_path)
-    cache = _create_cache_manager(config.cache_dir)
-    cache.clear()
-    vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
-    vector_store.clear()
+    resolved_config_path = _normalize_config_path(config_path)
+    config = _load_config(resolved_config_path)
+    with cache_write_lock(config.cache_dir):
+        cache = _create_cache_manager(config.cache_dir)
+        cache.clear()
+        vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
+        vector_store.clear()
     _emit({"cleared": True, "cache_dir": config.cache_dir}, as_json)
 
 
