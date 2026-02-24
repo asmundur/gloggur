@@ -115,7 +115,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## R2 - Recover Gracefully from Corrupted SQLite Cache Files
 
-**Status**: ready_for_review
+**Status**: in_progress
 
 **Problem**
 - Current schema auto-reset handles many incompatibilities, but severe DB corruption requires explicit recovery guarantees.
@@ -139,11 +139,29 @@ These tasks track reliability hardening for cache/index operations after the sch
   - recover automatically and continue, or
   - fail loudly with clear remediation if recovery is impossible.
 - Corruption handling is idempotent across repeated runs.
+- Recovery behavior is validated for all core commands (`status`, `search`, `inspect`, `clear-cache`, `index`) with deterministic non-traceback outcomes.
+- Corruption integration coverage is provider/backend independent (must run when FAISS is unavailable).
+- Sequential reruns after first successful recovery do not create new quarantine artifacts unless fresh corruption is introduced.
+- Concurrent recovery attempts against the same corrupted cache do not hang; outcomes are deterministic (both succeed, or one fails with bounded structured lock/IO error).
+- JSON and non-JSON outputs remain stable during corruption recovery:
+  - JSON payload remains parseable and machine-readable.
+  - Human-readable stream includes a one-line corruption notice plus actionable remediation on hard failures.
 
 **Tests Required**
 - Unit test that writes invalid bytes to `index.db` and verifies automatic rebuild.
 - Unit test that simulates `sqlite3.DatabaseError` during open/integrity-check and verifies deterministic path.
 - Integration test that seeds a broken DB then runs `status` and `index` to confirm self-heal path.
+- Integration matrix for all core commands on corrupted DB (`status`, `search`, `inspect`, `clear-cache`, `index`) asserting deterministic exit semantics and parseable JSON where requested.
+- Integration coverage for corruption recovery in fallback/no-FAISS mode (no `importorskip("faiss")` dependency for R2-required tests).
+- Regression test for sequential idempotence:
+  - first run recovers and may quarantine
+  - second run on healthy cache does not emit another corruption notice or new quarantine suffix.
+- Concurrency integration test with two simultaneous recovery-triggering commands against the same corrupted cache, asserting bounded completion and stable outcomes.
+- Failure-path unit/integration test where quarantine and delete both fail, asserting clear remediation guidance and non-zero exit from CLI surfaces.
+
+**Gap Notes (2026-02-24)**
+- Current corruption integration coverage lives in `tests/integration/test_cli.py`, which is gated by `pytest.importorskip("faiss")`; this leaves a coverage hole in no-FAISS environments.
+- Existing tests strongly cover `status` + `index` recovery/idempotence, but R2 closure should require explicit cross-command + concurrent-recovery assertions under backend-independent test conditions.
 
 ---
 
