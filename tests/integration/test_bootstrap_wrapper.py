@@ -88,6 +88,44 @@ def test_wrapper_returns_human_readable_stderr_without_json() -> None:
     assert "Remediation:" in completed.stderr
 
 
+def test_wrapper_exit_code_mapping_for_missing_venv_is_stable() -> None:
+    false_bin = shutil.which("false")
+    assert false_bin is not None
+
+    env = os.environ.copy()
+    env["GLOGGUR_PREFLIGHT_DRY_RUN"] = "1"
+    env["GLOGGUR_PREFLIGHT_VENV_PYTHON"] = str(_repo_root() / ".missing-venv" / "bin" / "python")
+    env["GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS"] = false_bin
+    env["GLOGGUR_PREFLIGHT_PROBE_MODULE"] = "gloggur.bootstrap_launcher"
+    env.pop("GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS", None)
+
+    completed = _run_wrapper(["status", "--json"], env=env)
+
+    assert completed.returncode == 2, completed.stderr
+    payload = _parse_json_stdout(completed.stdout)
+    assert payload["operation"] == "preflight"
+    assert payload["error_code"] == "missing_venv"
+
+
+def test_wrapper_exit_code_mapping_for_broken_environment_is_stable() -> None:
+    false_bin = shutil.which("false")
+    assert false_bin is not None
+
+    env = os.environ.copy()
+    env["GLOGGUR_PREFLIGHT_DRY_RUN"] = "1"
+    env["GLOGGUR_PREFLIGHT_VENV_PYTHON"] = false_bin
+    env["GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS"] = false_bin
+    env["GLOGGUR_PREFLIGHT_PROBE_MODULE"] = "gloggur.bootstrap_launcher"
+    env.pop("GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS", None)
+
+    completed = _run_wrapper(["status", "--json"], env=env)
+
+    assert completed.returncode == 5, completed.stderr
+    payload = _parse_json_stdout(completed.stdout)
+    assert payload["operation"] == "preflight"
+    assert payload["error_code"] == "broken_environment"
+
+
 def test_wrapper_returns_missing_python_when_no_interpreter_available(tmp_path: Path) -> None:
     source_script = _wrapper_path()
     temp_repo = tmp_path / "repo"
