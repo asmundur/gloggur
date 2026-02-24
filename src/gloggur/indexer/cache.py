@@ -6,7 +6,7 @@ import sqlite3
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Iterator, List, Optional
 
 from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
@@ -37,6 +37,14 @@ REQUIRED_COLUMNS = {
     "audit_files": {"path", "content_hash", "last_audited"},
     "meta": {"key", "value"},
 }
+
+
+@dataclass(frozen=True)
+class _ResetPlan:
+    """Plan describing why and how the cache database should be reset."""
+
+    reason: str
+    corruption_detected: bool = False
 
 
 @dataclass
@@ -76,9 +84,9 @@ class CacheManager:
 
     def _init_db(self) -> None:
         """Create database tables if they do not exist."""
-        reset_reason = self._schema_reset_reason()
-        if reset_reason:
-            self._reset_database(reset_reason)
+        reset_plan = self._schema_reset_plan()
+        if reset_plan:
+            self._reset_database(reset_plan)
         with self._connect() as conn:
             conn.executescript(
                 """
@@ -347,56 +355,139 @@ class CacheManager:
             )
             conn.execute("DELETE FROM meta WHERE key = ?", (INDEX_PROFILE_KEY,))
 
-    def _schema_reset_reason(self) -> Optional[str]:
-        """Return a reason to reset the cache if current schema is incompatible."""
+    def _schema_reset_plan(self) -> Optional[_ResetPlan]:
+        """Return a reset plan if schema is incompatible or DB corruption is detected."""
         if not os.path.exists(self.config.db_path):
             return None
 
         try:
             conn = sqlite3.connect(self.config.db_path)
             try:
+                integrity_issue = self._integrity_issue(conn)
+                if integrity_issue:
+                    return _ResetPlan(
+                        reason=f"cache corruption detected ({integrity_issue})",
+                        corruption_detected=True,
+                    )
+
                 existing_tables = self._list_tables(conn)
                 legacy_tables = sorted(existing_tables & LEGACY_TABLES)
                 if legacy_tables:
-                    return f"legacy tables present ({', '.join(legacy_tables)})"
+                    return _ResetPlan(
+                        reason=f"legacy tables present ({', '.join(legacy_tables)})"
+                    )
 
                 missing_tables = sorted(REQUIRED_TABLES - existing_tables)
                 if missing_tables:
-                    return f"required tables missing ({', '.join(missing_tables)})"
+                    return _ResetPlan(
+                        reason=f"required tables missing ({', '.join(missing_tables)})"
+                    )
 
                 for table, expected_columns in REQUIRED_COLUMNS.items():
                     existing_columns = self._list_columns(conn, table)
                     missing_columns = sorted(expected_columns - existing_columns)
                     if missing_columns:
-                        return (
-                            f"table '{table}' missing columns "
-                            f"({', '.join(missing_columns)})"
+                        return _ResetPlan(
+                            reason=(
+                                f"table '{table}' missing columns "
+                                f"({', '.join(missing_columns)})"
+                            )
                         )
 
                 version = self._read_schema_version(conn)
                 if version != CACHE_SCHEMA_VERSION:
                     found = version if version is not None else "none"
-                    return (
-                        "schema version mismatch "
-                        f"(found {found}, expected {CACHE_SCHEMA_VERSION})"
+                    return _ResetPlan(
+                        reason=(
+                            "schema version mismatch "
+                            f"(found {found}, expected {CACHE_SCHEMA_VERSION})"
+                        )
                     )
             finally:
                 conn.close()
         except sqlite3.DatabaseError as exc:
-            return f"invalid sqlite database ({exc})"
+            return _ResetPlan(
+                reason=f"cache corruption detected (sqlite open/integrity error: {exc})",
+                corruption_detected=True,
+            )
 
         return None
 
-    def _reset_database(self, reason: str) -> None:
-        """Remove incompatible SQLite database files so schema can be recreated."""
-        self.last_reset_reason = reason
+    def _reset_database(self, reset_plan: _ResetPlan) -> None:
+        """Reset incompatible or corrupted SQLite artifacts."""
+        self.last_reset_reason = reset_plan.reason
+        if reset_plan.corruption_detected:
+            self._recover_from_corruption(reset_plan.reason)
+            return
+        self._delete_database_artifacts()
+        rebuild_notice = (
+            "Cache schema changed; rebuilding cache at "
+            f"{self.config.db_path} ({reset_plan.reason}).\n"
+        )
+        sys.stderr.write(
+            rebuild_notice
+        )
+
+    def _integrity_issue(self, conn: sqlite3.Connection) -> Optional[str]:
+        """Return an integrity issue detail if `PRAGMA integrity_check` reports corruption."""
+        rows = conn.execute("PRAGMA integrity_check(1)").fetchall()
+        messages = [str(row[0]) for row in rows if row and row[0] is not None]
+        if not messages:
+            return "integrity_check returned no rows"
+        if len(messages) == 1 and messages[0].strip().lower() == "ok":
+            return None
+        preview = ", ".join(messages[:3])
+        if len(messages) > 3:
+            preview += ", ..."
+        return f"integrity_check failed: {preview}"
+
+    def _recover_from_corruption(self, reason: str) -> None:
+        """Quarantine corrupted artifacts when possible, then remove sidecars and rebuild."""
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        db_path = self.config.db_path
+        quarantined_db = self._quarantine_or_remove(db_path, timestamp)
+        self._quarantine_or_remove(f"{db_path}-wal", timestamp)
+        self._quarantine_or_remove(f"{db_path}-shm", timestamp)
+        if quarantined_db:
+            action = f"quarantined to {quarantined_db}"
+        else:
+            action = "removed corrupted artifact"
+        sys.stderr.write(
+            f"Cache corruption detected at {db_path}; {action}; rebuilding cache ({reason}).\n"
+        )
+
+    def _delete_database_artifacts(self) -> None:
+        """Delete primary SQLite database and sidecars."""
         db_path = self.config.db_path
         for path in (db_path, f"{db_path}-wal", f"{db_path}-shm"):
             if os.path.exists(path):
                 os.remove(path)
-        sys.stderr.write(
-            f"Cache schema changed; rebuilding cache at {db_path} ({reason}).\n"
-        )
+
+    def _quarantine_or_remove(self, path: str, timestamp: str) -> Optional[str]:
+        """Move an artifact aside with a .corrupt suffix; fall back to deletion if rename fails."""
+        if not os.path.exists(path):
+            return None
+
+        suffix = f".corrupt.{timestamp}"
+        target = f"{path}{suffix}"
+        attempt = 1
+        while os.path.exists(target):
+            attempt += 1
+            target = f"{path}{suffix}.{attempt}"
+
+        try:
+            os.replace(path, target)
+            return target
+        except OSError as replace_error:
+            try:
+                os.remove(path)
+                return None
+            except OSError as remove_error:
+                raise CacheRecoveryError(
+                    "Cache corruption detected but recovery failed for "
+                    f"{path}: rename failed ({replace_error}); delete failed ({remove_error}). "
+                    "Fix permissions and remove corrupted cache files manually."
+                ) from remove_error
 
     def _list_tables(self, conn: sqlite3.Connection) -> set[str]:
         """Return all non-internal table names in the SQLite database."""
@@ -446,3 +537,7 @@ class CacheManager:
             embedding_vector=vector,
             language=row["language"],
         )
+
+
+class CacheRecoveryError(RuntimeError):
+    """Raised when automatic corruption recovery cannot repair cache artifacts."""

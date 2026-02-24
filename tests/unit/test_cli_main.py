@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import click
+import pytest
+
+from gloggur.cli import main as cli_main
 from gloggur.cli.main import _profile_reindex_reason
+from gloggur.indexer.cache import CacheRecoveryError
 
 
 def test_profile_reindex_reason_no_metadata_and_no_profile() -> None:
@@ -41,3 +46,15 @@ def test_profile_reindex_reason_profile_matches() -> None:
         expected_profile="local:model-a",
     )
     assert reason is None
+
+
+def test_create_cache_manager_wraps_cache_recovery_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unrecoverable cache corruption should be raised as a user-facing ClickException."""
+
+    class BrokenCacheManager:
+        def __init__(self, _config: object) -> None:
+            raise CacheRecoveryError("recovery failed")
+
+    monkeypatch.setattr(cli_main, "CacheManager", BrokenCacheManager)
+    with pytest.raises(click.ClickException, match="recovery failed"):
+        cli_main._create_cache_manager("/tmp/gloggur-cache")

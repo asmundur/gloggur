@@ -25,7 +25,9 @@ def _parse_json_output(output: str) -> dict[str, object]:
     start = output.find("{")
     if start == -1:
         raise ValueError(f"No JSON object found in output: {output!r}")
-    return json.loads(output[start:])
+    decoder = json.JSONDecoder()
+    payload, _ = decoder.raw_decode(output[start:])
+    return payload
 
 
 def test_cli_index_search_status_and_clear_cache() -> None:
@@ -115,3 +117,112 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_after_payload["needs_reindex"] is False
         assert status_after_payload["expected_index_profile"] == "local:model-b"
         assert status_after_payload["cached_index_profile"] == "local:model-b"
+
+
+def test_cli_status_and_index_self_heal_corrupted_cache_idempotently() -> None:
+    """Status/index should self-heal a corrupted DB once and remain stable afterwards."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        db_path = Path(cache_dir) / "index.db"
+        db_path.write_bytes(b"broken sqlite bytes")
+        Path(f"{db_path}-wal").write_bytes(b"broken wal")
+        Path(f"{db_path}-shm").write_bytes(b"broken shm")
+
+        first_status = runner.invoke(cli, ["status", "--json"], env=env)
+        assert first_status.exit_code == 0
+        assert "Cache corruption detected at" in first_status.output
+        first_payload = _parse_json_output(first_status.output)
+        assert first_payload["needs_reindex"] is True
+        assert int(first_payload["total_symbols"]) == 0
+        quarantined_after_first = sorted(
+            path.name for path in Path(cache_dir).iterdir() if ".corrupt." in path.name
+        )
+        assert quarantined_after_first
+        assert not Path(f"{db_path}-wal").exists()
+        assert not Path(f"{db_path}-shm").exists()
+
+        second_status = runner.invoke(cli, ["status", "--json"], env=env)
+        assert second_status.exit_code == 0
+        assert "Cache corruption detected at" not in second_status.output
+        second_payload = _parse_json_output(second_status.output)
+        assert second_payload["needs_reindex"] is True
+        quarantined_after_second = sorted(
+            path.name for path in Path(cache_dir).iterdir() if ".corrupt." in path.name
+        )
+        assert quarantined_after_second == quarantined_after_first
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0
+        index_payload = _parse_json_output(index_result.output)
+        assert index_payload["indexed_files"] == 1
+        assert index_payload["indexed_symbols"] > 0
+
+        final_status = runner.invoke(cli, ["status", "--json"], env=env)
+        assert final_status.exit_code == 0
+        final_payload = _parse_json_output(final_status.output)
+        assert final_payload["needs_reindex"] is False
+        assert int(final_payload["total_symbols"]) > 0
+
+
+def test_cli_search_self_heals_corrupted_cache() -> None:
+    """Search should recover from cache corruption and return reindex metadata, not crash."""
+    runner = CliRunner()
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    _write_fallback_marker(cache_dir)
+    env = {"GLOGGUR_CACHE_DIR": cache_dir}
+    db_path = Path(cache_dir) / "index.db"
+    db_path.write_bytes(b"broken sqlite bytes")
+
+    first_search = runner.invoke(cli, ["search", "add", "--json"], env=env)
+    assert first_search.exit_code == 0
+    assert "Cache corruption detected at" in first_search.output
+    first_payload = _parse_json_output(first_search.output)
+    assert first_payload["results"] == []
+    metadata = first_payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert int(metadata["total_results"]) == 0
+
+    second_search = runner.invoke(cli, ["search", "add", "--json"], env=env)
+    assert second_search.exit_code == 0
+    assert "Cache corruption detected at" not in second_search.output
+
+
+def test_cli_clear_cache_self_heals_corrupted_cache() -> None:
+    """clear-cache should recover from corruption instead of failing with a DB error."""
+    runner = CliRunner()
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    _write_fallback_marker(cache_dir)
+    env = {"GLOGGUR_CACHE_DIR": cache_dir}
+    db_path = Path(cache_dir) / "index.db"
+    db_path.write_bytes(b"broken sqlite bytes")
+
+    result = runner.invoke(cli, ["clear-cache", "--json"], env=env)
+    assert result.exit_code == 0
+    assert "Cache corruption detected at" in result.output
+    payload = _parse_json_output(result.output)
+    assert payload["cleared"] is True
+
+
+def test_cli_inspect_self_heals_corrupted_cache() -> None:
+    """Inspect command should run after automatic corruption recovery."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        db_path = Path(cache_dir) / "index.db"
+        db_path.write_bytes(b"broken sqlite bytes")
+
+        result = runner.invoke(cli, ["inspect", str(repo), "--json"], env=env)
+        assert result.exit_code == 0
+        assert "Cache corruption detected at" in result.output
+        payload = _parse_json_output(result.output)
+        assert int(payload["reports_total"]) >= 0

@@ -15,7 +15,7 @@ import yaml
 from gloggur.audit.docstring_audit import audit_docstrings
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.factory import create_embedding_provider
-from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.indexer.indexer import Indexer
 from gloggur.models import AuditFileMetadata
 from gloggur.parsers.registry import ParserRegistry
@@ -185,7 +185,7 @@ def _create_runtime(
         config = GloggurConfig.load(path=resolved_config_path, overrides=overrides)
     config = _normalize_watch_paths(config, resolved_config_path)
     expected_profile = config.embedding_profile()
-    cache = CacheManager(CacheConfig(config.cache_dir))
+    cache = _create_cache_manager(config.cache_dir)
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
     if cache.last_reset_reason:
         vector_store.clear()
@@ -201,6 +201,14 @@ def _create_runtime(
         cache.clear()
         vector_store.clear()
     return config, cache, vector_store
+
+
+def _create_cache_manager(cache_dir: str) -> CacheManager:
+    """Create cache manager with user-facing error mapping for unrecoverable corruption."""
+    try:
+        return CacheManager(CacheConfig(cache_dir))
+    except CacheRecoveryError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @cli.command()
@@ -323,7 +331,7 @@ def inspect(
 ) -> None:
     """Run docstring inspection and emit warnings/reports."""
     config = _load_config(config_path)
-    cache = CacheManager(CacheConfig(config.cache_dir))
+    cache = _create_cache_manager(config.cache_dir)
     parser_registry = ParserRegistry()
     embedding = create_embedding_provider(config) if config.embedding_provider else None
     symbols = []
@@ -606,7 +614,7 @@ def status(config_path: Optional[str], as_json: bool) -> None:
     """Show index statistics and metadata."""
     config = _load_config(config_path)
     expected_profile = config.embedding_profile()
-    cache = CacheManager(CacheConfig(config.cache_dir))
+    cache = _create_cache_manager(config.cache_dir)
     metadata = cache.get_index_metadata()
     schema_version = cache.get_schema_version()
     cached_profile = cache.get_index_profile()
@@ -616,8 +624,11 @@ def status(config_path: Optional[str], as_json: bool) -> None:
         expected_profile=expected_profile,
     )
     if cache.last_reset_reason:
+        reset_label = "cache schema rebuilt"
+        if "cache corruption detected" in cache.last_reset_reason:
+            reset_label = "cache corruption recovered"
         reindex_reason = (
-            "cache schema rebuilt "
+            f"{reset_label} "
             f"({cache.last_reset_reason})"
         )
     payload = {
@@ -639,7 +650,7 @@ def status(config_path: Optional[str], as_json: bool) -> None:
 def clear_cache(config_path: Optional[str], as_json: bool) -> None:
     """Clear the index cache."""
     config = _load_config(config_path)
-    cache = CacheManager(CacheConfig(config.cache_dir))
+    cache = _create_cache_manager(config.cache_dir)
     cache.clear()
     vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
     vector_store.clear()

@@ -95,6 +95,8 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## R2 - Recover Gracefully from Corrupted SQLite Cache Files
 
+**Status**: ready_for_review
+
 **Problem**
 - Current schema auto-reset handles many incompatibilities, but severe DB corruption requires explicit recovery guarantees.
 - Corruption can occur from abrupt process termination, external tampering, or partial writes.

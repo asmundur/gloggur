@@ -5,6 +5,9 @@ import sqlite3
 import tempfile
 from contextlib import closing
 
+import pytest
+
+import gloggur.indexer.cache as cache_module
 from gloggur.indexer.cache import CACHE_SCHEMA_VERSION, CacheConfig, CacheManager
 from gloggur.models import IndexMetadata, Symbol
 
@@ -94,3 +97,76 @@ def test_cache_index_profile_round_trip_and_clear() -> None:
     assert cache.get_index_profile() == "local:model-a"
     cache.clear()
     assert cache.get_index_profile() is None
+
+
+def test_cache_recovers_from_corrupted_db_and_sidecars() -> None:
+    """Corrupted DB artifacts should be quarantined/removed and replaced with a healthy DB."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    db_path = os.path.join(cache_dir, "index.db")
+    with open(db_path, "wb") as handle:
+        handle.write(b"not-a-sqlite-db")
+    with open(f"{db_path}-wal", "wb") as handle:
+        handle.write(b"wal-garbage")
+    with open(f"{db_path}-shm", "wb") as handle:
+        handle.write(b"shm-garbage")
+
+    cache = CacheManager(CacheConfig(cache_dir))
+    assert cache.last_reset_reason is not None
+    assert "cache corruption detected" in cache.last_reset_reason
+    assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
+    assert not os.path.exists(f"{db_path}-wal")
+    assert not os.path.exists(f"{db_path}-shm")
+    quarantined = [name for name in os.listdir(cache_dir) if ".corrupt." in name]
+    assert any(name.startswith("index.db.corrupt.") for name in quarantined)
+
+
+def test_cache_recovers_when_integrity_check_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DatabaseError during integrity probing should force deterministic corruption recovery."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    db_path = os.path.join(cache_dir, "index.db")
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("CREATE TABLE placeholder (id INTEGER PRIMARY KEY)")
+        conn.commit()
+
+    def _raise_integrity_error(_self: CacheManager, _conn: sqlite3.Connection) -> str | None:
+        raise sqlite3.DatabaseError("integrity probe failed")
+
+    monkeypatch.setattr(CacheManager, "_integrity_issue", _raise_integrity_error)
+    cache = CacheManager(CacheConfig(cache_dir))
+    assert cache.last_reset_reason is not None
+    assert "cache corruption detected" in cache.last_reset_reason
+    assert "integrity probe failed" in cache.last_reset_reason
+    assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
+
+
+def test_cache_corruption_recovery_fails_loudly_when_quarantine_and_delete_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If both quarantine and delete fail, cache initialization should raise a clear error."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    db_path = os.path.join(cache_dir, "index.db")
+    with open(db_path, "wb") as handle:
+        handle.write(b"not-a-sqlite-db")
+
+    def _always_fail_replace(_src: str, _dst: str) -> None:
+        raise OSError("replace denied")
+
+    def _always_fail_remove(_path: str) -> None:
+        raise OSError("remove denied")
+
+    monkeypatch.setattr(cache_module.os, "replace", _always_fail_replace)
+    monkeypatch.setattr(cache_module.os, "remove", _always_fail_remove)
+    with pytest.raises(RuntimeError, match="Cache corruption detected but recovery failed"):
+        CacheManager(CacheConfig(cache_dir))
+
+
+def test_cache_healthy_db_does_not_trigger_recovery_or_quarantine() -> None:
+    """Inverse case: healthy DB should not be reset or emit quarantine artifacts."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    first = CacheManager(CacheConfig(cache_dir))
+    first.set_index_profile("local:model-a")
+
+    second = CacheManager(CacheConfig(cache_dir))
+    assert second.last_reset_reason is None
+    assert second.get_index_profile() == "local:model-a"
+    assert [name for name in os.listdir(cache_dir) if ".corrupt." in name] == []
