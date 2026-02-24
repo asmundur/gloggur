@@ -124,6 +124,8 @@ def classify_io_error(exc: Exception) -> str:
         return _classify_os_error(exc)
     if isinstance(exc, sqlite3.OperationalError):
         return _classify_sqlite_operational_error(exc)
+    if isinstance(exc, sqlite3.DatabaseError):
+        return _classify_sqlite_database_error(exc)
     return "unknown_io_error"
 
 
@@ -141,6 +143,15 @@ def _classify_os_error(exc: OSError) -> str:
 
 def _classify_sqlite_operational_error(exc: sqlite3.OperationalError) -> str:
     detail = str(exc).lower()
+    return _classify_sqlite_error_detail(detail)
+
+
+def _classify_sqlite_database_error(exc: sqlite3.DatabaseError) -> str:
+    detail = str(exc).lower()
+    return _classify_sqlite_error_detail(detail)
+
+
+def _classify_sqlite_error_detail(detail: str) -> str:
     if any(token in detail for token in ("readonly", "read-only")):
         return "read_only_filesystem"
     if "permission denied" in detail:

@@ -211,3 +211,54 @@ def test_index_json_reports_vector_store_write_failure(
     assert "write vector id map" in str(error["operation"])
     assert str(error["path"]).endswith("vectors.json")
     assert "no space left on device" in str(error["detail"])
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["status", "search", "inspect", "clear-cache", "index"],
+)
+def test_core_commands_wrap_sqlite_database_error_as_structured_io_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """Core commands should surface sqlite DatabaseError as structured IO failures."""
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "sample.py").write_text(
+        "def add(a, b):\n"
+        "    return a + b\n",
+        encoding="utf8",
+    )
+
+    def _raise_connect(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(cache_module.sqlite3, "connect", _raise_connect)
+
+    args_map = {
+        "status": ["status", "--json"],
+        "search": ["search", "add", "--json"],
+        "inspect": ["inspect", str(repo), "--json"],
+        "clear-cache": ["clear-cache", "--json"],
+        "index": ["index", str(repo), "--json"],
+    }
+    result = runner.invoke(
+        cli_main.cli,
+        args_map[command],
+        env={
+            "GLOGGUR_CACHE_DIR": str(tmp_path / "cache"),
+            "GLOGGUR_LOCAL_FALLBACK": "1",
+        },
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "io_failure"
+    assert error["category"] == "unknown_io_error"
+    assert "cache database" in str(error["operation"])
+    assert str(error["path"]).endswith("index.db")
+    assert "database disk image is malformed" in str(error["detail"])

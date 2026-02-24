@@ -137,3 +137,47 @@ def test_bootstrap_can_seed_venv_via_symlink_and_auto_skip_install(tmp_path: Pat
     assert target_venv.resolve() == source_venv.resolve()
     assert "Venv seed: symlinked:" in completed.stdout
     assert "Install step: skipped:seeded_venv" in completed.stdout
+
+
+def test_bootstrap_can_seed_venv_via_copy_and_auto_skip_install(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    source_venv = source_workspace / ".venv"
+    env = os.environ.copy()
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    target_venv = repo_root / ".venv"
+    assert target_venv.exists()
+    assert not target_venv.is_symlink()
+    assert (target_venv / "bin" / "python").read_text(encoding="utf8") == (
+        source_venv / "bin" / "python"
+    ).read_text(encoding="utf8")
+    assert "Venv seed: copied:" in completed.stdout
+    assert "Install step: skipped:seeded_venv" in completed.stdout
+
+
+def test_bootstrap_rejects_invalid_seed_mode(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    env = os.environ.copy()
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=["--seed-cache-mode", "invalid"],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 2
+    assert "Invalid --seed-cache-mode" in completed.stderr

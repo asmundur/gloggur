@@ -53,6 +53,8 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## R1 - Harden OS-Level Failure Handling (Permissions, Read-only FS, Disk Full)
 
+**Status**: ready_for_review
+
 **Problem**
 - Core commands (`index`, `search`, `inspect`, `status`, `clear-cache`) currently assume normal filesystem behavior.
 - Real environments can fail with permission denied, read-only mounts, quota errors, or disk full errors.
@@ -84,12 +86,30 @@ These tasks track reliability hardening for cache/index operations after the sch
 - Existing successful flows remain unchanged.
 
 **Tests Required**
-- Unit tests that simulate `OSError`/`sqlite3.OperationalError` via monkeypatch/mocks for each category.
+- Unit tests that simulate `OSError`/`sqlite3.OperationalError`/`sqlite3.DatabaseError` via monkeypatch/mocks for each category.
 - Fast integration tests using temp dirs with restricted permissions (where portable).
 - Assertions on:
   - exit code
   - JSON/error payload fields
   - stderr content and remediation hints
+
+**Progress Update (2026-02-24)**
+- Added structured classification support for `sqlite3.DatabaseError` (not only `sqlite3.OperationalError`) so malformed/corrupted DB failures map deterministically.
+- Expanded cache I/O wrapping to convert `sqlite3.DatabaseError` during connect/pragma/transaction paths into `StorageIOError` payloads.
+- Added a core-command unit matrix (`status`, `search`, `inspect`, `clear-cache`, `index`) asserting structured JSON failure payloads for sqlite database-level failures.
+- Added an integration matrix for unwritable cache parent across core commands to validate non-zero exits and stable category families in realistic filesystem conditions.
+
+**Findings (2026-02-24)**
+- Deterministic failure semantics now cover a broader sqlite failure surface, including non-operational database exceptions.
+- Additional per-operation fault injection (for each write/delete operation inside each command) is still a useful follow-up for deeper exhaustiveness.
+
+**Verification Procedure (How Evidence Is Obtained)**
+- Run:
+  - `.venv/bin/python -m pytest tests/unit/test_io_failures.py tests/unit/test_cli_main.py tests/integration/test_io_failures_integration.py -q`
+- Validate in test outputs/assertions:
+  - all core commands exit non-zero on injected I/O failures
+  - JSON payload contains `error.type=io_failure`, category, operation, path, remediation, and original detail
+  - non-JSON output includes probable cause + remediation steps
 
 ---
 
@@ -161,6 +181,22 @@ These tasks track reliability hardening for cache/index operations after the sch
 - Unit tests for retry/backoff helpers and lock timeout handling.
 - Regression test asserting no deadlock/hang (with strict timeout) under simulated contention.
 
+**Progress Update (2026-02-24)**
+- Added deterministic interruption-window coverage for partial-publication safety.
+- Added `test_interrupted_index_run_preserves_needs_reindex_signal` to assert:
+  - baseline healthy state before a rerun
+  - metadata invalidation becomes observable during an in-flight index
+  - forced interruption does not publish a false healthy state
+  - recovery index restores healthy status markers
+
+**Verification Procedure (How Evidence Is Obtained)**
+- Run:
+  - `.venv/bin/python -m pytest tests/unit/test_concurrency.py tests/integration/test_concurrency_integration.py -q`
+- Validate in test outputs/assertions:
+  - lock-timeout failures are bounded and explicit
+  - interrupted index runs leave `needs_reindex=true`
+  - post-recovery index returns `needs_reindex=false`
+
 ## Ordering / Priority
 
 1. R4 (bootstrap/preflight reliability) - ready for user decision.
@@ -223,31 +259,34 @@ These tasks track reliability hardening for cache/index operations after the sch
   - healthy environment
 - Integration tests for wrapper behavior:
   - fallback to system python path
+  - non-dry-run fallback executes requested CLI command successfully
   - deterministic failure payload with `--json`
   - human-readable stderr guidance without `--json`
+  - warm-path timing checks for both fallback and healthy-venv preflight paths
 - Integration tests for bootstrap helper cache hydration:
   - `--seed-cache-mode symlink`
   - `--seed-cache-mode copy`
 - Integration tests for bootstrap helper virtualenv hydration:
   - `--seed-venv-mode symlink`
+  - `--seed-venv-mode copy`
 - Regression test to ensure wrapper exit codes are stable across failure classes.
 
-**Verification Evidence**
-- Commands run:
-  - `/Users/auzi/vinnustofa/gloggur/.venv/bin/python -m pytest tests/unit/test_bootstrap_launcher.py tests/integration/test_bootstrap_wrapper.py tests/integration/test_bootstrap_env_script.py -q`
-  - `scripts/bootstrap_gloggur_env.sh --recreate --seed-venv-from /Users/auzi/vinnustofa/gloggur --seed-venv-mode symlink --seed-cache-from /Users/auzi/vinnustofa/gloggur --seed-cache-mode copy`
+**Progress Update (2026-02-24)**
+- Added integration coverage for non-dry-run fallback execution (`scripts/gloggur status --json` succeeds via system-python fallback when `.venv` is missing).
+- Added warm-path timing coverage for healthy-venv preflight selection.
+- Added bootstrap integration coverage for `--seed-venv-mode copy`.
+- Added bootstrap validation coverage for invalid seed-mode input handling.
+
+**Verification Procedure (How Evidence Is Obtained)**
+- Run:
+  - `.venv/bin/python -m pytest tests/unit/test_bootstrap_launcher.py tests/integration/test_bootstrap_wrapper.py tests/integration/test_bootstrap_env_script.py -q`
   - `scripts/gloggur status --json`
-  - `scripts/gloggur index . --json`
   - `GLOGGUR_PREFLIGHT_DRY_RUN=1 GLOGGUR_PREFLIGHT_VENV_PYTHON=/tmp/does-not-exist/bin/python GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS=$(command -v python3) GLOGGUR_PREFLIGHT_PROBE_MODULE=gloggur.bootstrap_launcher scripts/gloggur status --json`
-  - `python3 -m gloggur.bootstrap_launcher status --json`
-  - `python3 -m compileall gloggur tests/integration/test_bootstrap_wrapper.py tests/integration/test_bootstrap_env_script.py tests/unit/test_bootstrap_launcher.py`
-  - `scripts/gloggur inspect . --json`
-- Results:
-  - Bootstrap/preflight unit+integration tests passed (`15 passed`).
-  - Bootstrap command completed in one run with deterministic venv/cache seeding and no network dependency.
-  - Wrapper status, index, and direct launcher status all succeeded with JSON output in this worktree.
-  - Dry-run preflight selected deterministic system fallback with structured payload and measured warm-path timings (`second_ms=53`, under 200ms).
-  - Compileall and inspect checks succeeded.
+  - `GLOGGUR_PREFLIGHT_DRY_RUN=1 GLOGGUR_PREFLIGHT_VENV_PYTHON=$(command -v python3) GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS=$(command -v python3) GLOGGUR_PREFLIGHT_PROBE_MODULE=gloggur.bootstrap_launcher scripts/gloggur status --json`
+- Validate in test outputs/assertions:
+  - exit-code mapping remains stable across failure classes
+  - fallback and healthy-venv preflight paths both report warm-path timings under acceptance target
+  - bootstrap venv/cache seed modes behave deterministically for symlink/copy paths
 
 ---
 
@@ -291,3 +330,105 @@ These tasks track reliability hardening for cache/index operations after the sch
 **Blockers (2026-02-20)**
 - Scope includes "watch config keys/env overrides", but env overrides for `watch_state_file`, `watch_pid_file`, and `watch_log_file` are not implemented in `src/gloggur/config.py`.
 - Do not move to `DONEs.md` until scope is either implemented fully or narrowed explicitly in this TODO item.
+
+---
+
+## F2 - Validate OpenAI and Gemini Embedding Providers End-to-End
+
+**Status**: planned
+**Priority**: P0
+**Owner**: codex
+
+**Problem**
+- Multi-provider embedding support is expected, but OpenAI and Gemini execution paths are not yet verified end-to-end in this repo workflow.
+- Without deterministic checks, failures can hide behind fallback behavior, provider config drift, or environment-specific credential issues.
+- Agents and developers need a stable, documented way to confirm both providers can produce usable embeddings for indexing/search.
+
+**Goal**
+- Ensure OpenAI and Gemini embedding integrations are both operational, test-covered, and diagnosable with clear failure messages.
+
+**Scope**
+- Audit and verify provider wiring for OpenAI and Gemini in config loading, provider factory selection, and runtime embedding calls.
+- Add or tighten validation for required provider settings (model name, API key env vars, optional dimensions/task type where applicable).
+- Implement deterministic tests for each provider adapter using mocked SDK/network boundaries.
+- Add integration-style checks that exercise provider selection + embed flow and validate returned vector shape/typing and error handling.
+- Document the exact setup and verification commands for both providers in repo docs used by agents.
+
+**Out of Scope**
+- Benchmarking embedding quality/ranking relevance across providers.
+- Production cost optimization or model-selection policy work.
+- Adding new embedding providers beyond OpenAI and Gemini.
+
+**Acceptance Criteria**
+- OpenAI provider path can be selected and produces embeddings successfully with valid configuration.
+- Gemini provider path can be selected and produces embeddings successfully with valid configuration.
+- Missing/invalid credentials fail with explicit actionable errors (no silent fallback that masks provider failures).
+- Tests cover provider selection, success path, and failure path for both providers.
+- Documentation includes a copy-paste verification checklist for both providers.
+
+**Tests Required**
+- Unit tests for provider config validation and factory dispatch for `openai:*` and `gemini:*` profiles.
+- Unit tests for provider adapters that mock SDK responses and assert vector dimensionality/type normalization.
+- Unit tests for credential and API failure mapping into stable error messages/codes.
+- Integration tests that run `index` and `search` against small fixture data with each provider behind deterministic mocks.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## F3 - Portable Index Artifact Publishing for CI/CD and Codex Cloud
+
+**Status**: planned
+**Priority**: P0
+**Owner**: codex
+
+**Problem**
+- `.gloggur-cache` is local to a workspace and is not directly available in ephemeral CI runners or Codex cloud execution environments.
+- There is no single, provider-agnostic command to publish the index artifact to shared file storage.
+- Teams currently need custom one-off scripts per platform, which is brittle and slows Codex GitHub integration workflows.
+
+**Goal**
+- Provide one non-interactive command that packages and uploads a validated index artifact to generic file storage, so Codex cloud environments can reuse it.
+
+**Scope**
+- Define a versioned index artifact contract (archive + manifest + checksums) for `.gloggur-cache` publication.
+- Implement a CI-friendly publish command (for example `gloggur artifact publish`) with:
+  - source path input
+  - destination URI or uploader command template
+  - `--json` machine-readable output
+  - deterministic non-zero exit semantics
+- Support generic transport patterns that work across CI/CD systems:
+  - direct `https://` upload (presigned URL style)
+  - local/file target for testing
+  - pluggable uploader command for provider CLIs (`aws`, `gsutil`, `az`, Artifactory, etc.)
+- Emit artifact metadata required for safe reuse:
+  - checksum(s)
+  - schema/profile compatibility fields
+  - creation timestamp and tool version
+- Document copy-paste CI examples (including GitHub Actions) and Codex cloud consumption guidance.
+
+**Out of Scope**
+- Managing or rotating cloud credentials/secrets.
+- Implementing storage lifecycle/retention policy automation.
+- Provider-specific optimization features beyond the generic transport contract.
+
+**Acceptance Criteria**
+- A single headless command can run in CI/CD and upload the index artifact without interactive prompts.
+- Command output includes artifact URI, checksum, and compatibility metadata in JSON.
+- Failed upload/auth/network paths return stable actionable errors and non-zero exits.
+- Published artifact can be validated and consumed by a downstream Codex cloud workflow without manual file surgery.
+- Documentation includes at least one generic workflow and one GitHub integration example.
+
+**Tests Required**
+- Unit tests for artifact packaging, manifest schema, and checksum generation.
+- Unit tests for destination parsing and uploader command templating/escaping.
+- Unit tests for error mapping (auth failure, network timeout, invalid destination).
+- Integration tests with:
+  - local HTTP upload endpoint
+  - local filesystem destination
+  - mocked external uploader command
+- CI smoke test fixture that runs the publish command and verifies emitted JSON metadata.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree

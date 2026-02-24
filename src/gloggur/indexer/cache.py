@@ -88,7 +88,7 @@ class CacheManager:
                 self.config.db_path,
                 timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
             )
-        except (OSError, sqlite3.OperationalError) as exc:
+        except (OSError, sqlite3.DatabaseError) as exc:
             raise wrap_io_error(
                 exc,
                 operation="open cache database connection",
@@ -108,7 +108,7 @@ class CacheManager:
                 conn.rollback()
             except sqlite3.OperationalError:
                 pass
-            if isinstance(exc, (OSError, sqlite3.OperationalError)):
+            if isinstance(exc, (OSError, sqlite3.DatabaseError)):
                 raise wrap_io_error(
                     exc,
                     operation="execute cache database transaction",
@@ -124,7 +124,7 @@ class CacheManager:
             conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
             conn.execute(f"PRAGMA journal_mode = {SQLITE_JOURNAL_MODE}")
             conn.execute(f"PRAGMA synchronous = {SQLITE_SYNCHRONOUS}")
-        except sqlite3.OperationalError as exc:
+        except sqlite3.DatabaseError as exc:
             raise wrap_io_error(
                 exc,
                 operation="configure cache database pragmas",

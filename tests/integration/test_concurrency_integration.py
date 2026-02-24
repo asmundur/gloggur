@@ -170,3 +170,80 @@ def test_index_lock_contention_fails_fast_without_hanging() -> None:
             assert "timed out" in str(error["detail"])
         finally:
             holder.wait(timeout=10)
+
+
+def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
+    """If an index run is interrupted mid-rebuild, status/search must not advertise healthy state."""
+    with TestFixtures() as fixtures:
+        files = {
+            f"module_{idx}.py": (
+                f"def handler_{idx}(value: int) -> int:\n"
+                f"    return value + {idx}\n"
+            )
+            for idx in range(120)
+        }
+        repo = fixtures.create_temp_repo(files)
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        base_env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_MODEL": "local",
+        }
+
+        initial = _run_cli(["index", str(repo), "--json"], base_env, timeout=240)
+        assert initial.returncode == 0, initial.stderr
+        baseline_status = _run_cli(["status", "--json"], base_env, timeout=60)
+        assert baseline_status.returncode == 0, baseline_status.stderr
+        baseline_payload = _parse_json_payload(baseline_status.stdout)
+        assert baseline_payload["needs_reindex"] is False
+
+        paused_env = {
+            **base_env,
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_MS": "3000",
+        }
+        interrupted = subprocess.Popen(
+            [sys.executable, "-m", "gloggur.cli.main", "index", str(repo), "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=paused_env,
+        )
+        try:
+            saw_unhealthy = False
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                status = _run_cli(["status", "--json"], base_env, timeout=60)
+                assert status.returncode == 0, status.stderr
+                payload = _parse_json_payload(status.stdout)
+                if payload["needs_reindex"] is True:
+                    saw_unhealthy = True
+                    break
+                time.sleep(0.05)
+            assert saw_unhealthy, "Did not observe metadata invalidation window"
+        finally:
+            interrupted.terminate()
+            interrupted.wait(timeout=15)
+
+        after_interrupt_status = _run_cli(["status", "--json"], base_env, timeout=60)
+        assert after_interrupt_status.returncode == 0, after_interrupt_status.stderr
+        after_interrupt_payload = _parse_json_payload(after_interrupt_status.stdout)
+        assert after_interrupt_payload["needs_reindex"] is True
+
+        search_after_interrupt = _run_cli(
+            ["search", "handler_99", "--json", "--top-k", "5"],
+            base_env,
+            timeout=60,
+        )
+        assert search_after_interrupt.returncode == 0, search_after_interrupt.stderr
+        search_payload = _parse_json_payload(search_after_interrupt.stdout)
+        metadata = search_payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["needs_reindex"] is True
+
+        recovery = _run_cli(["index", str(repo), "--json"], base_env, timeout=240)
+        assert recovery.returncode == 0, recovery.stderr
+        final_status = _run_cli(["status", "--json"], base_env, timeout=60)
+        assert final_status.returncode == 0, final_status.stderr
+        final_payload = _parse_json_payload(final_status.stdout)
+        assert final_payload["needs_reindex"] is False

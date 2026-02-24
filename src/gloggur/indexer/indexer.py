@@ -44,6 +44,8 @@ class Indexer:
         """Index all supported files under a repository root."""
         start = time.time()
         self.cache.delete_index_metadata()
+        # Test-only hook to make interruption windows deterministic.
+        self._maybe_pause_after_metadata_delete()
         indexed_files = 0
         indexed_symbols = 0
         skipped_files = 0
@@ -70,6 +72,20 @@ class Indexer:
             skipped_files=skipped_files,
             duration_ms=duration_ms,
         )
+
+    @staticmethod
+    def _maybe_pause_after_metadata_delete() -> None:
+        """Pause after metadata invalidation when enabled for integration tests."""
+        raw_value = os.getenv("GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_MS")
+        if not raw_value:
+            return
+        try:
+            pause_ms = int(raw_value)
+        except ValueError:
+            return
+        if pause_ms <= 0:
+            return
+        time.sleep(pause_ms / 1000.0)
 
     def index_file(self, path: str) -> Optional[int]:
         """Index a file: hash content, parse symbols, update cache/vector store, return count."""

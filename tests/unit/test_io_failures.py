@@ -34,13 +34,21 @@ def test_classify_io_error_os_cases(exc: OSError, expected: str) -> None:
         (sqlite3.OperationalError("unable to open database file"), "path_not_writable"),
         (sqlite3.OperationalError("permission denied"), "permission_denied"),
         (sqlite3.OperationalError("disk I/O error"), "unknown_io_error"),
+        (
+            sqlite3.DatabaseError("database disk image is malformed"),
+            "unknown_io_error",
+        ),
+        (
+            sqlite3.DatabaseError("attempt to write a readonly database"),
+            "read_only_filesystem",
+        ),
     ],
 )
-def test_classify_io_error_sqlite_operational_cases(
-    exc: sqlite3.OperationalError,
+def test_classify_io_error_sqlite_cases(
+    exc: sqlite3.DatabaseError,
     expected: str,
 ) -> None:
-    """Classify common sqlite operational failures into stable category labels."""
+    """Classify sqlite operational/database failures into stable category labels."""
     assert classify_io_error(exc) == expected
 
 
