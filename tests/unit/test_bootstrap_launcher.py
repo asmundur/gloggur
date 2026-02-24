@@ -144,6 +144,53 @@ def test_build_launch_plan_returns_missing_python_when_no_candidates(
     assert plan.error_code == "missing_python"
 
 
+def test_build_launch_plan_returns_missing_venv_when_venv_missing_and_system_unhealthy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = str(tmp_path)
+    monkeypatch.setattr(
+        bootstrap_launcher,
+        "_resolve_system_candidates",
+        lambda _env: ["/usr/bin/python3"],
+    )
+
+    def fake_probe(
+        candidate_type: str,
+        interpreter: str,
+        module: str,
+        repo_root: str,
+        env: dict[str, str],
+        required_imports: list[str],
+    ) -> bootstrap_launcher.CandidateProbe:
+        _ = module, repo_root, env, required_imports
+        if candidate_type == "venv":
+            return _probe(
+                candidate_type,
+                interpreter,
+                healthy=False,
+                exists=False,
+                reason="interpreter_not_found",
+            )
+        return _probe(
+            candidate_type,
+            interpreter,
+            healthy=False,
+            exists=True,
+            reason="broken_environment",
+        )
+
+    monkeypatch.setattr(bootstrap_launcher, "_probe_candidate", fake_probe)
+    plan = bootstrap_launcher.build_launch_plan(
+        args=["status", "--json"],
+        repo_root=repo_root,
+        env={},
+    )
+
+    assert plan.ready is False
+    assert plan.error_code == "missing_venv"
+
+
 def test_build_launch_plan_returns_missing_package_when_imports_fail(
     tmp_path: Path,
     monkeypatch,

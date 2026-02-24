@@ -44,6 +44,29 @@ scripts/gloggur status --json
 - prefers `.venv/bin/python` when healthy
 - otherwise falls back to system Python with repo-root `PYTHONPATH`
 - returns structured `--json` failures with `operation=preflight`
+- is the canonical command for worktree-local agent/dev flows (no PATH assumptions)
+
+Optional fast cache hydration from another workspace:
+
+```bash
+# fastest (same machine): symlink the cache
+scripts/bootstrap_gloggur_env.sh --seed-cache-from /path/to/other/workspace --seed-cache-mode symlink
+
+# isolated copy if you do not want shared cache state
+scripts/bootstrap_gloggur_env.sh --seed-cache-from /path/to/other/workspace --seed-cache-mode copy
+```
+
+Use `copy` mode when symlink targets may be read-only in your execution environment.
+
+Offline-friendly full bootstrap from another workspace (venv + cache):
+
+```bash
+scripts/bootstrap_gloggur_env.sh \
+  --seed-venv-from /path/to/other/workspace \
+  --seed-venv-mode symlink \
+  --seed-cache-from /path/to/other/workspace \
+  --seed-cache-mode symlink
+```
 
 ## Quickstart
 
@@ -221,6 +244,13 @@ Search results are returned as JSON:
 scripts/bootstrap_gloggur_env.sh
 scripts/gloggur status --json
 .venv/bin/pytest
+```
+
+If you want bare `gloggur` on PATH in a local shell session, activate `.venv` first:
+
+```bash
+source .venv/bin/activate
+gloggur status --json
 ```
 
 If bootstrap/preflight fails with `--json`, error payloads include:

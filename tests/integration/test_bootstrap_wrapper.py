@@ -140,4 +140,4 @@ def test_wrapper_reports_soft_preflight_timing_on_warm_path() -> None:
     first_ms = int(first_payload["preflight_ms"])
     second_ms = int(second_payload["preflight_ms"])
     assert first_ms >= 0
-    assert second_ms < 2000
+    assert second_ms < 200

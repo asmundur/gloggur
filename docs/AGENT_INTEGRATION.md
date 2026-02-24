@@ -10,6 +10,24 @@ Before first use in a fresh worktree:
 scripts/bootstrap_gloggur_env.sh
 ```
 
+Optional cache hydration for faster first run:
+
+```bash
+scripts/bootstrap_gloggur_env.sh --seed-cache-from /path/to/other/workspace --seed-cache-mode symlink
+```
+
+If symlink targets are read-only in your runtime, switch to `--seed-cache-mode copy`.
+
+If network/package installs are unavailable, seed both `.venv` and cache from a healthy workspace:
+
+```bash
+scripts/bootstrap_gloggur_env.sh \
+  --seed-venv-from /path/to/other/workspace \
+  --seed-venv-mode symlink \
+  --seed-cache-from /path/to/other/workspace \
+  --seed-cache-mode symlink
+```
+
 Agent wrapper entrypoint:
 
 ```bash
@@ -27,28 +45,28 @@ scripts/gloggur <command> --json
 
 1. **Create or refresh the index**:
    ```bash
-   gloggur index . --json
+   scripts/gloggur index . --json
    ```
    Optional one-time setup for background save-triggered indexing:
    ```bash
-   gloggur watch init . --json
-   gloggur watch start --daemon --json
+   scripts/gloggur watch init . --json
+   scripts/gloggur watch start --daemon --json
    ```
 2. **Locate relevant code** with semantic search:
    ```bash
-   gloggur search "<query>" --top-k 5 --json
+   scripts/gloggur search "<query>" --top-k 5 --json
    ```
 3. **Confirm coverage**:
    ```bash
-   gloggur status --json
+   scripts/gloggur status --json
    ```
    Watcher runtime health:
    ```bash
-   gloggur watch status --json
+   scripts/gloggur watch status --json
    ```
 4. **Inspect docstrings (optional but recommended for documentation changes)**:
    ```bash
-   gloggur inspect . --json
+   scripts/gloggur inspect . --json
    ```
    Inspection skips unchanged files by default; add `--force` to reinspect everything.
 
