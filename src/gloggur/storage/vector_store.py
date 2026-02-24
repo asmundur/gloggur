@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
+from gloggur.io_failures import wrap_io_error
 from gloggur.models import Symbol
 
 
@@ -45,7 +46,14 @@ class VectorStore:
         self._fallback_order: List[str] = []
         self._fallback_path = os.path.join(self.config.cache_dir, "vectors.npy")
         self._faiss_available = self._check_faiss()
-        os.makedirs(self.config.cache_dir, exist_ok=True)
+        try:
+            os.makedirs(self.config.cache_dir, exist_ok=True)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="create vector cache directory",
+                path=self.config.cache_dir,
+            ) from exc
         self.load()
 
     def add_vectors(self, symbols: Iterable[Symbol]) -> None:
@@ -138,7 +146,14 @@ class VectorStore:
         if self._faiss_available and self._index is not None:
             import faiss
 
-            faiss.write_index(self._index, self.config.index_path)
+            try:
+                faiss.write_index(self._index, self.config.index_path)
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="write faiss index file",
+                    path=self.config.index_path,
+                ) from exc
             self._remove_file(self._fallback_path)
             return
 
@@ -151,7 +166,14 @@ class VectorStore:
                 [self._fallback_vectors[symbol_id] for symbol_id in self._fallback_order],
                 dtype="float32",
             )
-            np.save(self._fallback_path, matrix)
+            try:
+                np.save(self._fallback_path, matrix)
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="write fallback vector matrix",
+                    path=self._fallback_path,
+                ) from exc
         else:
             self._remove_file(self._fallback_path)
         self._touch_index_placeholder()
@@ -233,8 +255,15 @@ class VectorStore:
             "symbol_to_vector_id": self._symbol_to_vector_id,
             "fallback_order": self._fallback_order,
         }
-        with open(self.config.id_map_path, "w", encoding="utf8") as handle:
-            json.dump(payload, handle)
+        try:
+            with open(self.config.id_map_path, "w", encoding="utf8") as handle:
+                json.dump(payload, handle)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="write vector id map",
+                path=self.config.id_map_path,
+            ) from exc
 
     def _load_id_map(self) -> bool:
         """Read id mapping from disk. Returns True when legacy format is detected."""
@@ -245,8 +274,15 @@ class VectorStore:
         self._fallback_order = []
         if not os.path.exists(self.config.id_map_path):
             return False
-        with open(self.config.id_map_path, "r", encoding="utf8") as handle:
-            payload = json.load(handle)
+        try:
+            with open(self.config.id_map_path, "r", encoding="utf8") as handle:
+                payload = json.load(handle)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="read vector id map",
+                path=self.config.id_map_path,
+            ) from exc
         if isinstance(payload, list):
             for idx, symbol_id in enumerate(payload, start=1):
                 self._symbol_to_vector_id[str(symbol_id)] = idx
@@ -280,8 +316,12 @@ class VectorStore:
             return
         try:
             matrix = np.load(self._fallback_path)
-        except OSError:
-            return
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="read fallback vector matrix",
+                path=self._fallback_path,
+            ) from exc
         if matrix.size == 0:
             return
 
@@ -323,11 +363,20 @@ class VectorStore:
         db_path = os.path.join(self.config.cache_dir, "index.db")
         if not os.path.exists(db_path):
             return []
-        conn = sqlite3.connect(db_path)
+        try:
+            conn = sqlite3.connect(db_path)
+        except (OSError, sqlite3.OperationalError) as exc:
+            raise wrap_io_error(
+                exc,
+                operation="open cache database for vector migration",
+                path=db_path,
+            ) from exc
         try:
             rows = conn.execute(
                 "SELECT id, embedding_vector FROM symbols WHERE embedding_vector IS NOT NULL"
             ).fetchall()
+        except sqlite3.OperationalError:
+            return []
         finally:
             conn.close()
         vectors: List[tuple[str, List[float]]] = []
@@ -366,7 +415,16 @@ class VectorStore:
         """Best-effort file deletion."""
 
         if os.path.exists(path):
-            os.remove(path)
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="delete vector artifact",
+                    path=path,
+                ) from exc
 
     def _touch_index_placeholder(self) -> None:
         """Create a placeholder index file when FAISS is unavailable."""
@@ -376,5 +434,9 @@ class VectorStore:
         try:
             with open(self.config.index_path, "wb") as handle:
                 handle.write(b"FAISS_UNAVAILABLE\n")
-        except OSError:
-            pass
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="write vector index placeholder",
+                path=self.config.index_path,
+            ) from exc

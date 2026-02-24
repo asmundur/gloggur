@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Iterator, List, Optional
 
 from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
+from gloggur.io_failures import wrap_io_error
 
 SCHEMA_VERSION_KEY = "schema_version"
 INDEX_PROFILE_KEY = "index_profile"
@@ -65,19 +66,42 @@ class CacheManager:
         """Initialize the cache and ensure the database exists."""
         self.config = config
         self.last_reset_reason: Optional[str] = None
-        os.makedirs(self.config.cache_dir, exist_ok=True)
+        try:
+            os.makedirs(self.config.cache_dir, exist_ok=True)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="create cache directory",
+                path=self.config.cache_dir,
+            ) from exc
         self._init_db()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         """Context manager for a transactional database connection."""
-        conn = sqlite3.connect(self.config.db_path)
+        try:
+            conn = sqlite3.connect(self.config.db_path)
+        except (OSError, sqlite3.OperationalError) as exc:
+            raise wrap_io_error(
+                exc,
+                operation="open cache database connection",
+                path=self.config.db_path,
+            ) from exc
         conn.row_factory = sqlite3.Row
         try:
             yield conn
             conn.commit()
-        except Exception:
-            conn.rollback()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except sqlite3.OperationalError:
+                pass
+            if isinstance(exc, (OSError, sqlite3.OperationalError)):
+                raise wrap_io_error(
+                    exc,
+                    operation="execute cache database transaction",
+                    path=self.config.db_path,
+                ) from exc
             raise
         finally:
             conn.close()
@@ -405,6 +429,12 @@ class CacheManager:
                     )
             finally:
                 conn.close()
+        except sqlite3.OperationalError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="open cache database for schema validation",
+                path=self.config.db_path,
+            ) from exc
         except sqlite3.DatabaseError as exc:
             return _ResetPlan(
                 reason=f"cache corruption detected (sqlite open/integrity error: {exc})",
@@ -461,7 +491,14 @@ class CacheManager:
         db_path = self.config.db_path
         for path in (db_path, f"{db_path}-wal", f"{db_path}-shm"):
             if os.path.exists(path):
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except OSError as exc:
+                    raise wrap_io_error(
+                        exc,
+                        operation="delete cache database artifact",
+                        path=path,
+                    ) from exc
 
     def _quarantine_or_remove(self, path: str, timestamp: str) -> Optional[str]:
         """Move an artifact aside with a .corrupt suffix; fall back to deletion if rename fails."""

@@ -7,7 +7,8 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from functools import wraps
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import click
 import yaml
@@ -16,6 +17,7 @@ from gloggur.audit.docstring_audit import audit_docstrings
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.factory import create_embedding_provider
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
+from gloggur.io_failures import StorageIOError, format_io_error_message
 from gloggur.indexer.indexer import Indexer
 from gloggur.models import AuditFileMetadata
 from gloggur.parsers.registry import ParserRegistry
@@ -36,6 +38,35 @@ def _emit(payload: Dict[str, object], as_json: bool) -> None:
         click.echo(json.dumps(payload, indent=2))
     else:
         click.echo(payload)
+
+
+def _resolve_as_json(kwargs: dict[str, object]) -> bool:
+    """Resolve --json flag for command wrappers."""
+    if "as_json" in kwargs:
+        return bool(kwargs["as_json"])
+    context = click.get_current_context(silent=True)
+    if context is None:
+        return False
+    return bool(context.params.get("as_json"))
+
+
+def _with_io_failure_handling(
+    callback: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Wrap CLI callbacks with structured I/O error output and non-zero exit."""
+
+    @wraps(callback)
+    def _wrapped(*args: object, **kwargs: object) -> Any:
+        as_json = _resolve_as_json(kwargs)
+        try:
+            return callback(*args, **kwargs)
+        except StorageIOError as exc:
+            click.echo(format_io_error_message(exc), err=True)
+            if as_json:
+                _emit(exc.to_payload(), as_json=True)
+            raise click.exceptions.Exit(1) from exc
+
+    return _wrapped
 
 
 def _load_config(config_path: Optional[str]) -> GloggurConfig:
@@ -216,6 +247,7 @@ def _create_cache_manager(cache_dir: str) -> CacheManager:
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--embedding-provider", type=str, default=None)
+@_with_io_failure_handling
 def index(
     path: str,
     config_path: Optional[str],
@@ -260,6 +292,7 @@ def index(
 @click.option("--file", "file_path", type=str, default=None)
 @click.option("--top-k", type=int, default=10)
 @click.option("--stream", is_flag=True, default=False)
+@_with_io_failure_handling
 def search(
     query: str,
     config_path: Optional[str],
@@ -322,6 +355,7 @@ def search(
     multiple=True,
     help="Inspect only the specified symbol id(s). Can be repeated.",
 )
+@_with_io_failure_handling
 def inspect(
     path: str,
     config_path: Optional[str],
@@ -610,6 +644,7 @@ def watch_status(config_path: Optional[str], as_json: bool) -> None:
 @cli.command()
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@_with_io_failure_handling
 def status(config_path: Optional[str], as_json: bool) -> None:
     """Show index statistics and metadata."""
     config = _load_config(config_path)
@@ -647,6 +682,7 @@ def status(config_path: Optional[str], as_json: bool) -> None:
 @cli.command("clear-cache")
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@_with_io_failure_handling
 def clear_cache(config_path: Optional[str], as_json: bool) -> None:
     """Clear the index cache."""
     config = _load_config(config_path)
