@@ -118,13 +118,20 @@ class CacheManager:
         finally:
             conn.close()
 
-    def _configure_connection(self, conn: sqlite3.Connection) -> None:
+    def _configure_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        wrap_errors: bool = True,
+    ) -> None:
         """Apply SQLite pragmas for safer concurrent reader/writer behavior."""
         try:
             conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
             conn.execute(f"PRAGMA journal_mode = {SQLITE_JOURNAL_MODE}")
             conn.execute(f"PRAGMA synchronous = {SQLITE_SYNCHRONOUS}")
         except sqlite3.DatabaseError as exc:
+            if not wrap_errors:
+                raise
             raise wrap_io_error(
                 exc,
                 operation="configure cache database pragmas",
@@ -420,7 +427,7 @@ class CacheManager:
                 timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
             )
             try:
-                self._configure_connection(conn)
+                self._configure_connection(conn, wrap_errors=False)
                 integrity_issue = self._integrity_issue(conn)
                 if integrity_issue:
                     return _ResetPlan(
