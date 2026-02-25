@@ -420,6 +420,70 @@ def _create_cache_manager(cache_dir: str) -> CacheManager:
         ) from exc
 
 
+def _is_transient_status_race_error(error: StorageIOError) -> bool:
+    """Return True when status hit a transient table-missing race during concurrent recovery."""
+    detail = error.detail.lower()
+    if error.operation == "execute cache database transaction" and (
+        "no such table" in detail
+        or "database schema has changed" in detail
+    ):
+        return True
+    if error.operation == "configure cache database pragmas":
+        return True
+    return False
+
+
+def _remap_status_recovery_error(error: StorageIOError) -> StorageIOError:
+    """Remap transient status races to a stable recovery operation contract."""
+    return StorageIOError(
+        category=error.category,
+        operation="recover corrupted cache database",
+        path=error.path,
+        probable_cause=error.probable_cause,
+        remediation=list(error.remediation),
+        detail=error.detail,
+    )
+
+
+def _build_status_payload(config: GloggurConfig, cache: CacheManager) -> Dict[str, object]:
+    """Build status payload from cache metadata/profile state."""
+    expected_profile = config.embedding_profile()
+    metadata = cache.get_index_metadata()
+    schema_version = cache.get_schema_version()
+    cached_profile = cache.get_index_profile()
+    metadata_reason = _metadata_reindex_reason(metadata is not None)
+    profile_reason = _profile_reindex_reason(
+        metadata_present=metadata is not None,
+        cached_profile=cached_profile,
+        expected_profile=expected_profile,
+    )
+    reindex_reason = metadata_reason or profile_reason
+    if cache.last_reset_reason:
+        reset_label = "cache schema rebuilt"
+        if "cache corruption detected" in cache.last_reset_reason:
+            reset_label = "cache corruption recovered"
+        reindex_reason = (
+            f"{reset_label} "
+            f"({cache.last_reset_reason})"
+        )
+    return {
+        "cache_dir": config.cache_dir,
+        "metadata": metadata.model_dump(mode="json") if metadata else None,
+        "schema_version": schema_version,
+        "expected_index_profile": expected_profile,
+        "cached_index_profile": cached_profile,
+        "needs_reindex": metadata is None or reindex_reason is not None,
+        "reindex_reason": reindex_reason,
+        "total_symbols": len(cache.list_symbols()),
+    }
+
+
+def _create_status_payload(config: GloggurConfig) -> Dict[str, object]:
+    """Create cache manager and build status payload."""
+    cache = _create_cache_manager(config.cache_dir)
+    return _build_status_payload(config, cache)
+
+
 def _create_embedding_provider_for_command(
     config: GloggurConfig,
     *,
@@ -986,36 +1050,17 @@ def watch_status(config_path: Optional[str], as_json: bool) -> None:
 def status(config_path: Optional[str], as_json: bool) -> None:
     """Show index statistics and metadata."""
     config = _load_config(config_path)
-    expected_profile = config.embedding_profile()
-    cache = _create_cache_manager(config.cache_dir)
-    metadata = cache.get_index_metadata()
-    schema_version = cache.get_schema_version()
-    cached_profile = cache.get_index_profile()
-    metadata_reason = _metadata_reindex_reason(metadata is not None)
-    profile_reason = _profile_reindex_reason(
-        metadata_present=metadata is not None,
-        cached_profile=cached_profile,
-        expected_profile=expected_profile,
-    )
-    reindex_reason = metadata_reason or profile_reason
-    if cache.last_reset_reason:
-        reset_label = "cache schema rebuilt"
-        if "cache corruption detected" in cache.last_reset_reason:
-            reset_label = "cache corruption recovered"
-        reindex_reason = (
-            f"{reset_label} "
-            f"({cache.last_reset_reason})"
-        )
-    payload = {
-        "cache_dir": config.cache_dir,
-        "metadata": metadata.model_dump(mode="json") if metadata else None,
-        "schema_version": schema_version,
-        "expected_index_profile": expected_profile,
-        "cached_index_profile": cached_profile,
-        "needs_reindex": metadata is None or reindex_reason is not None,
-        "reindex_reason": reindex_reason,
-        "total_symbols": len(cache.list_symbols()),
-    }
+    try:
+        payload = _create_status_payload(config)
+    except StorageIOError as error:
+        if not _is_transient_status_race_error(error):
+            raise
+        try:
+            payload = _create_status_payload(config)
+        except StorageIOError as retry_error:
+            if _is_transient_status_race_error(retry_error):
+                raise _remap_status_recovery_error(retry_error) from retry_error
+            raise
     _emit(payload, as_json)
 
 

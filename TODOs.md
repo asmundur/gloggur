@@ -626,3 +626,228 @@ These tasks track reliability hardening for cache/index operations after the sch
   - runs verbose install (`python -m pip install ... -v`) and captures a bounded `pip freeze` snapshot
 - Added workflow regression coverage in `tests/unit/test_verification_workflow.py` asserting those diagnostics remain present.
 - Remaining closure gap: CI run evidence from at least one PR/branch showing all matrix jobs triggered.
+
+---
+
+# Agent Foundations Backlog
+
+These tasks operationalize a minimal, production-grade agent path for Glöggur: durable memory, bounded verify/repair loops, and explicit non-goals to avoid orchestration bloat.
+
+## F5 - Deterministic Index Fingerprinting and Session Continuity
+
+**Status**: planned
+**Priority**: P0
+**Owner**: codex
+
+**Problem**
+- Ephemeral environments (CI runners, Codex cloud, one-shot local sessions) lose continuity between runs.
+- Current index freshness checks do not provide a full session-resume contract tied to workspace state.
+- Agents can restart without reliable knowledge of whether prior semantic state is reusable.
+
+**Goal**
+- Make semantic continuity deterministic across sessions by introducing reproducible index fingerprints and resumable session metadata.
+
+**Scope**
+- Define a stable fingerprint schema for index compatibility (workspace path hash, file state digest, embedding profile, schema version, gloggur version).
+- Persist and expose fingerprint metadata in cache and CLI JSON output (`status`, `index`, `search`).
+- Add `session resume` metadata contract:
+  - last successful index fingerprint
+  - timestamp
+  - cache compatibility decision (`resume_ok` vs `reindex_required`)
+- Document how agents should consume this contract in ephemeral environments.
+
+**Out of Scope**
+- Remote artifact transport/upload implementation (covered by `F3`).
+- Multi-workspace memory graphing or cross-repo memory merge.
+
+**Acceptance Criteria**
+- `gloggur status --json` emits deterministic fingerprint and explicit resume decision fields.
+- Session resume decisions are reproducible for unchanged workspaces and invalidated for meaningful state/profile changes.
+- Compatibility mismatch reasons are machine-readable (not only free-text).
+- Documentation includes a copy-paste “resume decision” flow for agent runners.
+
+**Tests Required**
+- Unit tests for fingerprint generation stability across path ordering and metadata ordering variations.
+- Unit tests for compatibility decisions across schema/profile/version/file-state mismatch cases.
+- Integration tests that run `index` then `status`/`search` in a fresh process and verify stable resume behavior.
+- Regression tests for JSON payload schema stability.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## F6 - Incremental Rebuild Engine for Changed Files Only
+
+**Status**: planned
+**Priority**: P0
+**Owner**: codex
+
+**Problem**
+- Full reindexing penalizes iterative workflows and undermines agent turnaround in ephemeral environments.
+- Small file changes currently force disproportionately expensive index rebuild paths.
+
+**Goal**
+- Recompute only the symbols affected by changed files while preserving deterministic index correctness.
+
+**Scope**
+- Introduce change-set detection keyed by file content digest + symbol extraction result.
+- Rebuild only impacted file embeddings and metadata records; remove deleted/renamed file symbols safely.
+- Add clear CLI observability fields for incremental runs:
+  - files scanned
+  - files changed
+  - symbols added/updated/removed
+  - elapsed time
+- Add fallback to full rebuild on incompatible cache/profile/schema conditions.
+
+**Out of Scope**
+- Filesystem watcher redesign beyond existing watch-mode behavior.
+- Parallel/distributed indexing across hosts.
+
+**Acceptance Criteria**
+- Re-running `index` on unchanged workspace performs near-no-op update with explicit “no changes” reporting.
+- Single-file edits update only that file’s symbol rows/vectors and preserve search correctness.
+- File renames/deletions remove stale symbols with no ghost search hits.
+- Incompatible cache states automatically trigger safe full rebuild with explicit reason.
+
+**Tests Required**
+- Unit tests for change detection, rename/deletion handling, and no-op behavior.
+- Unit tests for vector/metadata consistency after incremental update paths.
+- Integration tests comparing incremental vs full rebuild search results on the same fixture repo.
+- Performance regression check asserting unchanged-run speedup versus baseline full rebuild.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## F7 - Retrieval Confidence Scoring and Bounded Re-query
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Retrieval currently lacks a first-class confidence signal for downstream agent decision logic.
+- Low-quality retrieval can flow directly into responses without a deterministic recovery step.
+
+**Goal**
+- Provide confidence-aware retrieval with one bounded repair step (`re-query`) when confidence is below threshold.
+
+**Scope**
+- Define and expose a retrieval confidence score per result set (and per top result where useful).
+- Add configurable low-confidence threshold and max re-query attempts (default: one retry).
+- Implement deterministic fallback strategy for re-query (for example: broaden query terms or increase top-k within limits).
+- Emit telemetry fields in JSON output:
+  - initial confidence
+  - retry performed (boolean)
+  - final confidence
+  - retry strategy used
+
+**Out of Scope**
+- Autonomous long-horizon planning loops.
+- Multi-agent negotiation or chain-of-thought planning frameworks.
+
+**Acceptance Criteria**
+- Retrieval output includes confidence and retry metadata in JSON mode.
+- Low-confidence queries trigger at most one bounded retry by default.
+- Retry path measurably improves confidence on a representative fixture set, or exits with explicit low-confidence marker.
+- Behavior is fully configurable and can be disabled.
+
+**Tests Required**
+- Unit tests for confidence calculation edge cases and threshold handling.
+- Unit tests for bounded retry enforcement and deterministic retry strategy selection.
+- Integration tests with synthetic low-signal queries verifying retry metadata and bounded behavior.
+- Regression tests for backward-compatible default CLI behavior when feature is disabled.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## F8 - Evidence Trace and Validation Hooks for Agent Outputs
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Agents using Glöggur can generate answers without a standardized trace of which symbols informed the output.
+- There is no common validation hook to gate low-grounding answers before they are emitted.
+
+**Goal**
+- Add lightweight verification primitives so answer generation can shift from “generate and hope” to “generate, validate, repair/flag.”
+
+**Scope**
+- Emit structured evidence trace payloads for retrieval-backed responses:
+  - symbol IDs
+  - file paths
+  - line spans (where available)
+  - confidence contribution
+- Add optional validation hook interface for agent integrators (pass/fail + reason + optional suggested repair action).
+- Define a minimal default validator:
+  - require at least one evidence item above confidence threshold
+  - fail closed with explicit low-grounding reason when unmet
+- Document reference integration flow for agents consuming `search --json`.
+
+**Out of Scope**
+- Full autonomous “self-healing” plan/execution frameworks.
+- Building a generalized policy engine for all agent safety concerns.
+
+**Acceptance Criteria**
+- JSON output can include an evidence trace payload tied to returned symbols.
+- Validation hook can block/flag ungrounded responses deterministically.
+- Default validator behavior is documented and test-covered.
+- Agent integration docs include one end-to-end example: retrieve -> validate -> emit/repair.
+
+**Tests Required**
+- Unit tests for evidence trace schema generation and normalization.
+- Unit tests for validator pass/fail behavior and reason codes.
+- Integration tests covering grounded vs ungrounded query scenarios.
+- Backward-compatibility tests ensuring trace/validation features are opt-in where required.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## F9 - Minimal Reference Agent Loop and Eval Harness
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Teams lack a canonical minimal integration showing how to use Glöggur without framework bloat.
+- Without a small eval harness, regressions in retrieval+validation quality are hard to detect.
+
+**Goal**
+- Ship a compact, framework-agnostic reference loop that demonstrates tool calling, bounded orchestration state, logging, retries, and tiny evals.
+
+**Scope**
+- Add a small reference agent example (single tool, single goal) that:
+  - calls Glöggur search
+  - applies confidence/validation checks
+  - retries once when allowed
+  - returns structured final output
+- Add structured logs for each step (`decide`, `act`, `validate`, `stop`).
+- Add timeout/retry guardrails with clear failure modes.
+- Add tiny eval suite (minimum 10 representative cases) with pass/fail summary output.
+
+**Out of Scope**
+- Multi-agent orchestration.
+- Complex planner modules or long-horizon autonomous task decomposition.
+
+**Acceptance Criteria**
+- Reference loop runs end-to-end in one command and documents setup expectations.
+- Example remains under a modest complexity budget (small code footprint, no heavy framework dependency).
+- Eval harness reports deterministic summary metrics and fails non-zero when below threshold.
+- Documentation explains how to adapt the loop to real tools without introducing planning complexity.
+
+**Tests Required**
+- Unit tests for loop-state transitions and retry/timeout guardrails.
+- Integration tests running the reference loop against a fixture repo.
+- Eval harness test verifying deterministic result formatting and failure exit semantics.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree

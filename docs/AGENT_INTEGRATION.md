@@ -10,6 +10,9 @@ Before first use in a fresh worktree:
 scripts/bootstrap_gloggur_env.sh
 ```
 
+Bootstrap now verifies index freshness automatically when `scripts/gloggur` is
+present (status -> optional index -> status verification).
+
 Optional cache hydration for faster first run:
 
 ```bash
@@ -69,6 +72,12 @@ scripts/gloggur <command> --json
    scripts/gloggur inspect . --json
    ```
    Inspection skips unchanged files by default; add `--force` to reinspect everything.
+
+Pytest defaults for this repo:
+
+- tests run in parallel (`-n auto --dist=loadscope`)
+- serial override for debugging: `pytest -n 0`
+- HTML coverage report is opt-in: `pytest --cov-report=html`
 
 ## Tips for effective searches
 

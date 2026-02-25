@@ -17,6 +17,21 @@ pip install -e ".[dev]"
 pytest
 ```
 
+Pytest defaults:
+
+- parallel workers enabled (`-n auto --dist=loadscope`)
+- coverage enabled with terminal + XML reports
+
+Useful overrides:
+
+```bash
+# Force serial execution
+pytest -n 0
+
+# Generate HTML coverage report on demand
+pytest --cov-report=html
+```
+
 ## Non-Test Verification Probes
 
 The scripts below are for manual verification and investigation (not the primary CI gate):

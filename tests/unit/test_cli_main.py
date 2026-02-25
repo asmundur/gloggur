@@ -196,6 +196,158 @@ def test_core_commands_surface_cache_recovery_failure_non_zero(
     assert "Traceback (most recent call last)" not in result.output
 
 
+def test_status_retries_transient_no_such_table_race_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """status should retry once when a concurrent recovery transiently drops tables mid-read."""
+    runner = CliRunner()
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    class FlakyCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> None:
+            raise StorageIOError(
+                category="unknown_io_error",
+                operation="execute cache database transaction",
+                path=str(tmp_path / "cache" / "index.db"),
+                probable_cause="An unclassified filesystem or database I/O failure occurred.",
+                remediation=["Retry with a known-good writable cache directory."],
+                detail="OperationalError: no such table: metadata",
+            )
+
+    class HealthyCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> None:
+            return None
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> None:
+            return None
+
+        def list_symbols(self) -> list[object]:
+            return []
+
+    cache_instances = [FlakyCache(), HealthyCache()]
+
+    def _next_cache(_cache_dir: str) -> object:
+        assert cache_instances
+        return cache_instances.pop(0)
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", _next_cache)
+
+    result = runner.invoke(cli_main.cli, ["status", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["cache_dir"] == str(tmp_path / "cache")
+    assert payload["needs_reindex"] is True
+    assert payload["total_symbols"] == 0
+    assert not cache_instances
+
+
+@pytest.mark.parametrize(
+    ("operation", "detail"),
+    [
+        ("execute cache database transaction", "OperationalError: no such table: metadata"),
+        ("configure cache database pragmas", "DatabaseError: file is not a database"),
+    ],
+)
+def test_status_remaps_repeated_transient_no_such_table_race(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    detail: str,
+) -> None:
+    """status should map repeated transient race failures to cache recovery operation semantics."""
+    runner = CliRunner()
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    class FlakyCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> None:
+            raise StorageIOError(
+                category="unknown_io_error",
+                operation=operation,
+                path=str(tmp_path / "cache" / "index.db"),
+                probable_cause="An unclassified filesystem or database I/O failure occurred.",
+                remediation=["Retry with a known-good writable cache directory."],
+                detail=detail,
+            )
+
+    call_count = {"value": 0}
+
+    def _flaky_cache(_cache_dir: str) -> FlakyCache:
+        call_count["value"] += 1
+        return FlakyCache()
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", _flaky_cache)
+
+    result = runner.invoke(cli_main.cli, ["status", "--json"])
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "io_failure"
+    assert error["category"] == "unknown_io_error"
+    assert error["operation"] == "recover corrupted cache database"
+    assert str(error["detail"]) == detail
+    assert call_count["value"] == 2
+    assert "Traceback (most recent call last)" not in result.output
+
+
+def test_status_remaps_transient_pragmas_error_during_cache_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """status should remap repeated transient cache-init pragma failures to recovery semantics."""
+    runner = CliRunner()
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    call_count = {"value": 0}
+
+    def _raise_pragmas_error(_cache_dir: str) -> object:
+        call_count["value"] += 1
+        raise StorageIOError(
+            category="unknown_io_error",
+            operation="configure cache database pragmas",
+            path=str(tmp_path / "cache" / "index.db"),
+            probable_cause="An unclassified filesystem or database I/O failure occurred.",
+            remediation=["Retry with a known-good writable cache directory."],
+            detail="DatabaseError: file is not a database",
+        )
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", _raise_pragmas_error)
+
+    result = runner.invoke(cli_main.cli, ["status", "--json"])
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "io_failure"
+    assert error["operation"] == "recover corrupted cache database"
+    assert str(error["detail"]) == "DatabaseError: file is not a database"
+    assert call_count["value"] == 2
+
+
 @pytest.mark.parametrize("as_json", [False, True])
 def test_status_surfaces_unrecoverable_corruption_recovery_guidance(
     monkeypatch: pytest.MonkeyPatch,

@@ -17,6 +17,7 @@ SEED_CACHE_MODE="${GLOGGUR_BOOTSTRAP_CACHE_MODE:-symlink}"
 SEED_CACHE_DIR=""
 SEED_CACHE_RESULT="not_requested"
 INSTALL_RESULT="not_run"
+INDEX_FRESHNESS_RESULT="not_checked"
 PYTHON_BIN=""
 
 is_truthy() {
@@ -130,6 +131,81 @@ seed_cache_if_requested() {
 
   cp -R "$SEED_CACHE_DIR" "$target_cache"
   SEED_CACHE_RESULT="copied:${SEED_CACHE_DIR}"
+}
+
+status_needs_reindex() {
+  local payload="$1"
+  local flattened=""
+  flattened="$(printf '%s' "$payload" | tr '\n' ' ')"
+  if printf '%s' "$flattened" | grep -Eq '"needs_reindex"[[:space:]]*:[[:space:]]*true'; then
+    return 0
+  fi
+  if printf '%s' "$flattened" | grep -Eq '"needs_reindex"[[:space:]]*:[[:space:]]*false'; then
+    return 1
+  fi
+  return 2
+}
+
+ensure_index_is_current() {
+  local wrapper="${REPO_ROOT}/scripts/gloggur"
+  if [[ ! -x "$wrapper" ]]; then
+    INDEX_FRESHNESS_RESULT="skipped_missing_wrapper"
+    return 0
+  fi
+
+  local status_output=""
+  if ! status_output="$("$wrapper" status --json 2>&1)"; then
+    >&2 echo "Index freshness check failed while running: scripts/gloggur status --json"
+    >&2 echo "$status_output"
+    exit 1
+  fi
+
+  local initial_needs_reindex=0
+  if status_needs_reindex "$status_output"; then
+    initial_needs_reindex=1
+  else
+    local status_rc=$?
+    if [[ $status_rc -eq 1 ]]; then
+      INDEX_FRESHNESS_RESULT="already_current"
+      return 0
+    fi
+    >&2 echo "Index freshness check failed: unable to parse needs_reindex from status output."
+    >&2 echo "$status_output"
+    exit 1
+  fi
+
+  if [[ $initial_needs_reindex -eq 0 ]]; then
+    INDEX_FRESHNESS_RESULT="already_current"
+    return 0
+  fi
+
+  local index_output=""
+  if ! index_output="$("$wrapper" index . --json 2>&1)"; then
+    >&2 echo "Index freshness check failed while running: scripts/gloggur index . --json"
+    >&2 echo "$index_output"
+    exit 1
+  fi
+
+  local post_status_output=""
+  if ! post_status_output="$("$wrapper" status --json 2>&1)"; then
+    >&2 echo "Index freshness verification failed while running: scripts/gloggur status --json"
+    >&2 echo "$post_status_output"
+    exit 1
+  fi
+
+  if status_needs_reindex "$post_status_output"; then
+    >&2 echo "Index freshness verification failed: cache still reports needs_reindex=true after refresh."
+    >&2 echo "$post_status_output"
+    exit 1
+  fi
+  local post_status_rc=$?
+  if [[ $post_status_rc -eq 2 ]]; then
+    >&2 echo "Index freshness verification failed: unable to parse needs_reindex from status output."
+    >&2 echo "$post_status_output"
+    exit 1
+  fi
+
+  INDEX_FRESHNESS_RESULT="refreshed"
 }
 
 detect_python() {
@@ -253,6 +329,7 @@ else
 fi
 
 seed_cache_if_requested
+ensure_index_is_current
 
 cat <<EOF
 Bootstrap complete.
@@ -260,6 +337,7 @@ Bootstrap complete.
 - Venv seed: ${SEED_VENV_RESULT}
 - Install step: ${INSTALL_RESULT}
 - Cache seed: ${SEED_CACHE_RESULT}
+- Index freshness: ${INDEX_FRESHNESS_RESULT}
 
 Next steps:
 1. scripts/gloggur status --json

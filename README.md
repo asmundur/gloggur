@@ -40,6 +40,10 @@ scripts/bootstrap_gloggur_env.sh
 scripts/gloggur status --json
 ```
 
+`scripts/bootstrap_gloggur_env.sh` now runs index freshness checks automatically
+when `scripts/gloggur` is available (`status --json`, optional `index . --json`,
+then a final `status --json` verification).
+
 `scripts/gloggur` now runs a preflight check before launching the CLI:
 - prefers `.venv/bin/python` when healthy
 - otherwise falls back to system Python with repo-root `PYTHONPATH`
@@ -146,6 +150,19 @@ Core behavior checks run in `pytest` (including smoke tests):
 
 ```bash
 .venv/bin/pytest
+```
+
+Default pytest settings run tests in parallel (`-n auto --dist=loadscope`).
+Use serial mode when debugging order-sensitive behavior:
+
+```bash
+.venv/bin/pytest -n 0
+```
+
+Coverage reports include terminal + XML by default. Generate HTML on demand:
+
+```bash
+.venv/bin/pytest --cov-report=html
 ```
 
 Additional verification probes are available for provider/edge/performance checks:
