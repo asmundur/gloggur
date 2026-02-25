@@ -58,6 +58,47 @@ def _prepare_seed_venv_workspace(tmp_path: Path) -> Path:
     return workspace_root
 
 
+def _prepare_fake_gloggur_wrapper(repo_root: Path) -> tuple[Path, Path]:
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    log_file = repo_root / "gloggur-invocations.log"
+    state_file = repo_root / "index-ready.flag"
+    wrapper = scripts_dir / "gloggur"
+    wrapper.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+log_file="${BOOTSTRAP_GLOGGUR_LOG_FILE:?}"
+state_file="${BOOTSTRAP_GLOGGUR_STATE_FILE:?}"
+printf '%s\\n' "$*" >> "$log_file"
+
+command_name="${1:-}"
+shift || true
+
+case "$command_name" in
+  status)
+    if [[ -f "$state_file" ]]; then
+      printf '{"needs_reindex": false}\\n'
+    else
+      printf '{"needs_reindex": true}\\n'
+    fi
+    ;;
+  index)
+    touch "$state_file"
+    printf '{"indexed_files": 1, "indexed_symbols": 1}\\n'
+    ;;
+  *)
+    printf '{"error": "unexpected command"}\\n'
+    exit 1
+    ;;
+esac
+""",
+        encoding="utf8",
+    )
+    wrapper.chmod(0o755)
+    return log_file, state_file
+
+
 def test_bootstrap_can_seed_cache_via_symlink(tmp_path: Path) -> None:
     repo_root, script_path = _prepare_temp_repo(tmp_path)
     source_workspace = _prepare_seed_source(tmp_path)
@@ -181,3 +222,34 @@ def test_bootstrap_rejects_invalid_seed_mode(tmp_path: Path) -> None:
 
     assert completed.returncode == 2
     assert "Invalid --seed-cache-mode" in completed.stderr
+
+
+def test_bootstrap_ensures_index_is_current_during_environment_setup(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    log_file, state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    env = os.environ.copy()
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert log_file.exists(), "bootstrap should invoke scripts/gloggur for index freshness checks"
+    invocations = log_file.read_text(encoding="utf8").splitlines()
+    assert invocations == [
+        "status --json",
+        "index . --json",
+        "status --json",
+    ]
