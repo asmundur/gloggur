@@ -7,17 +7,34 @@ script = '''
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-mkdir -p "$REPO_ROOT/.gloggur-cache"
 COMMON_GIT_DIR="$(git rev-parse --git-common-dir)"
 if [ "${COMMON_GIT_DIR#/}" = "${COMMON_GIT_DIR}" ]; then
   COMMON_GIT_DIR="$(cd "${REPO_ROOT}/${COMMON_GIT_DIR}" && pwd)"
 fi
+PRIMARY_REPO_ROOT="$(cd "${COMMON_GIT_DIR}/.." && pwd)"
+
+link_shared_path() {
+  LINK_PATH="$1"
+  TARGET_PATH="$2"
+  if [ "${LINK_PATH}" = "${TARGET_PATH}" ]; then
+    return 0
+  fi
+  if [ -L "${LINK_PATH}" ]; then
+    ln -sfn "${TARGET_PATH}" "${LINK_PATH}"
+  elif [ ! -e "${LINK_PATH}" ]; then
+    ln -s "${TARGET_PATH}" "${LINK_PATH}"
+  else
+    echo "Skipping symlink: ${LINK_PATH} exists and is not a symlink." >&2
+  fi
+}
 
 # 0) Shared cache + shared venv (once per repo, not once per worktree)
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
 mkdir -p "$PIP_CACHE_DIR"
-SHARED_VENV="${COMMON_GIT_DIR}/gloggur-venv"
+SHARED_CACHE="${PRIMARY_REPO_ROOT}/.gloggur-cache"
+SHARED_VENV="${PRIMARY_REPO_ROOT}/.venv"
 INSTALL_SPEC="${GLOGGUR_SETUP_INSTALL_SPEC:-.}"
+mkdir -p "${SHARED_CACHE}"
 
 if command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="$(command -v python3)"
@@ -56,7 +73,11 @@ if [ "${NEEDS_INSTALL}" -eq 1 ]; then
   printf '%s' "${REQ_HASH}" > "${STAMP_FILE}"
 fi
 
-# 1) Ensure user shell PATH is stable
+# 1) Ensure each worktree points at shared repo-root state
+link_shared_path "${REPO_ROOT}/.venv" "${SHARED_VENV}"
+link_shared_path "${REPO_ROOT}/.gloggur-cache" "${SHARED_CACHE}"
+
+# 2) Ensure user shell PATH is stable
 ZSHRC="$HOME/.zshrc"
 touch "$ZSHRC"
 BADLINE='export PATH="$PWD/scripts:$PATH"'
@@ -67,7 +88,7 @@ if grep -qxF "$BADLINE" "$ZSHRC"; then
   rm -f "$TMP_ZSHRC"
 fi
 
-# 2) Stable wrapper that works in any worktree
+# 3) Stable wrapper that works in any worktree
 BIN="$HOME/.local/bin"
 mkdir -p "$BIN"
 cat > "$BIN/gloggur" <<'SH'
@@ -94,7 +115,7 @@ exec "${REPO_ROOT}/scripts/gloggur" "$@"
 SH
 chmod +x "$BIN/gloggur"
 
-# 3) Install into a PATH dir Codex already sees (best effort)
+# 4) Install into a PATH dir Codex already sees (best effort)
 for CANDIDATE in /opt/homebrew/bin /usr/local/bin; do
   if [ -d "$CANDIDATE" ] && [ -w "$CANDIDATE" ]; then
     ln -sf "$BIN/gloggur" "$CANDIDATE/gloggur"
@@ -102,7 +123,7 @@ for CANDIDATE in /opt/homebrew/bin /usr/local/bin; do
   fi
 done
 
-# 4) Ensure ~/.local/bin is on PATH for zsh
+# 5) Ensure ~/.local/bin is on PATH for zsh
 BINLINE='export PATH="$HOME/.local/bin:$PATH"'
 grep -qxF "$BINLINE" "$ZSHRC" || echo "$BINLINE" >> "$ZSHRC"
 '''
