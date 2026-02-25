@@ -75,7 +75,17 @@ fi
 
 # 1) Ensure each worktree points at shared repo-root state
 link_shared_path "${REPO_ROOT}/.venv" "${SHARED_VENV}"
-link_shared_path "${REPO_ROOT}/.gloggur-cache" "${SHARED_CACHE}"
+if [ -L "${REPO_ROOT}/.gloggur-cache" ]; then
+  rm -f "${REPO_ROOT}/.gloggur-cache"
+fi
+if [ ! -e "${REPO_ROOT}/.gloggur-cache" ]; then
+  mkdir -p "${REPO_ROOT}/.gloggur-cache"
+  if [ -d "${SHARED_CACHE}" ]; then
+    cp -R "${SHARED_CACHE}/." "${REPO_ROOT}/.gloggur-cache/"
+  fi
+elif [ ! -d "${REPO_ROOT}/.gloggur-cache" ]; then
+  echo "Skipping cache seed: ${REPO_ROOT}/.gloggur-cache exists and is not a directory." >&2
+fi
 
 # 2) Ensure user shell PATH is stable
 ZSHRC="$HOME/.zshrc"
@@ -106,7 +116,8 @@ if [ "${COMMON_GIT_DIR#/}" = "${COMMON_GIT_DIR}" ]; then
   COMMON_GIT_DIR="$(cd "${REPO_ROOT}/${COMMON_GIT_DIR}" && pwd)"
 fi
 
-SHARED_VENV="${COMMON_GIT_DIR}/gloggur-venv"
+PRIMARY_REPO_ROOT="$(cd "${COMMON_GIT_DIR}/.." && pwd)"
+SHARED_VENV="${PRIMARY_REPO_ROOT}/.venv"
 if [ -x "${SHARED_VENV}/bin/python" ]; then
   export GLOGGUR_PREFLIGHT_VENV_PYTHON="${SHARED_VENV}/bin/python"
 fi
