@@ -7,6 +7,7 @@ script = '''
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+mkdir -p "$REPO_ROOT/.gloggur-cache"
 COMMON_GIT_DIR="$(git rev-parse --git-common-dir)"
 if [ "${COMMON_GIT_DIR#/}" = "${COMMON_GIT_DIR}" ]; then
   COMMON_GIT_DIR="$(cd "${REPO_ROOT}/${COMMON_GIT_DIR}" && pwd)"
