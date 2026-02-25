@@ -266,94 +266,10 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## Ordering / Priority
 
-1. R4 (bootstrap/preflight reliability) - ready for user decision.
-2. R2 (corruption recovery) - highest operational risk, easiest to misdiagnose.
-3. R1 (OS-level failure handling) - critical for CI/dev ergonomics and safe operations.
-4. R3 (concurrency hardening) - important for robustness, likely broader design work.
-5. F1 (watch mode) - product capability work after reliability hardening.
-
----
-
-## R4 - Perfect Reliability: Bootstrap, Preflight, and Self-Healing CLI Execution
-
-**Status**: ready_for_review
-**Priority**: P0
-**Owner**: codex
-
-**Problem**
-- Operator workflows depend on `gloggur` or `scripts/gloggur`, but bootstrap assumptions are fragile across fresh worktrees.
-- A missing `.venv` (or missing dependencies in `.venv`) causes immediate command failure before users can run `status`, `index`, or `search`.
-- Failures are currently binary ("works" or "command not found/no such file"), with limited recovery guidance.
-
-**Goal**
-- Make command execution reliable in fresh and long-lived worktrees by adding deterministic preflight checks and self-healing fallback behavior.
-
-**Scope**
-- Add a bootstrap preflight command path used by `scripts/gloggur` that validates:
-  - Python interpreter availability
-  - virtualenv presence/health
-  - required package importability (`gloggur`)
-- Implement safe fallback order with explicit logs:
-  - use repo `.venv` when healthy
-  - otherwise use system `python -m gloggur` when available
-  - otherwise fail with one actionable setup block
-- Add a single canonical setup helper (`scripts/bootstrap_gloggur_env.sh`) that can create/repair `.venv` and install required extras for local dev.
-- Add optional cache hydration to bootstrap helper so a fresh worktree can reuse an existing `.gloggur-cache` via symlink or copy for faster startup.
-- Add optional virtualenv hydration to bootstrap helper so a fresh worktree can reuse an existing `.venv` via symlink or copy when package installs are unavailable.
-- Ensure all early failures return structured JSON when `--json` is set, including:
-  - `error_code` (`missing_venv`, `missing_python`, `missing_package`, `broken_environment`)
-  - remediation steps
-  - detected environment details
-- Document expected bootstrap behavior and recovery flow in `README.md` and `docs/AGENT_INTEGRATION.md`.
-
-**Out of Scope**
-- Installing global system packages automatically without explicit user action.
-- Replacing the Python packaging strategy (`pipx` vs `pip` vs editable installs).
-
-**Acceptance Criteria**
-- In a fresh clone with no `.venv`, `scripts/gloggur status --json` either succeeds via fallback or fails with deterministic JSON + clear remediation.
-- In a broken `.venv` (missing `gloggur`), tool does not crash with raw traceback by default; it provides guided recovery.
-- In healthy env, startup overhead remains low (preflight <200ms on warm path).
-- Agent-required workflows in `AGENTS.md` run successfully after one documented bootstrap command, without assuming bare `gloggur` is on PATH.
-- `scripts/bootstrap_gloggur_env.sh --seed-cache-from <workspace>` supports deterministic cache hydration with `--seed-cache-mode symlink|copy`.
-- `scripts/bootstrap_gloggur_env.sh --seed-venv-from <workspace>` supports deterministic virtualenv hydration with `--seed-venv-mode symlink|copy`.
-
-**Tests Required**
-- Unit tests for preflight detection matrix:
-  - missing `.venv`
-  - missing interpreter
-  - missing package
-  - healthy environment
-- Integration tests for wrapper behavior:
-  - fallback to system python path
-  - non-dry-run fallback executes requested CLI command successfully
-  - deterministic failure payload with `--json`
-  - human-readable stderr guidance without `--json`
-  - warm-path timing checks for both fallback and healthy-venv preflight paths
-- Integration tests for bootstrap helper cache hydration:
-  - `--seed-cache-mode symlink`
-  - `--seed-cache-mode copy`
-- Integration tests for bootstrap helper virtualenv hydration:
-  - `--seed-venv-mode symlink`
-  - `--seed-venv-mode copy`
-- Regression test to ensure wrapper exit codes are stable across failure classes.
-
-**Progress Update (2026-02-24)**
-- Added integration coverage for non-dry-run fallback execution (`scripts/gloggur status --json` succeeds via system-python fallback when `.venv` is missing).
-- Added warm-path timing coverage for healthy-venv preflight selection.
-- Added bootstrap integration coverage for `--seed-venv-mode copy`.
-- Added bootstrap validation coverage for invalid seed-mode input handling.
-
-**Verification Procedure (How Evidence Is Obtained)**
-- Run:
-  - `.venv/bin/python -m pytest tests/unit/test_bootstrap_launcher.py tests/integration/test_bootstrap_wrapper.py tests/integration/test_bootstrap_env_script.py -q`
-  - `scripts/gloggur status --json`
-  - `GLOGGUR_PREFLIGHT_DRY_RUN=1 GLOGGUR_PREFLIGHT_VENV_PYTHON=/tmp/does-not-exist/bin/python GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS=$(command -v python3) GLOGGUR_PREFLIGHT_PROBE_MODULE=gloggur.bootstrap_launcher scripts/gloggur status --json`
-  - `GLOGGUR_PREFLIGHT_DRY_RUN=1 GLOGGUR_PREFLIGHT_VENV_PYTHON=$(command -v python3) GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS=$(command -v python3) GLOGGUR_PREFLIGHT_PROBE_MODULE=gloggur.bootstrap_launcher scripts/gloggur status --json`
-- Validate in test outputs/assertions:
-  - exit-code mapping remains stable across failure classes
-  - fallback and healthy-venv preflight paths both report warm-path timings under acceptance target
-  - bootstrap venv/cache seed modes behave deterministically for symlink/copy paths
+1. R2 (corruption recovery) - highest operational risk, easiest to misdiagnose.
+2. R1 (OS-level failure handling) - critical for CI/dev ergonomics and safe operations.
+3. R3 (concurrency hardening) - important for robustness, likely broader design work.
+4. F1 (watch mode) - product capability work after reliability hardening.
 
 ---
 
