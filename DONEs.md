@@ -39,6 +39,7 @@ Copy this section for completed tasks:
 
 **Follow-ups**
 - None
+
 ```
 
 ## D1 - Document Semantic Search Embedding Inputs
@@ -143,6 +144,125 @@ Copy this section for completed tasks:
 - Files: `/Users/auzi/.codex/worktrees/1f29/gloggur/tests/integration/test_bootstrap_env_script.py`
 - Files: `/Users/auzi/.codex/worktrees/1f29/gloggur/README.md`
 - Files: `/Users/auzi/.codex/worktrees/1f29/gloggur/docs/AGENT_INTEGRATION.md`
+- PR/commit/issues: local working tree changes
+
+**Follow-ups**
+- None
+
+## R2 - Recover Gracefully from Corrupted SQLite Cache Files
+
+**Completed On**: 2026-02-25
+**Completed By**: codex
+**Source**: moved from TODOs.md
+
+**Delivered**
+- Implemented corruption-first cache reset flow in `CacheManager` with `PRAGMA integrity_check(1)` probing and deterministic corruption classification at cache open.
+- Added automatic quarantine-or-delete recovery for corrupted `index.db` plus WAL/SHM sidecars, including idempotent `.corrupt.<timestamp>[.<n>]` naming and explicit one-line corruption notices.
+- Added explicit hard-failure path (`CacheRecoveryError`) when both quarantine and delete fail, with CLI mapping to structured `io_failure` output and actionable remediation for JSON and non-JSON surfaces.
+- Added provider-independent and concurrency-aware integration coverage to validate deterministic behavior when FAISS is unavailable and when two recovery attempts race on the same corrupted cache.
+
+**Behavioral Impact**
+- Core commands (`status`, `search`, `inspect`, `clear-cache`, `index`) now recover deterministically from corrupted SQLite cache artifacts without manual cleanup in normal cases.
+- If automatic recovery is impossible due to filesystem constraints, commands fail non-zero with stable machine-readable payloads and clear operator remediation, without traceback leakage.
+
+**Verification**
+- Commands run:
+  - `.venv/bin/python -m pytest tests/unit/test_cache.py tests/unit/test_cli_main.py tests/integration/test_cli.py tests/integration/test_corruption_recovery_integration.py -q`
+  - `tmp_dir=$(mktemp -d /tmp/gloggur-r2-manual-XXXXXX); printf 'broken sqlite bytes' > "$tmp_dir/index.db"; printf 'broken wal' > "$tmp_dir/index.db-wal"; printf 'broken shm' > "$tmp_dir/index.db-shm"; GLOGGUR_CACHE_DIR="$tmp_dir" gloggur status; rc=$?; echo "__RC=$rc"; ls -1 "$tmp_dir"`
+- Results:
+  - Targeted R2 test suite passed (`95 passed`) with no corruption-recovery regressions.
+  - Manual probe confirmed one-line corruption notice, quarantined DB artifact, sidecar cleanup, fresh DB rebuild, and successful deterministic status output (`__RC=0`).
+
+**Evidence**
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/indexer/cache.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/cli/main.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_cache.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_cli_main.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_cli.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_corruption_recovery_integration.py`
+- PR/commit/issues: local working tree changes
+
+**Follow-ups**
+- None
+
+## R1 - Harden OS-Level Failure Handling (Permissions, Read-only FS, Disk Full)
+
+**Completed On**: 2026-02-25
+**Completed By**: codex
+**Source**: moved from TODOs.md
+
+**Delivered**
+- Added stable I/O error taxonomy and payload contract (`permission_denied`, `read_only_filesystem`, `disk_full_or_quota`, `path_not_writable`, `unknown_io_error`) via `StorageIOError` + centralized classification/messaging in `src/gloggur/io_failures.py`.
+- Wrapped cache/vector/metadata/config filesystem and sqlite failure surfaces so core commands emit deterministic structured `io_failure` payloads (JSON) and actionable human-readable stderr (non-JSON), without traceback leakage.
+- Hardened `clear-cache` vector artifact handling:
+  - deterministic delete-failure mapping for vector artifacts,
+  - no pre-delete loading of existing vector artifacts (`VectorStore(..., load_existing=False)`), so malformed artifact files no longer block cleanup when removable.
+- Expanded core-command regression coverage across `status`, `search`, `inspect`, `clear-cache`, and `index` for all category mappings and config/db failure paths.
+
+**Behavioral Impact**
+- Hard I/O failures now fail non-zero with stable, machine-readable error contracts suitable for CI parsing.
+- Human-facing output now consistently includes operation/path, probable cause, remediation steps, and original exception detail.
+- Normal happy-path command flows remain operational while failure handling is stricter and more predictable.
+
+**Verification**
+- Commands run:
+  - `.venv/bin/python -m pytest tests/unit/test_io_failures.py tests/unit/test_cli_main.py tests/integration/test_io_failures_integration.py -q`
+  - `.venv/bin/python -m pytest tests/integration/test_cli.py::test_cli_index_search_status_and_clear_cache -q`
+  - `tmp_dir=$(mktemp -d /tmp/gloggur-r1-inspect-XXXXXX); cat > "$tmp_dir/sample.py" <<'PY' ... PY; GLOGGUR_CACHE_DIR="$tmp_dir/.cache" gloggur inspect "$tmp_dir" --json; echo "__RC=$?"`
+  - `GLOGGUR_CACHE_DIR=/dev/null/cache gloggur search add; echo "__RC=$?"`
+- Results:
+  - R1 verification suite passed (`93 passed`), including category matrix + integration checks for unwritable cache parent across core commands.
+  - Core happy-path integration flow passed (`1 passed`) confirming no regression in baseline index/search/status/clear-cache behavior.
+  - Manual inspect happy-path run returned structured JSON and exit `0`.
+  - Manual failure-path run returned deterministic actionable non-JSON message (`IO failure [path_not_writable]`) and exit `1`.
+
+**Evidence**
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/io_failures.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/cli/main.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/storage/vector_store.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/storage/metadata_store.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/indexer/cache.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_io_failures.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_cli_main.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_io_failures_integration.py`
+- PR/commit/issues: local working tree changes
+
+**Follow-ups**
+- None
+
+## R3 - Concurrency and Race-Condition Hardening for Cache/Vector Operations
+
+**Completed On**: 2026-02-25
+**Completed By**: codex
+**Source**: moved from TODOs.md
+
+**Delivered**
+- Implemented bounded cross-process writer serialization with explicit retry/backoff and deterministic lock-timeout error contracts in `src/gloggur/indexer/concurrency.py`.
+- Enforced partial-publication safety in index lifecycle: metadata invalidated before rebuild and republished only after artifact persistence, preventing false healthy status after interrupted writes.
+- Added integration coverage for concurrent writer contention (`index` and `clear-cache`) and deterministic non-hanging outcomes under active lock contention.
+- Documented explicit concurrency contract and operator tuning knobs in `docs/AGENT_INTEGRATION.md` (safe concurrency modes, lock semantics, timeout behavior, and consistency guarantees).
+
+**Behavioral Impact**
+- Concurrent usage now has deterministic writer behavior: one writer proceeds, contending writers fail fast with structured lock-timeout guidance rather than hanging.
+- Reader-visible status/search semantics remain consistent under interrupted indexing (`needs_reindex=true` until recovery index succeeds).
+- Operational behavior under contention is now documented and test-backed for agent workflows.
+
+**Verification**
+- Commands run:
+  - `.venv/bin/python -m pytest tests/unit/test_concurrency.py tests/integration/test_concurrency_integration.py -q`
+- Results:
+  - Concurrency verification suite passed (`7 passed`), covering:
+    - bounded backoff/retry schedule and timeout mapping (`operation=acquire cache write lock`)
+    - concurrent index contention with deterministic success/fail outcomes
+    - clear-cache contention fast-fail behavior
+    - interrupted index run preserving `needs_reindex=true` until recovery.
+
+**Evidence**
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/indexer/concurrency.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/indexer/indexer.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_concurrency.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_concurrency_integration.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/docs/AGENT_INTEGRATION.md`
 - PR/commit/issues: local working tree changes
 
 **Follow-ups**
