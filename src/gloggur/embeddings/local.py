@@ -14,6 +14,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
     """Embedding provider backed by sentence-transformers with a fallback."""
     def __init__(self, model_name: str, cache_dir: Optional[str] = None) -> None:
         """Configure the local embedding model and cache settings."""
+        self.provider = "local"
         self.model_name = model_name
         self.cache_dir = cache_dir
         self._model = None

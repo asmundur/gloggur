@@ -13,6 +13,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     """Embedding provider that calls the OpenAI embeddings API."""
     def __init__(self, model: str) -> None:
         """Initialize the OpenAI client and model selection."""
+        self.provider = "openai"
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY is not set")
@@ -20,18 +21,28 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         self.client = OpenAI(api_key=api_key)
         self._dimension: int | None = None
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
     def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""
-        response = self.client.embeddings.create(model=self.model, input=text)
+        try:
+            response = self.client.embeddings.create(model=self.model, input=text)
+        except Exception as exc:
+            raise RuntimeError(
+                f"OpenAI embedding request failed for model '{self.model}': {exc}"
+            ) from exc
         vector = response.data[0].embedding
         self._dimension = len(vector)
         return vector
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
         """Embed a batch of text strings."""
-        response = self.client.embeddings.create(model=self.model, input=list(texts))
+        try:
+            response = self.client.embeddings.create(model=self.model, input=list(texts))
+        except Exception as exc:
+            raise RuntimeError(
+                f"OpenAI embedding request failed for model '{self.model}': {exc}"
+            ) from exc
         vectors = [item.embedding for item in response.data]
         if vectors:
             self._dimension = len(vectors[0])

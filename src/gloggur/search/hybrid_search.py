@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from gloggur.embeddings.base import EmbeddingProvider
+from gloggur.embeddings.errors import wrap_embedding_error
 from gloggur.storage.metadata_store import MetadataStore
 from gloggur.storage.vector_store import VectorStore
 
@@ -39,7 +40,14 @@ class HybridSearch:
         """Search for symbols matching the query and filters."""
         start = time.time()
         filters = filters or {}
-        query_vector = self.embedding_provider.embed_text(query)
+        try:
+            query_vector = self.embedding_provider.embed_text(query)
+        except Exception as exc:
+            raise wrap_embedding_error(
+                exc,
+                provider=getattr(self.embedding_provider, "provider", "unknown"),
+                operation="embed query for search",
+            ) from exc
         if filters:
             results = self._search_filtered(query_vector, filters, top_k)
         else:

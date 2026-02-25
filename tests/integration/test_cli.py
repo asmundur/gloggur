@@ -4,13 +4,10 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 
 from gloggur.cli.main import cli
 from scripts.verification.fixtures import TestFixtures
-
-pytest.importorskip("faiss")
 
 
 def _write_fallback_marker(cache_dir: str) -> None:
@@ -103,7 +100,9 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         search_changed_payload = _parse_json_output(search_changed.output)
         assert search_changed_payload["results"] == []
         assert search_changed_payload["metadata"]["needs_reindex"] is True
-        assert "embedding profile changed" in str(search_changed_payload["metadata"]["reindex_reason"])
+        assert "embedding profile changed" in str(
+            search_changed_payload["metadata"]["reindex_reason"]
+        )
 
         rebuild_index = runner.invoke(cli, ["index", str(repo), "--json"], env=env_model_b)
         assert rebuild_index.exit_code == 0

@@ -57,6 +57,9 @@ def test_load_env_watch_values(monkeypatch) -> None:
     monkeypatch.setenv("GLOGGUR_WATCH_PATH", "/tmp/repo")
     monkeypatch.setenv("GLOGGUR_WATCH_MODE", "foreground")
     monkeypatch.setenv("GLOGGUR_WATCH_DEBOUNCE_MS", "150")
+    monkeypatch.setenv("GLOGGUR_WATCH_STATE_FILE", "/tmp/state.json")
+    monkeypatch.setenv("GLOGGUR_WATCH_PID_FILE", "/tmp/watch.pid")
+    monkeypatch.setenv("GLOGGUR_WATCH_LOG_FILE", "/tmp/watch.log")
 
     config = GloggurConfig.load(path=None)
 
@@ -64,6 +67,9 @@ def test_load_env_watch_values(monkeypatch) -> None:
     assert config.watch_path == "/tmp/repo"
     assert config.watch_mode == "foreground"
     assert config.watch_debounce_ms == 150
+    assert config.watch_state_file == "/tmp/state.json"
+    assert config.watch_pid_file == "/tmp/watch.pid"
+    assert config.watch_log_file == "/tmp/watch.log"
 
 
 def test_load_env_invalid_watch_debounce_keeps_default(monkeypatch) -> None:

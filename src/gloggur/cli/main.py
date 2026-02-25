@@ -15,10 +15,16 @@ import yaml
 
 from gloggur.audit.docstring_audit import audit_docstrings
 from gloggur.config import GloggurConfig
+from gloggur.embeddings.base import EmbeddingProvider
+from gloggur.embeddings.errors import (
+    EmbeddingProviderError,
+    format_embedding_error_message,
+    wrap_embedding_error,
+)
 from gloggur.embeddings.factory import create_embedding_provider
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.indexer.concurrency import cache_write_lock
-from gloggur.io_failures import StorageIOError, format_io_error_message
+from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
 from gloggur.indexer.indexer import Indexer
 from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
@@ -66,13 +72,49 @@ def _with_io_failure_handling(
             if as_json:
                 _emit(exc.to_payload(), as_json=True)
             raise click.exceptions.Exit(1) from exc
+        except EmbeddingProviderError as exc:
+            click.echo(format_embedding_error_message(exc), err=True)
+            if as_json:
+                _emit(exc.to_payload(), as_json=True)
+            raise click.exceptions.Exit(1) from exc
 
     return _wrapped
 
 
 def _load_config(config_path: Optional[str]) -> GloggurConfig:
     """Load configuration from file/env."""
-    return GloggurConfig.load(path=config_path)
+    load_path = _normalize_config_path(config_path)
+    error_path = "<auto-discovery>"
+    if load_path:
+        error_path = load_path
+    else:
+        for candidate in (".gloggur.yaml", ".gloggur.yml", ".gloggur.json"):
+            if os.path.exists(candidate):
+                error_path = os.path.abspath(candidate)
+                break
+    try:
+        return GloggurConfig.load(path=load_path)
+    except OSError as exc:
+        raise wrap_io_error(
+            exc,
+            operation="read gloggur config",
+            path=error_path,
+        ) from exc
+    except (json.JSONDecodeError, yaml.YAMLError, TypeError, ValueError) as exc:
+        raise StorageIOError(
+            category="unknown_io_error",
+            operation="read gloggur config",
+            path=error_path,
+            probable_cause=(
+                "The gloggur config file is malformed or uses an unsupported "
+                "top-level structure."
+            ),
+            remediation=[
+                f"Fix config syntax and top-level mapping structure in {error_path}.",
+                "Or pass --config <path> to a valid .gloggur.yaml/.gloggur.json file.",
+            ],
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
 
 
 def _normalize_config_path(config_path: Optional[str]) -> Optional[str]:
@@ -146,27 +188,45 @@ def _read_config_payload(path: str) -> Dict[str, object]:
     """Load config file payload (yaml/json), returning empty dict if missing."""
     if not os.path.exists(path):
         return {}
-    with open(path, "r", encoding="utf8") as handle:
-        if path.endswith(".json"):
-            payload = json.load(handle)
-        else:
-            payload = yaml.safe_load(handle) or {}
+    try:
+        with open(path, "r", encoding="utf8") as handle:
+            if path.endswith(".json"):
+                payload = json.load(handle)
+            else:
+                payload = yaml.safe_load(handle) or {}
+    except (OSError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise wrap_io_error(
+            exc,
+            operation="read watch config payload",
+            path=path,
+        ) from exc
     if isinstance(payload, dict):
         return payload
-    return {}
+    raise wrap_io_error(
+        ValueError("watch config payload must be a mapping"),
+        operation="read watch config payload",
+        path=path,
+    )
 
 
 def _write_config_payload(path: str, payload: Dict[str, object]) -> None:
     """Persist config payload using yaml/json by file extension."""
     directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    with open(path, "w", encoding="utf8") as handle:
-        if path.endswith(".json"):
-            json.dump(payload, handle, indent=2)
-            handle.write("\n")
-            return
-        yaml.safe_dump(payload, handle, sort_keys=False)
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf8") as handle:
+            if path.endswith(".json"):
+                json.dump(payload, handle, indent=2)
+                handle.write("\n")
+                return
+            yaml.safe_dump(payload, handle, sort_keys=False)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        raise wrap_io_error(
+            exc,
+            operation="write watch config payload",
+            path=path,
+        ) from exc
 
 
 def _read_pid_file(path: str) -> Optional[int]:
@@ -176,37 +236,130 @@ def _read_pid_file(path: str) -> Optional[int]:
     try:
         with open(path, "r", encoding="utf8") as handle:
             value = handle.read().strip()
-        if not value:
-            return None
-        return int(value)
-    except (OSError, ValueError):
+    except OSError as exc:
+        raise wrap_io_error(
+            exc,
+            operation="read watch pid file",
+            path=path,
+        ) from exc
+    if not value:
         return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise wrap_io_error(
+            exc,
+            operation="read watch pid file",
+            path=path,
+        ) from exc
 
 
 def _write_pid_file(path: str, pid: int) -> None:
     """Write PID to file."""
     directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    with open(path, "w", encoding="utf8") as handle:
-        handle.write(f"{pid}\n")
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf8") as handle:
+            handle.write(f"{pid}\n")
+    except OSError as exc:
+        raise wrap_io_error(
+            exc,
+            operation="write watch pid file",
+            path=path,
+        ) from exc
 
 
 def _remove_file(path: str) -> None:
     """Best-effort file removal helper."""
-    if os.path.exists(path):
-        os.remove(path)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as exc:
+        raise wrap_io_error(
+            exc,
+            operation="delete watch runtime file",
+            path=path,
+        ) from exc
 
 
 def _write_watch_state(path: str, updates: Dict[str, object]) -> None:
     """Merge watcher state updates and persist JSON."""
     directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    payload = load_watch_state(path)
-    payload.update(updates)
-    with open(path, "w", encoding="utf8") as handle:
-        json.dump(payload, handle, indent=2)
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        payload = load_watch_state(path)
+        payload.update(updates)
+        with open(path, "w", encoding="utf8") as handle:
+            json.dump(payload, handle, indent=2)
+    except (OSError, TypeError, ValueError) as exc:
+        raise wrap_io_error(
+            exc,
+            operation="write watch state file",
+            path=path,
+        ) from exc
+
+
+def _terminate_watch_process(process: object) -> None:
+    """Best-effort daemon cleanup for partially initialized watch starts."""
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    poll = getattr(process, "poll", None)
+    if callable(poll):
+        try:
+            if poll() is not None:
+                return
+        except Exception:
+            pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    wait = getattr(process, "wait", None)
+    if not callable(wait):
+        return
+    try:
+        wait(timeout=0.2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception:
+        return
+    poll = getattr(process, "poll", None)
+    if callable(poll):
+        try:
+            if poll() is not None:
+                return
+        except Exception:
+            pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return
+
+
+def _read_watch_state_for_status(path: str) -> Dict[str, object]:
+    """Read watch status state file with deterministic failure semantics."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise wrap_io_error(
+            exc,
+            operation="read watch state file",
+            path=path,
+        ) from exc
+    if isinstance(payload, dict):
+        return payload
+    raise wrap_io_error(
+        ValueError("watch state payload must be a mapping"),
+        operation="read watch state file",
+        path=path,
+    )
 
 
 def _create_runtime(
@@ -217,12 +370,10 @@ def _create_runtime(
 ) -> tuple[GloggurConfig, CacheManager, VectorStore]:
     """Create config/cache/vector runtime and apply profile rebuild logic."""
     resolved_config_path = _normalize_config_path(config_path)
-    overrides: Dict[str, str] = {}
-    if embedding_provider:
-        overrides["embedding_provider"] = embedding_provider
     config = _load_config(resolved_config_path)
-    if overrides:
-        config = GloggurConfig.load(path=resolved_config_path, overrides=overrides)
+    # Apply CLI provider override in-memory to avoid a second config-file read.
+    if embedding_provider:
+        config.embedding_provider = embedding_provider
     config = _normalize_watch_paths(config, resolved_config_path)
     expected_profile = config.embedding_profile()
     cache = _create_cache_manager(config.cache_dir)
@@ -253,7 +404,44 @@ def _create_cache_manager(cache_dir: str) -> CacheManager:
     try:
         return CacheManager(CacheConfig(cache_dir))
     except CacheRecoveryError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise StorageIOError(
+            category="unknown_io_error",
+            operation="recover corrupted cache database",
+            path=os.path.join(cache_dir, "index.db"),
+            probable_cause=(
+                "Automatic cache corruption recovery failed due to filesystem constraints "
+                "or artifact access issues."
+            ),
+            remediation=[
+                "Fix permissions for the cache path and remove corrupted cache artifacts manually.",
+                "Retry the command after cleanup, or run `gloggur clear-cache --json`.",
+            ],
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+
+
+def _create_embedding_provider_for_command(
+    config: GloggurConfig,
+    *,
+    require_provider: bool = False,
+) -> Optional[EmbeddingProvider]:
+    """Create embedding provider with deterministic error mapping."""
+    if not config.embedding_provider:
+        if require_provider:
+            raise wrap_embedding_error(
+                ValueError("embedding provider is not configured"),
+                provider="unknown",
+                operation="initialize embedding provider",
+            )
+        return None
+    try:
+        return create_embedding_provider(config)
+    except Exception as exc:
+        raise wrap_embedding_error(
+            exc,
+            provider=config.embedding_provider,
+            operation="initialize embedding provider",
+        ) from exc
 
 
 @cli.command()
@@ -279,7 +467,10 @@ def index(
             write_locked=True,
         )
         click.echo("Indexing...", err=True)
-        embedding = create_embedding_provider(config) if config.embedding_provider else None
+        embedding = _create_embedding_provider_for_command(
+            config,
+            require_provider=True,
+        )
         indexer = Indexer(
             config=config,
             cache=cache,
@@ -353,7 +544,10 @@ def search(
         }
         _emit(payload, as_json)
         return
-    embedding = create_embedding_provider(config)
+    embedding = _create_embedding_provider_for_command(
+        config,
+        require_provider=True,
+    )
     metadata_store = MetadataStore(MetadataStoreConfig(config.cache_dir))
     searcher = HybridSearch(embedding, vector_store, metadata_store)
     filters = {}
@@ -397,7 +591,7 @@ def inspect(
     config = _load_config(config_path)
     cache = _create_cache_manager(config.cache_dir)
     parser_registry = ParserRegistry()
-    embedding = create_embedding_provider(config) if config.embedding_provider else None
+    embedding = _create_embedding_provider_for_command(config)
     symbols = []
     code_texts: Dict[str, str] = {}
     processed_files: List[Tuple[str, str]] = []
@@ -477,6 +671,7 @@ def watch() -> None:
 @click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@_with_io_failure_handling
 def watch_init(path: str, config_path: Optional[str], as_json: bool) -> None:
     """Enable watch mode defaults in config for a repository path."""
 
@@ -506,6 +701,7 @@ def watch_init(path: str, config_path: Optional[str], as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--foreground", "force_foreground", is_flag=True, default=False)
 @click.option("--daemon", "force_daemon", is_flag=True, default=False)
+@_with_io_failure_handling
 def watch_start(
     config_path: Optional[str],
     as_json: bool,
@@ -536,11 +732,14 @@ def watch_start(
 
     pid_path = config.watch_pid_file
     pid = _read_pid_file(pid_path)
+    daemon_child = os.getenv("GLOGGUR_WATCH_DAEMON_CHILD") == "1"
+    if daemon_child and pid == os.getpid():
+        pid = None
     if is_process_running(pid):
         _emit({"started": False, "reason": "already_running", "pid": pid}, as_json)
         return
 
-    embedding = create_embedding_provider(config) if config.embedding_provider else None
+    embedding = _create_embedding_provider_for_command(config)
     service = WatchService(
         config=config,
         embedding_provider=embedding,
@@ -551,29 +750,129 @@ def watch_start(
     if mode == "daemon":
         log_file = config.watch_log_file
         log_dir = os.path.dirname(log_file)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
+        try:
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="prepare watch log directory",
+                path=log_dir or log_file,
+            ) from exc
         cmd = [sys.executable, "-m", "gloggur.cli.main", "watch", "start", "--foreground"]
         if resolved_config_path:
             cmd.extend(["--config", resolved_config_path])
-        with open(log_file, "a", encoding="utf8") as log_handle:
-            process = subprocess.Popen(
-                cmd,
-                stdout=log_handle,
-                stderr=log_handle,
-                start_new_session=True,
+        child_env = os.environ.copy()
+        child_env["GLOGGUR_WATCH_DAEMON_CHILD"] = "1"
+        try:
+            log_handle = open(log_file, "a", encoding="utf8")
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="open watch log file",
+                path=log_file,
+            ) from exc
+        try:
+            with log_handle:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log_handle,
+                    stderr=log_handle,
+                    start_new_session=True,
+                    env=child_env,
+                )
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="spawn watch daemon process",
+                path=sys.executable,
+            ) from exc
+        time.sleep(0.05)
+        daemon_exit_code = process.poll()
+        if daemon_exit_code is not None:
+            try:
+                _remove_file(pid_path)
+            except StorageIOError:
+                pass
+            try:
+                _write_watch_state(
+                    config.watch_state_file,
+                    {
+                        "running": False,
+                        "status": "failed_startup",
+                        "pid": process.pid,
+                        "watch_path": watch_path,
+                        "stopped_at": utc_now_iso(),
+                        "last_error": (
+                            f"watch daemon exited early with code {daemon_exit_code}"
+                        ),
+                    },
+                )
+            except StorageIOError:
+                pass
+            raise StorageIOError(
+                category="unknown_io_error",
+                operation="verify watch daemon startup",
+                path=log_file,
+                probable_cause="Watch daemon exited before reporting a running state.",
+                remediation=[
+                    "Inspect the watch log file for startup errors and traceback details.",
+                    "Fix configuration/dependency issues and rerun `gloggur watch start --daemon --json`.",
+                ],
+                detail=f"RuntimeError: watch daemon exited early with code {daemon_exit_code}",
             )
-        _write_pid_file(pid_path, process.pid)
-        _write_watch_state(
-            config.watch_state_file,
-            {
-                "running": True,
-                "status": "starting",
-                "pid": process.pid,
-                "watch_path": watch_path,
-                "last_heartbeat": utc_now_iso(),
-            },
-        )
+        try:
+            _write_pid_file(pid_path, process.pid)
+            _write_watch_state(
+                config.watch_state_file,
+                {
+                    "running": True,
+                    "status": "starting",
+                    "pid": process.pid,
+                    "watch_path": watch_path,
+                    "last_heartbeat": utc_now_iso(),
+                },
+            )
+        except Exception:
+            _terminate_watch_process(process)
+            try:
+                _remove_file(pid_path)
+            except StorageIOError:
+                pass
+            raise
+        daemon_exit_code = process.poll()
+        if daemon_exit_code is not None:
+            try:
+                _remove_file(pid_path)
+            except StorageIOError:
+                pass
+            try:
+                _write_watch_state(
+                    config.watch_state_file,
+                    {
+                        "running": False,
+                        "status": "failed_startup",
+                        "pid": process.pid,
+                        "watch_path": watch_path,
+                        "stopped_at": utc_now_iso(),
+                        "last_error": (
+                            f"watch daemon exited early with code {daemon_exit_code}"
+                        ),
+                    },
+                )
+            except StorageIOError:
+                pass
+            raise StorageIOError(
+                category="unknown_io_error",
+                operation="verify watch daemon startup",
+                path=log_file,
+                probable_cause="Watch daemon exited before reporting a stable running state.",
+                remediation=[
+                    "Inspect the watch log file for startup errors and traceback details.",
+                    "Fix configuration/dependency issues and rerun `gloggur watch start --daemon --json`.",
+                ],
+                detail=f"RuntimeError: watch daemon exited early with code {daemon_exit_code}",
+            )
         _emit(
             {
                 "started": True,
@@ -605,6 +904,7 @@ def watch_start(
 @watch.command("stop")
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@_with_io_failure_handling
 def watch_stop(config_path: Optional[str], as_json: bool) -> None:
     """Stop watcher process identified by pid file."""
 
@@ -625,7 +925,14 @@ def watch_stop(config_path: Optional[str], as_json: bool) -> None:
         return
 
     assert pid is not None
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        raise wrap_io_error(
+            exc,
+            operation="signal watch process",
+            path=config.watch_pid_file,
+        ) from exc
     for _ in range(30):
         if not is_process_running(pid):
             break
@@ -649,6 +956,7 @@ def watch_stop(config_path: Optional[str], as_json: bool) -> None:
 @watch.command("status")
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@_with_io_failure_handling
 def watch_status(config_path: Optional[str], as_json: bool) -> None:
     """Show watcher process and heartbeat status."""
 
@@ -656,7 +964,7 @@ def watch_status(config_path: Optional[str], as_json: bool) -> None:
     config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
     pid = _read_pid_file(config.watch_pid_file)
     running = is_process_running(pid)
-    state = load_watch_state(config.watch_state_file)
+    state = _read_watch_state_for_status(config.watch_state_file)
     payload: Dict[str, object] = {
         "watch_enabled": config.watch_enabled,
         "watch_path": os.path.abspath(config.watch_path),
@@ -722,7 +1030,10 @@ def clear_cache(config_path: Optional[str], as_json: bool) -> None:
     with cache_write_lock(config.cache_dir):
         cache = _create_cache_manager(config.cache_dir)
         cache.clear()
-        vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
+        vector_store = VectorStore(
+            VectorStoreConfig(config.cache_dir),
+            load_existing=False,
+        )
         vector_store.clear()
     _emit({"cleared": True, "cache_dir": config.cache_dir}, as_json)
 

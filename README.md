@@ -159,8 +159,36 @@ python scripts/run_provider_probe.py  # Embedding providers
 python scripts/run_edge_bench.py  # Edge cases & performance
 ```
 
+Provider verification checklist (OpenAI + Gemini):
+
+```bash
+# Deterministic mocked provider selection + index/search flow
+.venv/bin/python -m pytest \
+  tests/integration/test_provider_cli_integration.py \
+  tests/unit/test_embeddings.py \
+  tests/unit/test_embeddings_factory.py \
+  tests/unit/test_run_provider_probe.py -q
+
+# Optional live provider smoke probe (requires API keys)
+python scripts/run_provider_probe.py --format markdown
+```
+
 See `docs/VERIFICATION.md` for detailed documentation.
 See `docs/AGENT_INTEGRATION.md` for agent integration guidance.
+
+## Python Support Policy
+
+Verification lanes in `.github/workflows/verification.yml` are split into required and provisional tiers:
+
+- Required (blocking): `3.10`, `3.11`, `3.12`, `3.13`
+- Provisional (non-blocking): `3.14`
+
+`3.14` remains provisional while dependency/runtime compatibility stabilizes across the full stack.
+Graduation criteria for `3.14` to required:
+
+- at least two consecutive green CI runs on representative Python-touching PRs
+- no open `3.14`-specific compatibility bugs in project issue tracking
+- dependency install + pytest lane remains stable without temporary workarounds
 
 ## Configuration
 
@@ -214,6 +242,9 @@ Environment variables:
 - `GLOGGUR_WATCH_PATH`
 - `GLOGGUR_WATCH_DEBOUNCE_MS`
 - `GLOGGUR_WATCH_MODE`
+- `GLOGGUR_WATCH_STATE_FILE`
+- `GLOGGUR_WATCH_PID_FILE`
+- `GLOGGUR_WATCH_LOG_FILE`
 - `GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS`
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
 

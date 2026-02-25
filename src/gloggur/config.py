@@ -127,6 +127,12 @@ class GloggurConfig:
                 )
             except ValueError:
                 pass
+        if os.getenv("GLOGGUR_WATCH_STATE_FILE"):
+            data["watch_state_file"] = os.getenv("GLOGGUR_WATCH_STATE_FILE")
+        if os.getenv("GLOGGUR_WATCH_PID_FILE"):
+            data["watch_pid_file"] = os.getenv("GLOGGUR_WATCH_PID_FILE")
+        if os.getenv("GLOGGUR_WATCH_LOG_FILE"):
+            data["watch_log_file"] = os.getenv("GLOGGUR_WATCH_LOG_FILE")
         if os.getenv("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS"):
             try:
                 data["docstring_semantic_min_chars"] = int(

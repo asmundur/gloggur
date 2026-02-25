@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, List, Optional
 
+from gloggur.io_failures import wrap_io_error
 from gloggur.models import Symbol
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
@@ -70,21 +71,41 @@ class MetadataStore:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         """Context manager for database access."""
-        conn = sqlite3.connect(
-            self.config.db_path,
-            timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
-        )
+        try:
+            conn = sqlite3.connect(
+                self.config.db_path,
+                timeout=SQLITE_CONNECT_TIMEOUT_SECONDS,
+            )
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise wrap_io_error(
+                exc,
+                operation="open metadata database connection",
+                path=self.config.db_path,
+            ) from exc
         try:
             conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError as exc:
             conn.close()
-            raise
+            raise wrap_io_error(
+                exc,
+                operation="configure metadata database pragmas",
+                path=self.config.db_path,
+            ) from exc
         conn.row_factory = sqlite3.Row
         try:
             yield conn
             conn.commit()
-        except Exception:
-            conn.rollback()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except sqlite3.OperationalError:
+                pass
+            if isinstance(exc, (OSError, sqlite3.DatabaseError)):
+                raise wrap_io_error(
+                    exc,
+                    operation="execute metadata database transaction",
+                    path=self.config.db_path,
+                ) from exc
             raise
         finally:
             conn.close()

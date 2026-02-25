@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
+from gloggur.embeddings.errors import wrap_embedding_error
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.models import FileMetadata, IndexMetadata, Symbol
 from gloggur.parsers.registry import ParserRegistry
@@ -145,7 +146,14 @@ class Indexer:
         texts = [self._symbol_text(symbol, lines) for symbol in symbols]
         if not texts:
             return symbols
-        vectors = self.embedding_provider.embed_batch(texts)
+        try:
+            vectors = self.embedding_provider.embed_batch(texts)
+        except Exception as exc:
+            raise wrap_embedding_error(
+                exc,
+                provider=self.config.embedding_provider,
+                operation="embed symbol batch for indexing",
+            ) from exc
         for symbol, vector in zip(symbols, vectors):
             symbol.embedding_vector = vector
         return symbols

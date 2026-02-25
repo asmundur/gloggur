@@ -10,6 +10,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     """Embedding provider that calls the Gemini embeddings API."""
     def __init__(self, model: str, api_key: str | None = None) -> None:
         """Initialize the Gemini client and model selection."""
+        self.provider = "gemini"
         self.model = model
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
@@ -31,7 +32,12 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     def embed_batch(self, texts: Iterable[str]) -> List[List[float]]:
         """Embed a batch of text strings."""
         payload = list(texts)
-        response = self._client.models.embed_content(model=self.model, contents=payload)
+        try:
+            response = self._client.models.embed_content(model=self.model, contents=payload)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Gemini embedding request failed for model '{self.model}': {exc}"
+            ) from exc
         vectors = self._extract_vectors(response)
         if vectors:
             self._dimension = len(vectors[0])

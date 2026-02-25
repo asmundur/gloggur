@@ -99,6 +99,42 @@ These tasks track reliability hardening for cache/index operations after the sch
 - Added a core-command unit matrix (`status`, `search`, `inspect`, `clear-cache`, `index`) asserting structured JSON failure payloads for sqlite database-level failures.
 - Added an integration matrix for unwritable cache parent across core commands to validate non-zero exits and stable category families in realistic filesystem conditions.
 
+**Progress Update (2026-02-25)**
+- Added a full core-command/category matrix in `tests/unit/test_cli_main.py` asserting consistent classification for:
+  - `permission_denied`
+  - `read_only_filesystem`
+  - `disk_full_or_quota`
+  - `path_not_writable`
+  - `unknown_io_error`
+  across `status`, `search`, `inspect`, `clear-cache`, and `index`.
+- Added per-operation fault-injection coverage for vector artifact paths during `clear-cache`:
+  - permission-denied delete failure on `vectors.json` now asserted as structured `io_failure`.
+  - invalid `vectors.index` read now asserted as structured `io_failure` instead of raw traceback.
+- Added malformed vector artifact coverage for `clear-cache`:
+  - invalid JSON in `vectors.json` is now asserted as structured `io_failure` (`operation=read vector id map`).
+  - malformed fallback `vectors.npy` is now asserted as structured `io_failure` (`operation=read fallback vector matrix`).
+- Fixed `VectorStore.load()` so FAISS index read failures are wrapped deterministically (`operation=read faiss index file`) for stable CLI JSON/non-JSON handling.
+- Hardened vector-store load parsing paths so id-map decode/type failures and malformed fallback matrices are wrapped as deterministic `io_failure` payloads instead of uncaught exceptions.
+
+**Progress Update (2026-02-25, later)**
+- Corrected `clear-cache` behavior to avoid loading existing vector artifacts before deletion:
+  - `clear-cache` now initializes `VectorStore(..., load_existing=False)` and clears artifacts directly.
+  - malformed `vectors.index` / `vectors.json` / `vectors.npy` no longer block cache reset when files are removable.
+- Updated unit coverage in `tests/unit/test_cli_main.py` to assert successful artifact cleanup for malformed vector files (instead of failure-on-read semantics) while preserving explicit delete-failure coverage.
+- Wrapped metadata-store sqlite connection/pragma/transaction failures as structured `StorageIOError` payloads (`src/gloggur/storage/metadata_store.py`) so `search` surfaces stable `io_failure` JSON instead of raw sqlite exceptions.
+- Added regression coverage (`tests/unit/test_cli_main.py`) asserting `search --json` maps metadata-store connect failures to deterministic `io_failure` (`operation=open metadata database connection`).
+- Wrapped core config-load parse/file failures as structured `io_failure` (`operation=read gloggur config`) so malformed JSON/YAML config files fail deterministically without traceback leakage.
+- Added a core-command malformed-config matrix in `tests/unit/test_cli_main.py` asserting stable JSON `io_failure` payloads for `status`, `search`, `inspect`, `clear-cache`, and `index`.
+- Tightened malformed-config failure guidance in `src/gloggur/cli/main.py`:
+  - config parse/type failures now emit config-specific probable cause/remediation (fix syntax/top-level mapping), instead of generic cache-path I/O guidance.
+- Extended malformed-config regressions in `tests/unit/test_cli_main.py` to assert config-specific probable-cause/remediation text stability.
+- Removed a fragile double config-file read in CLI runtime creation:
+  - `_create_runtime` now applies `--embedding-provider` override in-memory instead of calling `GloggurConfig.load(...)` a second time.
+  - this removes a race window for unwrapped config I/O failures and keeps config error handling fully inside `_load_config`.
+- Added regression coverage in `tests/unit/test_cli_main.py` ensuring provider overrides do not trigger a second config load path.
+- Fixed `--config` path normalization in `_load_config` so `~` expansion is applied before file reads (all commands now accept tilde-prefixed config paths deterministically).
+- Added regression coverage in `tests/unit/test_cli_main.py` asserting `status --json --config ~/.gloggur.yaml` resolves and loads the expected config file.
+
 **Findings (2026-02-24)**
 - Deterministic failure semantics now cover a broader sqlite failure surface, including non-operational database exceptions.
 - Additional per-operation fault injection (for each write/delete operation inside each command) is still a useful follow-up for deeper exhaustiveness.
@@ -115,7 +151,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## R2 - Recover Gracefully from Corrupted SQLite Cache Files
 
-**Status**: in_progress
+**Status**: ready_for_review
 
 **Problem**
 - Current schema auto-reset handles many incompatibilities, but severe DB corruption requires explicit recovery guarantees.
@@ -160,8 +196,16 @@ These tasks track reliability hardening for cache/index operations after the sch
 - Failure-path unit/integration test where quarantine and delete both fail, asserting clear remediation guidance and non-zero exit from CLI surfaces.
 
 **Gap Notes (2026-02-24)**
-- Current corruption integration coverage lives in `tests/integration/test_cli.py`, which is gated by `pytest.importorskip("faiss")`; this leaves a coverage hole in no-FAISS environments.
-- Existing tests strongly cover `status` + `index` recovery/idempotence, but R2 closure should require explicit cross-command + concurrent-recovery assertions under backend-independent test conditions.
+- `tests/integration/test_cli.py` is no longer gated by `pytest.importorskip("faiss")`, so corruption recovery coverage is backend-independent at test collection time.
+
+**Progress Update (2026-02-25)**
+- Added backend-independent no-FAISS runtime integration coverage in `tests/integration/test_corruption_recovery_integration.py` by simulating `faiss` import failure in subprocess runs and asserting corruption recovery across core commands.
+- Added concurrent corruption-recovery-attempt coverage (`status --json` in parallel against the same corrupted cache) with bounded completion and deterministic non-traceback outcomes.
+- Tightened concurrent-recovery failure assertions to require parseable structured JSON `io_failure` payloads (no fallback text-only acceptance) when one concurrent command exits non-zero.
+- Added CLI-surface failure-path coverage in `tests/unit/test_cli_main.py`:
+  - core-command matrix ensures non-zero exit when cache recovery is unrecoverable
+  - explicit `status` assertions (JSON and non-JSON) verify remediation guidance when quarantine/delete both fail.
+- Updated cache-recovery error mapping in `src/gloggur/cli/main.py` so unrecoverable corruption recovery surfaces as structured `io_failure` payloads (including JSON mode) instead of plain `ClickException` text.
 
 ---
 
@@ -206,6 +250,11 @@ These tasks track reliability hardening for cache/index operations after the sch
   - metadata invalidation becomes observable during an in-flight index
   - forced interruption does not publish a false healthy state
   - recovery index restores healthy status markers
+
+**Progress Update (2026-02-25)**
+- Added mixed-writer contention coverage for `clear-cache` under an active cache write lock (`tests/integration/test_concurrency_integration.py`), asserting:
+  - bounded non-hanging completion
+  - deterministic lock-timeout `io_failure` payload (`operation=acquire cache write lock`).
 
 **Verification Procedure (How Evidence Is Obtained)**
 - Run:
@@ -310,7 +359,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## F1 - Configurable On-Save Incremental Indexing (Watch Mode)
 
-**Status**: blocked
+**Status**: in_progress
 **Priority**: P1
 **Owner**: codex
 
@@ -345,15 +394,55 @@ These tasks track reliability hardening for cache/index operations after the sch
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
 
-**Blockers (2026-02-20)**
-- Scope includes "watch config keys/env overrides", but env overrides for `watch_state_file`, `watch_pid_file`, and `watch_log_file` are not implemented in `src/gloggur/config.py`.
-- Do not move to `DONEs.md` until scope is either implemented fully or narrowed explicitly in this TODO item.
+**Blockers (2026-02-20, updated 2026-02-24)**
+- Resolved: env overrides for `watch_state_file`, `watch_pid_file`, and `watch_log_file` are now implemented in `src/gloggur/config.py` with unit coverage.
+- Still do not move to `DONEs.md` until full F1 scope and acceptance criteria are verified end-to-end.
+
+**Progress Update (2026-02-25)**
+- Fixed a daemon lifecycle race in `watch start` where the spawned foreground process could exit immediately as `already_running` after reading the parent-written PID file.
+- Added integration coverage for `watch init/start/status/stop` with real subprocess execution and env override verification for `watch_state_file`, `watch_pid_file`, and `watch_log_file` (`tests/integration/test_watch_cli_lifecycle_integration.py`).
+- Extended unit coverage to assert daemon child marker propagation during spawn (`tests/unit/test_cli_watch.py`).
+- Strengthened watch lifecycle integration assertions to require observed save-event processing and searchable post-save updates (using forced polling in test env for deterministic backend behavior).
+
+**Progress Update (2026-02-25, later)**
+- Hardened watch subcommands (`watch init/start/stop/status`) with `_with_io_failure_handling` so structured `io_failure` / `embedding_provider_error` payloads are emitted in `--json` mode instead of raw tracebacks.
+- Wrapped watch runtime file/config operations with deterministic I/O mapping:
+  - config payload read/write
+  - pid file write/delete
+  - watch state file write
+  - daemon log directory/file setup
+  - daemon process spawn failure path
+  - daemon early-exit startup verification path
+  - stop-signal race (`os.kill`) path.
+- Added daemon-startup cleanup for partial-initialization failures:
+  - if pid/state-file write fails after daemon spawn, watch start now attempts best-effort `SIGTERM` of the spawned process before surfacing structured `io_failure`.
+  - termination now escalates to bounded `SIGKILL` fallback when a wait-capable daemon does not exit after `SIGTERM`, reducing orphan-process risk during partial-startup failures.
+  - if state-file write fails after pid-file write, watch start now best-effort removes the just-written pid file to avoid stale-runtime artifacts.
+  - if daemon exits immediately after pid/state writes, watch start now detects the post-init exit, cleans stale pid file, writes `failed_startup` state, and returns structured `io_failure`.
+  - if daemon exits during the first startup liveness check (before pid file publication), watch start now records `failed_startup` state for deterministic observability.
+- Added unit regressions in `tests/unit/test_cli_watch.py` asserting structured JSON failures for:
+  - config write permission failure in `watch init`
+  - daemon log-directory permission failure in `watch start`
+  - daemon process spawn failure in `watch start`
+  - daemon early-exit startup failure in `watch start`
+  - daemon pid-write failure path terminates spawned process and returns stable `io_failure`.
+  - daemon state-write failure path terminates spawned process and removes stale pid file.
+  - daemon post-init early-exit path clears stale pid file, records failed-startup state, and returns stable `io_failure`.
+  - process-signal race failure in `watch stop`.
+- Added a guardrail for malformed watch config top-level payload type (non-mapping YAML/JSON now fails deterministically as structured `io_failure` in `watch init`, rather than silently coercing to `{}`).
+- Hardened watcher status observability by failing loudly on malformed runtime artifacts:
+  - malformed watch PID files now return structured `io_failure` (`operation=read watch pid file`) instead of silently reporting not-running.
+  - malformed watch state JSON now returns structured `io_failure` (`operation=read watch state file`) instead of being silently ignored.
+- Added regression tests in `tests/unit/test_cli_watch.py` covering malformed PID and malformed state-file status paths.
+- Normalized daemon startup failure-state payloads to include `watch_path` consistently across early-exit branches for deterministic status observability.
+- Added stale-runtime cleanup regression coverage for first-liveness-check daemon early-exit: pre-existing stale pid artifacts are now asserted to be removed on startup failure.
+- Added daemon-termination regression coverage for timed-out shutdown cleanup (`tests/unit/test_cli_watch.py`): `watch start --daemon` partial-init failure paths now assert `SIGTERM` then `SIGKILL` when the spawned process remains stuck.
 
 ---
 
 ## F2 - Validate OpenAI and Gemini Embedding Providers End-to-End
 
-**Status**: planned
+**Status**: in_progress
 **Priority**: P0
 **Owner**: codex
 
@@ -392,6 +481,19 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
+
+**Progress Update (2026-02-25)**
+- Added explicit actionable error mapping for provider API failures:
+  - OpenAI embedding calls now raise `RuntimeError` with model + original error detail on request failure.
+  - Gemini embedding calls now raise `RuntimeError` with model + original error detail on request failure.
+- Added unit coverage for OpenAI and Gemini API-failure message paths in `tests/unit/test_embeddings.py`.
+- Added deterministic integration coverage for provider selection and end-to-end CLI flow (`index` + `search`) using mocked OpenAI/Gemini providers in `tests/integration/test_provider_cli_integration.py`.
+- Added CLI-surface credential failure coverage for OpenAI and Gemini in JSON mode, asserting no traceback leakage and stable actionable `embedding_provider_error` payloads.
+- Hardened `search` provider-init path for invalid/unset provider config: missing provider now returns structured `embedding_provider_error` JSON/non-JSON output instead of assertion-style failure (`tests/unit/test_cli_main.py`).
+- Hardened `index` provider-init path for invalid/unset provider config: missing provider now returns structured `embedding_provider_error` JSON output instead of silently indexing without embeddings (`tests/unit/test_cli_main.py`).
+- Added provider verification checklist commands to `README.md` and fixed `scripts/run_provider_probe.py` to support current schema-v2 `vectors.json` format.
+- Corrected Gemini probe skip guidance in `scripts/run_provider_probe.py` to list all supported API-key env vars (`GLOGGUR_GEMINI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`) with unit regression coverage in `tests/unit/test_run_provider_probe.py`.
+- Remaining closure gap: collect at least one live-key smoke run artifact (outside CI) to confirm real provider account/config behavior in a non-mocked environment.
 
 ---
 
@@ -455,7 +557,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## F4 - Expand GitHub Actions Python Coverage to 3.13 and 3.14
 
-**Status**: planned
+**Status**: in_progress
 **Priority**: P1
 **Owner**: codex
 
@@ -507,3 +609,20 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
+
+**Progress Update (2026-02-25)**
+- Updated `.github/workflows/verification.yml` matrix to include Python `3.13` (required) and `3.14` (provisional/non-blocking via lane-level `continue-on-error`).
+- Added explicit runtime-lane diagnostics in CI output (`python-version`, `required-lane`) and disabled fail-fast so provisional failures do not hide required-lane results.
+- Documented Python support tiers and 3.14 graduation criteria in `README.md`.
+- Added a workflow-policy regression test (`tests/unit/test_verification_workflow.py`) asserting:
+  - required/provisional lane membership is stable
+  - `continue-on-error: ${{ !matrix.required }}`
+  - `fail-fast: false` (provisional failures cannot short-circuit required lanes)
+- Added local Python 3.13 smoke evidence on core subsets:
+  - `.venv/bin/python -m pytest tests/unit/test_cli_main.py tests/unit/test_concurrency.py tests/integration/test_watch_cli_lifecycle_integration.py -q`
+- Tightened dependency-step diagnostics in `.github/workflows/verification.yml`:
+  - prints `python --version` and `python -m pip --version`
+  - emits bounded `pip debug --verbose` output for resolver/environment triage
+  - runs verbose install (`python -m pip install ... -v`) and captures a bounded `pip freeze` snapshot
+- Added workflow regression coverage in `tests/unit/test_verification_workflow.py` asserting those diagnostics remain present.
+- Remaining closure gap: CI run evidence from at least one PR/branch showing all matrix jobs triggered.

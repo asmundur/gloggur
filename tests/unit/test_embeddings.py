@@ -78,6 +78,27 @@ def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatc
     assert provider.get_dimension() == 2
 
 
+def test_openai_provider_api_failure_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI failures should include model context and original detail."""
+
+    class FakeEmbeddings:
+        def create(self, model: str, input: object):  # noqa: ANN001
+            _ = model, input
+            raise RuntimeError("401 unauthorized")
+
+    class FakeOpenAI:
+        def __init__(self, api_key: str) -> None:
+            _ = api_key
+            self.embeddings = FakeEmbeddings()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
+    with pytest.raises(RuntimeError, match="OpenAI embedding request failed"):
+        OpenAIEmbeddingProvider.embed_text.__wrapped__(provider, "hello")
+
+
 def test_gemini_embed_text_and_dimension(monkeypatch: pytest.MonkeyPatch) -> None:
     """Gemini provider returns embeddings and dimension."""
     class FakeModels:
@@ -104,6 +125,32 @@ def test_gemini_embed_text_and_dimension(monkeypatch: pytest.MonkeyPatch) -> Non
     vector = provider.embed_text("hello")
     assert vector == [0.1, 0.2]
     assert provider.get_dimension() == 2
+
+
+def test_gemini_provider_api_failure_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gemini failures should include model context and original detail."""
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):  # noqa: ANN001
+            _ = model, contents
+            raise RuntimeError("permission denied")
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            _ = api_key
+            self.models = FakeModels()
+
+    genai_module = ModuleType("google.genai")
+    genai_module.Client = FakeClient
+    google_module = ModuleType("google")
+    google_module.genai = genai_module
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001")
+    with pytest.raises(RuntimeError, match="Gemini embedding request failed"):
+        provider.embed_text("hello")
 
 
 def test_gemini_extract_vectors_variants() -> None:

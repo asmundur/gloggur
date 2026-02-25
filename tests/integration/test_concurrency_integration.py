@@ -32,8 +32,7 @@ def _run_cli(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "gloggur.cli.main", *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
         timeout=timeout,
@@ -172,8 +171,60 @@ def test_index_lock_contention_fails_fast_without_hanging() -> None:
             holder.wait(timeout=10)
 
 
+def test_clear_cache_lock_contention_fails_fast_without_hanging() -> None:
+    """When writer lock is held, clear-cache should fail quickly with lock-timeout payload."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    _write_fallback_marker(cache_dir)
+    env = {
+        **os.environ,
+        "GLOGGUR_CACHE_DIR": cache_dir,
+        "GLOGGUR_LOCAL_MODEL": "local",
+    }
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os, time\n"
+                "from gloggur.indexer.concurrency import cache_write_lock\n"
+                "cache_dir = os.environ['GLOGGUR_CACHE_DIR']\n"
+                "ready = os.path.join(cache_dir, '.lock-held')\n"
+                "with cache_write_lock(cache_dir):\n"
+                "    with open(ready, 'w', encoding='utf8') as handle:\n"
+                "        handle.write('1')\n"
+                "    time.sleep(1.5)\n"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        ready_path = Path(cache_dir) / ".lock-held"
+        for _ in range(100):
+            if ready_path.exists():
+                break
+            time.sleep(0.01)
+        assert ready_path.exists()
+
+        blocked_env = {**env, "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": "100"}
+        start = time.monotonic()
+        blocked = _run_cli(["clear-cache", "--json"], blocked_env, timeout=10)
+        elapsed = time.monotonic() - start
+        assert blocked.returncode == 1
+        assert elapsed < 2.0
+        payload = _parse_json_payload(blocked.stdout)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["operation"] == "acquire cache write lock"
+        assert "timed out" in str(error["detail"])
+    finally:
+        holder.wait(timeout=10)
+
+
 def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
-    """If an index run is interrupted mid-rebuild, status/search must not advertise healthy state."""
+    """Interrupted index runs must not advertise healthy status/search state."""
     with TestFixtures() as fixtures:
         files = {
             f"module_{idx}.py": (

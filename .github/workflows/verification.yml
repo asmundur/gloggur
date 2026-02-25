@@ -10,14 +10,31 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ !matrix.required }}
     env:
       PYTHONUNBUFFERED: "1"
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        include:
+          - python-version: "3.10"
+            required: true
+          - python-version: "3.11"
+            required: true
+          - python-version: "3.12"
+            required: true
+          - python-version: "3.13"
+            required: true
+          - python-version: "3.14"
+            required: false
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Runtime lane policy
+        run: |
+          echo "python-version=${{ matrix.python-version }}"
+          echo "required-lane=${{ matrix.required }}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,8 +43,12 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python --version
+          python -m pip --version
+          python -m pip debug --verbose | sed -n '1,80p'
           python -m pip install --upgrade pip
-          pip install -e ".[dev,openai,gemini]"
+          python -m pip install -e ".[dev,openai,gemini]" -v
+          python -m pip freeze | sed -n '1,120p'
 
       - name: Run pytest
         run: pytest

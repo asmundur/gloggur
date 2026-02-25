@@ -40,12 +40,21 @@ def _vector_store_stats(cache_dir: str) -> Tuple[bool, str, Dict[str, object]]:
         return False, "Vector ID map file missing", {"id_map_path": id_map_path}
     try:
         with open(id_map_path, "r", encoding="utf8") as handle:
-            ids = json.load(handle)
+            payload = json.load(handle)
     except json.JSONDecodeError as exc:
         return False, "Vector ID map invalid JSON", {"error": str(exc), "id_map_path": id_map_path}
-    if not isinstance(ids, list) or not ids:
-        return False, "Vector ID map empty", {"id_count": len(ids) if isinstance(ids, list) else 0}
-    return True, "Vector store populated", {"id_count": len(ids)}
+    if isinstance(payload, list):
+        id_count = len(payload)
+    elif isinstance(payload, dict):
+        symbol_map = payload.get("symbol_to_vector_id")
+        if not isinstance(symbol_map, dict):
+            return False, "Vector ID map missing symbol_to_vector_id", {"id_map_path": id_map_path}
+        id_count = len(symbol_map)
+    else:
+        return False, "Vector ID map has unsupported schema", {"id_map_path": id_map_path}
+    if id_count <= 0:
+        return False, "Vector ID map empty", {"id_count": id_count}
+    return True, "Vector store populated", {"id_count": id_count}
 
 
 def _check_index_output(output: Dict[str, object]) -> Optional[Tuple[str, Dict[str, object]]]:
@@ -201,7 +210,10 @@ def test_gemini_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool
             env_key = candidate
             break
     if env_key is None:
-        return _missing_api_key_result("Test 2.3: Gemini Embeddings", "GLOGGUR_GEMINI_API_KEY or GEMINI_API_KEY")
+        return _missing_api_key_result(
+            "Test 2.3: Gemini Embeddings",
+            "GLOGGUR_GEMINI_API_KEY or GEMINI_API_KEY or GOOGLE_API_KEY",
+        )
 
     model_name = config.gemini_embedding_model
     with tempfile.TemporaryDirectory(prefix="gloggur-phase2-gemini-") as cache_dir:

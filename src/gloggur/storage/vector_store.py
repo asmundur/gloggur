@@ -37,7 +37,12 @@ class VectorStoreConfig:
 class VectorStore:
     """Vector index backed by FAISS with a numpy fallback."""
 
-    def __init__(self, config: VectorStoreConfig) -> None:
+    def __init__(
+        self,
+        config: VectorStoreConfig,
+        *,
+        load_existing: bool = True,
+    ) -> None:
         """Initialize the vector store and load existing data."""
 
         self.config = config
@@ -57,7 +62,8 @@ class VectorStore:
                 operation="create vector cache directory",
                 path=self.config.cache_dir,
             ) from exc
-        self.load()
+        if load_existing:
+            self.load()
 
     def add_vectors(self, symbols: Iterable[Symbol]) -> None:
         """Backward-compatible alias for upsert semantics."""
@@ -184,7 +190,14 @@ class VectorStore:
         if self._faiss_available and os.path.exists(self.config.index_path):
             import faiss
 
-            self._index = faiss.read_index(self.config.index_path)
+            try:
+                self._index = faiss.read_index(self.config.index_path)
+            except Exception as exc:  # pragma: no cover - faiss error types vary by build.
+                raise wrap_io_error(
+                    exc,
+                    operation="read faiss index file",
+                    path=self.config.index_path,
+                ) from exc
         else:
             self._load_fallback_vectors()
 
@@ -272,7 +285,7 @@ class VectorStore:
         try:
             with open(self.config.id_map_path, "r", encoding="utf8") as handle:
                 payload = json.load(handle)
-        except OSError as exc:
+        except (OSError, json.JSONDecodeError) as exc:
             raise wrap_io_error(
                 exc,
                 operation="read vector id map",
@@ -289,15 +302,29 @@ class VectorStore:
 
         raw_map = payload.get("symbol_to_vector_id", {})
         if isinstance(raw_map, dict):
-            for symbol_id, vector_id in raw_map.items():
-                numeric_id = int(vector_id)
-                self._symbol_to_vector_id[str(symbol_id)] = numeric_id
-                self._vector_id_to_symbol[numeric_id] = str(symbol_id)
+            try:
+                for symbol_id, vector_id in raw_map.items():
+                    numeric_id = int(vector_id)
+                    self._symbol_to_vector_id[str(symbol_id)] = numeric_id
+                    self._vector_id_to_symbol[numeric_id] = str(symbol_id)
+            except (TypeError, ValueError) as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="read vector id map",
+                    path=self.config.id_map_path,
+                ) from exc
         raw_next = payload.get("next_vector_id")
-        if raw_next is None:
-            self._next_vector_id = max(self._vector_id_to_symbol.keys(), default=0) + 1
-        else:
-            self._next_vector_id = int(raw_next)
+        try:
+            if raw_next is None:
+                self._next_vector_id = max(self._vector_id_to_symbol.keys(), default=0) + 1
+            else:
+                self._next_vector_id = int(raw_next)
+        except (TypeError, ValueError) as exc:
+            raise wrap_io_error(
+                exc,
+                operation="read vector id map",
+                path=self.config.id_map_path,
+            ) from exc
         raw_order = payload.get("fallback_order", [])
         if isinstance(raw_order, list):
             self._fallback_order = [str(symbol_id) for symbol_id in raw_order]
@@ -311,7 +338,7 @@ class VectorStore:
             return
         try:
             matrix = np.load(self._fallback_path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise wrap_io_error(
                 exc,
                 operation="read fallback vector matrix",
