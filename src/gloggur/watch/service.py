@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import os
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event
-from typing import Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
@@ -62,6 +62,18 @@ class BatchResult:
     error_count: int = 0
     indexed_symbols: int = 0
     last_error: Optional[str] = None
+    files_considered: int = 0
+    failed_reasons: Dict[str, int] = field(default_factory=dict)
+    failed_samples: List[str] = field(default_factory=list)
+
+    def record_failed(self, reason: str, sample: str) -> None:
+        """Track a failed file outcome with a stable reason and sample."""
+
+        self.error_count += 1
+        self.failed_reasons[reason] = self.failed_reasons.get(reason, 0) + 1
+        if len(self.failed_samples) < 5:
+            self.failed_samples.append(sample)
+        self.last_error = sample
 
     def as_dict(self) -> Dict[str, object]:
         """Convert to a JSON-friendly mapping."""
@@ -69,6 +81,12 @@ class BatchResult:
         return {
             "changed_files": self.changed_files,
             "deleted_files": self.deleted_files,
+            "files_considered": self.files_considered,
+            "indexed": self.indexed_files,
+            "unchanged": self.skipped_files,
+            "failed": self.error_count,
+            "failed_reasons": dict(self.failed_reasons),
+            "failed_samples": list(self.failed_samples),
             "indexed_files": self.indexed_files,
             "skipped_files": self.skipped_files,
             "error_count": self.error_count,
@@ -103,10 +121,13 @@ class WatchService:
         )
         self._supported_extensions = set(config.supported_extensions)
         self._stop_event = Event()
+        self._total_files_considered = 0
         self._total_indexed_files = 0
         self._total_indexed_symbols = 0
         self._total_skipped_files = 0
         self._total_errors = 0
+        self._total_failed_reasons: Dict[str, int] = {}
+        self._total_failed_samples: List[str] = []
 
     def run_forever(self, path: str) -> Dict[str, object]:
         """Watch filesystem changes and process until stopped."""
@@ -131,15 +152,30 @@ class WatchService:
                 if self._stop_event.is_set():
                     break
                 batch = self.process_batch(changes, watch_root=watch_root, watch_file=watch_file)
+                self._total_files_considered += batch.files_considered
                 self._total_indexed_files += batch.indexed_files
                 self._total_indexed_symbols += batch.indexed_symbols
                 self._total_skipped_files += batch.skipped_files
                 self._total_errors += batch.error_count
+                for reason, count in batch.failed_reasons.items():
+                    self._total_failed_reasons[reason] = (
+                        self._total_failed_reasons.get(reason, 0) + count
+                    )
+                for sample in batch.failed_samples:
+                    if len(self._total_failed_samples) >= 5:
+                        break
+                    self._total_failed_samples.append(sample)
                 self._write_state(
                     running=True,
                     watch_path=watch_root,
                     last_heartbeat=utc_now_iso(),
                     last_batch=batch.as_dict(),
+                    files_considered=self._total_files_considered,
+                    indexed=self._total_indexed_files,
+                    unchanged=self._total_skipped_files,
+                    failed=self._total_errors,
+                    failed_reasons=dict(self._total_failed_reasons),
+                    failed_samples=list(self._total_failed_samples),
                     indexed_files=self._total_indexed_files,
                     indexed_symbols=self._total_indexed_symbols,
                     skipped_files=self._total_skipped_files,
@@ -155,6 +191,12 @@ class WatchService:
                 watch_path=watch_root,
                 stopped_at=utc_now_iso(),
                 last_heartbeat=utc_now_iso(),
+                files_considered=self._total_files_considered,
+                indexed=self._total_indexed_files,
+                unchanged=self._total_skipped_files,
+                failed=self._total_errors,
+                failed_reasons=dict(self._total_failed_reasons),
+                failed_samples=list(self._total_failed_samples),
                 indexed_files=self._total_indexed_files,
                 indexed_symbols=self._total_indexed_symbols,
                 skipped_files=self._total_skipped_files,
@@ -164,6 +206,12 @@ class WatchService:
 
         return {
             "watch_path": watch_root,
+            "files_considered": self._total_files_considered,
+            "indexed": self._total_indexed_files,
+            "unchanged": self._total_skipped_files,
+            "failed": self._total_errors,
+            "failed_reasons": dict(self._total_failed_reasons),
+            "failed_samples": list(self._total_failed_samples),
             "indexed_files": self._total_indexed_files,
             "indexed_symbols": self._total_indexed_symbols,
             "skipped_files": self._total_skipped_files,
@@ -193,7 +241,7 @@ class WatchService:
                 if operations.get(path) != "deleted":
                     operations[path] = "changed"
 
-        result = BatchResult()
+        result = BatchResult(files_considered=len(operations))
         metadata_invalidated = False
 
         def _invalidate_metadata() -> None:
@@ -260,11 +308,15 @@ class WatchService:
         if not existing:
             result.skipped_files += 1
             return
-        invalidate_metadata()
-        if existing.symbols:
-            self.vector_store.remove_ids(existing.symbols)
-        self.cache.delete_symbols_for_file(path)
-        self.cache.delete_file_metadata(path)
+        try:
+            invalidate_metadata()
+            if existing.symbols:
+                self.vector_store.remove_ids(existing.symbols)
+            self.cache.delete_symbols_for_file(path)
+            self.cache.delete_file_metadata(path)
+        except Exception as exc:
+            result.record_failed("delete_error", f"{path}: {type(exc).__name__}: {exc}")
+            return
         result.deleted_files += 1
         result.indexed_files += 1
 
@@ -275,30 +327,23 @@ class WatchService:
         *,
         invalidate_metadata: Callable[[], None],
     ) -> None:
-        """Index a changed file if content hash changed."""
+        """Index a changed file and classify the terminal outcome."""
 
-        try:
-            with open(path, "r", encoding="utf8") as handle:
-                source = handle.read()
-        except (OSError, UnicodeDecodeError) as exc:
-            result.error_count += 1
-            result.last_error = f"{path}: {exc}"
-            return
-
-        existing = self.cache.get_file_metadata(path)
-        content_hash = Indexer._hash_content(source)
-        if existing and existing.content_hash == content_hash:
+        outcome = self.indexer.index_file_with_outcome(path)
+        if outcome.status == "unchanged":
             result.skipped_files += 1
+            return
+        if outcome.status == "failed":
+            invalidate_metadata()
+            reason = outcome.reason or "indexing_error"
+            detail = outcome.detail or "indexing failed"
+            result.record_failed(reason, f"{path}: {detail}")
             return
 
         invalidate_metadata()
-        count = self.indexer.index_file(path)
-        if count is None:
-            result.skipped_files += 1
-            return
         result.changed_files += 1
         result.indexed_files += 1
-        result.indexed_symbols += count
+        result.indexed_symbols += outcome.symbols_indexed
 
     def _in_scope(self, path: str, watch_root: str, watch_file: Optional[str]) -> bool:
         """Return True if a changed path belongs to the active watch scope."""

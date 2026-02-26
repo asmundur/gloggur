@@ -137,4 +137,9 @@ done
 # 5) Ensure ~/.local/bin is on PATH for zsh
 BINLINE='export PATH="$HOME/.local/bin:$PATH"'
 grep -qxF "$BINLINE" "$ZSHRC" || echo "$BINLINE" >> "$ZSHRC"
+
+# 6) Ensure worktree watch mode is initialized and running
+WATCH_CONFIG_PATH="${REPO_ROOT}/.gloggur.yaml"
+"${REPO_ROOT}/scripts/gloggur" watch init "${REPO_ROOT}" --config "${WATCH_CONFIG_PATH}" --json >/dev/null
+"${REPO_ROOT}/scripts/gloggur" watch start --config "${WATCH_CONFIG_PATH}" --daemon --json >/dev/null
 '''

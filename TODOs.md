@@ -86,6 +86,7 @@ These tasks track reliability hardening for cache/index operations after the sch
 - Unchanged content does not re-embed.
 - Deleted/renamed symbols do not appear as stale search hits.
 - Watch lifecycle commands report and manage running state predictably.
+- Worktree environment startup auto-initializes and starts watch mode (`watch init` + `watch start --daemon`) for the active worktree.
 
 **Tests Required**
 - Unit coverage for vector `remove_ids`/`upsert_vectors` and watcher processing behavior.
@@ -137,6 +138,10 @@ These tasks track reliability hardening for cache/index operations after the sch
 - Normalized daemon startup failure-state payloads to include `watch_path` consistently across early-exit branches for deterministic status observability.
 - Added stale-runtime cleanup regression coverage for first-liveness-check daemon early-exit: pre-existing stale pid artifacts are now asserted to be removed on startup failure.
 - Added daemon-termination regression coverage for timed-out shutdown cleanup (`tests/unit/test_cli_watch.py`): `watch start --daemon` partial-init failure paths now assert `SIGTERM` then `SIGKILL` when the spawned process remains stuck.
+
+**Progress Update (2026-02-26)**
+- Updated worktree environment setup in `.codex/environments/environment.toml` to auto-run `scripts/gloggur watch init <worktree> --config .gloggur.yaml --json` and `scripts/gloggur watch start --daemon --json` on startup.
+- Startup hook is fail-fast by design: environment setup now errors immediately if watch initialization or daemon start fails.
 
 ---
 
@@ -548,6 +553,133 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 - Unit tests for loop-state transitions and retry/timeout guardrails.
 - Integration tests running the reference loop against a fixture repo.
 - Eval harness test verifying deterministic result formatting and failure exit semantics.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+# Inspect Findings Backlog (2026-02-26 forced scan)
+
+Source command:
+- `gloggur inspect . --json --force --allow-partial`
+
+Observed problem output (snapshot):
+- `total warnings=618` across `reports_total=856`
+- warning mix: `Missing docstring=240`, `Low semantic similarity=378`
+- warning distribution: `src=197`, `tests=297`, `scripts=119` (tooling noise dominates)
+- source hotspots:
+  - missing docstrings: `bootstrap_launcher.py=23`, `io_failures.py=6`, `embeddings/errors.py=3`
+  - low-semantic warnings: `indexer/cache.py=27`, `storage/vector_store.py=20`, `cli/main.py=17`
+
+## F10 - Make Inspect Output Actionable by Default
+
+**Status**: planned
+**Priority**: P0
+**Owner**: codex
+
+**Problem**
+- Current forced inspect output is too noisy (`618` warnings) to be triaged efficiently.
+- Most warnings come from `tests/` and `scripts/`, which obscures production issues in `src/`.
+
+**Goal**
+- Make `inspect` produce high-signal output by default and preserve full-audit mode as opt-in.
+
+**Scope**
+- Add first-class path-class filters in `inspect` output and CLI options:
+  - default focus on `src/`
+  - explicit include switches for `tests/` and `scripts/`
+- Add grouped warning summaries in JSON payload:
+  - by warning type
+  - by top file offenders
+  - by path class (`src/tests/scripts`)
+- Keep backward compatibility for existing fields while adding summary fields.
+
+**Out of Scope**
+- Changing parser behavior or embedding model selection.
+- Automatically rewriting docstrings.
+
+**Acceptance Criteria**
+- `gloggur inspect . --json` returns source-focused output by default (no implicit `tests/` + `scripts/` flood).
+- `gloggur inspect . --json --include-tests --include-scripts` preserves full-audit behavior.
+- JSON payload includes deterministic grouped summary sections for triage automation.
+- Existing consumers of legacy fields (`warnings`, `reports`, `total`) continue to work.
+
+**Tests Required**
+- Unit tests for new filter flags and default scope behavior.
+- Unit tests for grouped summary payload shape and counts.
+- Integration tests validating source-only default and full-audit opt-in.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+## F11 - Burn Down Source Missing-Docstring Hotspots
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Forced scan found `36` missing-docstring warnings in `src/`, heavily concentrated in:
+  - `src/gloggur/bootstrap_launcher.py` (`23`)
+  - `src/gloggur/io_failures.py` (`6`)
+  - `src/gloggur/embeddings/errors.py` (`3`)
+- Missing docs on core runtime utilities reduce API clarity and weaken inspect signal quality.
+
+**Goal**
+- Eliminate source missing-docstring warnings for public/protected runtime interfaces.
+
+**Scope**
+- Add meaningful docstrings for module-level helpers, classes, and public methods in hotspot files first.
+- Ensure docstrings include behavior and failure semantics where relevant (especially bootstrap/io paths).
+- Run focused inspect checks on edited files to verify warning removal.
+
+**Out of Scope**
+- Docstring cleanup for `tests/` and `scripts/`.
+- Non-docstring style refactors.
+
+**Acceptance Criteria**
+- `gloggur inspect src/gloggur --json --force --allow-partial` reports `Missing docstring=0` for `src/gloggur/bootstrap_launcher.py`, `src/gloggur/io_failures.py`, and `src/gloggur/embeddings/errors.py`.
+- Added docstrings are specific enough to avoid “semantic filler” text and pass existing lint/test checks.
+
+**Tests Required**
+- Unit/integration tests already covering touched functions must still pass.
+- Add/adjust tests only if docstring-driven tooling behavior is changed.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+## F12 - Calibrate Semantic Warning Scoring for Source Code
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Forced scan produced `161` low-semantic warnings in `src/` with `28` negative scores, including critical files (`indexer/cache.py`, `storage/vector_store.py`, `cli/main.py`).
+- Current single-threshold behavior (`0.200`) likely over-flags legitimate docstrings and reduces trust in warnings.
+
+**Goal**
+- Improve precision of semantic warnings so “low similarity” is a reliable indicator instead of broad noise.
+
+**Scope**
+- Build a small labeled calibration set from current source hotspots (true-positive vs false-positive warnings).
+- Evaluate threshold strategies (global threshold tuning and/or symbol-kind-aware thresholds).
+- Implement calibrated scoring policy with explicit config defaults and explainability in output.
+
+**Out of Scope**
+- Replacing the embedding model in this task.
+- Expanding inspection into a full NLP quality system.
+
+**Acceptance Criteria**
+- On the same forced scan command, source low-semantic warnings are reduced by at least `40%` from the baseline (`161` -> `<=96`) without suppressing clearly poor docstrings in calibration fixtures.
+- JSON output includes enough score metadata to explain why warnings triggered under the calibrated policy.
+- Calibration behavior is deterministic and documented.
+
+**Tests Required**
+- Unit tests for threshold policy selection and edge cases.
+- Unit tests for score-to-warning classification under calibrated settings.
+- Integration regression test asserting warning-count reduction on a stable fixture corpus.
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree

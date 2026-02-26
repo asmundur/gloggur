@@ -513,12 +513,19 @@ def _create_embedding_provider_for_command(
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--embedding-provider", type=str, default=None)
+@click.option(
+    "--allow-partial",
+    is_flag=True,
+    default=False,
+    help="Exit zero even when some files fail to index.",
+)
 @_with_io_failure_handling
 def index(
     path: str,
     config_path: Optional[str],
     as_json: bool,
     embedding_provider: Optional[str],
+    allow_partial: bool,
 ) -> None:
     """Load config/runtime, index path, and emit summary counts."""
     resolved_config_path = _normalize_config_path(config_path)
@@ -544,27 +551,65 @@ def index(
         )
         if os.path.isdir(path):
             result = indexer.index_repository(path)
-            _emit(result.__dict__, as_json)
+            payload = result.as_payload()
+            _emit(payload, as_json)
+            if result.failed > 0 and not allow_partial:
+                raise click.exceptions.Exit(1)
             return
 
-        cache.delete_index_metadata()
-        indexed = indexer.index_file(path)
-        if vector_store and indexed is not None:
+        files_considered = 1
+        if any(path.endswith(ext) for ext in config.supported_extensions):
+            segments = set(os.path.normpath(os.path.abspath(path)).split(os.sep))
+            if any(excluded in segments for excluded in config.excluded_dirs):
+                files_considered = 0
+        else:
+            files_considered = 0
+        if files_considered:
+            cache.delete_index_metadata()
+        outcome = indexer.index_file_with_outcome(path) if files_considered else None
+        if vector_store and outcome and outcome.status == "indexed":
             vector_store.save()
-        metadata = IndexMetadata(
-            version=config.index_version,
-            total_symbols=len(cache.list_symbols()),
-            indexed_files=cache.count_files(),
-        )
-        cache.set_index_metadata(metadata)
-        cache.set_index_profile(config.embedding_profile())
+        if outcome and outcome.status != "failed":
+            metadata = IndexMetadata(
+                version=config.index_version,
+                total_symbols=len(cache.list_symbols()),
+                indexed_files=cache.count_files(),
+            )
+            cache.set_index_metadata(metadata)
+            cache.set_index_profile(config.embedding_profile())
+        failed_reasons: Dict[str, int] = {}
+        failed_samples: List[str] = []
+        indexed = 0
+        unchanged = 0
+        failed = 0
+        indexed_symbols = 0
+        if outcome:
+            if outcome.status == "indexed":
+                indexed = 1
+                indexed_symbols = outcome.symbols_indexed
+            elif outcome.status == "unchanged":
+                unchanged = 1
+            else:
+                failed = 1
+                reason = outcome.reason or "indexing_error"
+                failed_reasons[reason] = 1
+                detail = outcome.detail or "indexing failed"
+                failed_samples.append(f"{path}: {detail}")
         result = {
-            "indexed_files": 1 if indexed is not None else 0,
-            "indexed_symbols": indexed or 0,
-            "skipped_files": 0 if indexed is not None else 1,
+            "files_considered": files_considered,
+            "indexed": indexed,
+            "unchanged": unchanged,
+            "failed": failed,
+            "failed_reasons": failed_reasons,
+            "failed_samples": failed_samples,
+            "indexed_files": indexed,
+            "skipped_files": unchanged,
+            "indexed_symbols": indexed_symbols,
             "duration_ms": 0,
         }
         _emit(result, as_json)
+        if failed > 0 and not allow_partial:
+            raise click.exceptions.Exit(1)
 
 
 @cli.command()
@@ -643,6 +688,12 @@ def search(
     multiple=True,
     help="Inspect only the specified symbol id(s). Can be repeated.",
 )
+@click.option(
+    "--allow-partial",
+    is_flag=True,
+    default=False,
+    help="Exit zero even when some files fail inspection.",
+)
 @_with_io_failure_handling
 def inspect(
     path: str,
@@ -650,6 +701,7 @@ def inspect(
     as_json: bool,
     force: bool,
     symbol_ids: tuple[str, ...],
+    allow_partial: bool,
 ) -> None:
     """Run docstring inspection and emit warnings/reports."""
     config = _load_config(config_path)
@@ -659,8 +711,12 @@ def inspect(
     symbols = []
     code_texts: Dict[str, str] = {}
     processed_files: List[Tuple[str, str]] = []
-    skipped_files = 0
+    files_considered = 0
     inspected_files = 0
+    failed_files = 0
+    failed_reasons: Dict[str, int] = {}
+    failed_samples: List[str] = []
+    skipped_files = 0
     paths = [path]
     if os.path.isdir(path):
         paths = []
@@ -670,11 +726,28 @@ def inspect(
                 full_path = os.path.join(root, filename)
                 if any(full_path.endswith(ext) for ext in config.supported_extensions):
                     paths.append(full_path)
+    elif not any(path.endswith(ext) for ext in config.supported_extensions):
+        paths = []
+    else:
+        segments = set(os.path.normpath(os.path.abspath(path)).split(os.sep))
+        if any(excluded in segments for excluded in config.excluded_dirs):
+            paths = []
     for file_path in paths:
+        files_considered += 1
         try:
             with open(file_path, "r", encoding="utf8") as handle:
                 source = handle.read()
-        except (OSError, UnicodeDecodeError):
+        except UnicodeDecodeError as exc:
+            failed_files += 1
+            failed_reasons["decode_error"] = failed_reasons.get("decode_error", 0) + 1
+            if len(failed_samples) < 5:
+                failed_samples.append(f"{file_path}: {type(exc).__name__}: {exc}")
+            continue
+        except OSError as exc:
+            failed_files += 1
+            failed_reasons["read_error"] = failed_reasons.get("read_error", 0) + 1
+            if len(failed_samples) < 5:
+                failed_samples.append(f"{file_path}: {type(exc).__name__}: {exc}")
             continue
         content_hash = _hash_content(source)
         if not force:
@@ -684,8 +757,19 @@ def inspect(
                 continue
         parser_entry = parser_registry.get_parser_for_path(file_path)
         if not parser_entry:
+            failed_files += 1
+            failed_reasons["parser_unavailable"] = failed_reasons.get("parser_unavailable", 0) + 1
+            if len(failed_samples) < 5:
+                failed_samples.append(f"{file_path}: No parser registered for file extension.")
             continue
-        file_symbols = parser_entry.parser.extract_symbols(file_path, source)
+        try:
+            file_symbols = parser_entry.parser.extract_symbols(file_path, source)
+        except Exception as exc:
+            failed_files += 1
+            failed_reasons["parse_error"] = failed_reasons.get("parse_error", 0) + 1
+            if len(failed_samples) < 5:
+                failed_samples.append(f"{file_path}: {type(exc).__name__}: {exc}")
+            continue
         if symbol_ids:
             file_symbols = [symbol for symbol in file_symbols if symbol.id in symbol_ids]
             if not file_symbols:
@@ -720,10 +804,18 @@ def inspect(
         "total": len(warning_reports),
         "reports": [report.__dict__ for report in reports],
         "reports_total": len(reports),
+        "files_considered": files_considered,
+        "indexed": inspected_files,
+        "unchanged": skipped_files,
+        "failed": failed_files,
+        "failed_reasons": failed_reasons,
+        "failed_samples": failed_samples,
         "inspected_files": inspected_files,
         "skipped_files": skipped_files,
     }
     _emit(payload, as_json)
+    if failed_files > 0 and not allow_partial:
+        raise click.exceptions.Exit(1)
 
 
 @cli.group()
@@ -765,12 +857,19 @@ def watch_init(path: str, config_path: Optional[str], as_json: bool) -> None:
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--foreground", "force_foreground", is_flag=True, default=False)
 @click.option("--daemon", "force_daemon", is_flag=True, default=False)
+@click.option(
+    "--allow-partial",
+    is_flag=True,
+    default=False,
+    help="Foreground mode: exit zero even when some files fail.",
+)
 @_with_io_failure_handling
 def watch_start(
     config_path: Optional[str],
     as_json: bool,
     force_foreground: bool,
     force_daemon: bool,
+    allow_partial: bool,
 ) -> None:
     """Start watcher in foreground or daemon mode."""
 
@@ -826,6 +925,8 @@ def watch_start(
         cmd = [sys.executable, "-m", "gloggur.cli.main", "watch", "start", "--foreground"]
         if resolved_config_path:
             cmd.extend(["--config", resolved_config_path])
+        if allow_partial:
+            cmd.append("--allow-partial")
         child_env = os.environ.copy()
         child_env["GLOGGUR_WATCH_DAEMON_CHILD"] = "1"
         try:
@@ -963,6 +1064,8 @@ def watch_start(
         },
         as_json,
     )
+    if int(result.get("failed", result.get("error_count", 0))) > 0 and not allow_partial:
+        raise click.exceptions.Exit(1)
 
 
 @watch.command("stop")
