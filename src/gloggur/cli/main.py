@@ -362,6 +362,23 @@ def _read_watch_state_for_status(path: str) -> Dict[str, object]:
     )
 
 
+def _normalize_watch_status(running: bool, state: Dict[str, object]) -> str:
+    """Return a status label consistent with observed liveness."""
+
+    raw_status = state.get("status")
+    status = raw_status if isinstance(raw_status, str) else ""
+    normalized = status.strip().lower()
+
+    if running:
+        if normalized in {"running", "running_with_errors", "starting"}:
+            return normalized
+        return "running"
+
+    if normalized in {"failed_startup", "stopped"}:
+        return normalized
+    return "stopped"
+
+
 def _create_runtime(
     config_path: Optional[str],
     embedding_provider: Optional[str] = None,
@@ -1143,6 +1160,7 @@ def watch_status(config_path: Optional[str], as_json: bool) -> None:
     }
     payload.update(state)
     payload["running"] = running
+    payload["status"] = _normalize_watch_status(running=running, state=state)
     _emit(payload, as_json)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
@@ -25,13 +26,26 @@ def utc_now_iso() -> str:
 
 
 def is_process_running(pid: Optional[int]) -> bool:
-    """Return True when a PID is alive in the current OS process table."""
+    """Return True when a PID appears alive in the OS process table.
+
+    `os.kill(pid, 0)` can raise `PermissionError` (`EPERM`) for live processes
+    owned by other users; treat that case as alive so callers do not
+    misclassify the process as stopped.
+    """
 
     if pid is None or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        if exc.errno == errno.EPERM:
+            return True
+        if exc.errno == errno.ESRCH:
+            return False
         return False
     return True
 

@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from gloggur.cli.main import cli
 from gloggur.config import GloggurConfig
 from gloggur.io_failures import StorageIOError
+from gloggur.watch.service import is_process_running
 
 
 def _parse_json_output(output: str) -> dict[str, object]:
@@ -833,3 +834,45 @@ def test_watch_status_json_reports_malformed_state_file(
     assert str(error["path"]) == str(state_file)
     assert "jsondecodeerror" in str(error["detail"]).lower()
     assert "Traceback (most recent call last)" not in result.output
+
+
+def test_watch_status_normalizes_stale_running_state_when_process_is_dead(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    pid_file = tmp_path / "watch.pid"
+    state_file = tmp_path / "watch_state.json"
+    pid_file.write_text("4242\n", encoding="utf8")
+    state_file.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "running": True,
+                "last_heartbeat": "2026-02-26T18:00:00+00:00",
+            }
+        ),
+        encoding="utf8",
+    )
+    config = GloggurConfig(
+        watch_pid_file=str(pid_file),
+        watch_state_file=str(state_file),
+    )
+    monkeypatch.setattr("gloggur.cli.main._load_config", lambda _path: config)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: False)
+
+    result = runner.invoke(cli, ["watch", "status", "--json"])
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["running"] is False
+    assert payload["status"] == "stopped"
+    assert payload["last_heartbeat"] == "2026-02-26T18:00:00+00:00"
+
+
+def test_is_process_running_treats_permission_error_as_alive(monkeypatch) -> None:
+    def permission_denied(_pid: int, _sig: int) -> None:
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr("gloggur.watch.service.os.kill", permission_denied)
+    assert is_process_running(1234) is True
