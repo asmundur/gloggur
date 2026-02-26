@@ -42,6 +42,57 @@ Copy this section for completed tasks:
 
 ```
 
+## F1 - Configurable On-Save Incremental Indexing (Watch Mode)
+
+**Completed On**: 2026-02-26
+**Completed By**: codex
+**Source**: moved from TODOs.md
+
+**Delivered**
+- Added first-class watch lifecycle commands (`watch init/start/stop/status`) with config keys and env overrides for runtime artifacts.
+- Implemented save-triggered incremental watch processing with file filtering, debounce/coalescing, hash-based unchanged skip, heartbeat state, and serialized cache writes.
+- Added vector upsert/removal semantics for FAISS and fallback vector paths, including stale symbol cleanup on delete/rename and legacy id-map migration compatibility.
+- Added cache helpers and watch-path cache metadata updates to support deterministic file deletion/reindex bookkeeping.
+- Hardened watch lifecycle reliability and observability across startup/cleanup race paths, structured JSON error surfaces, and malformed runtime artifact handling.
+- Fixed lifecycle liveness/status edge cases by treating PID probe `PermissionError` (`EPERM`) as alive and normalizing status output to observed process liveness.
+- Updated README and agent integration docs for watch mode workflows.
+
+**Behavioral Impact**
+- Save-triggered indexing updates changed files without manual `gloggur index`.
+- Unchanged content is skipped and does not trigger re-embedding/reindex churn.
+- Deleted/renamed symbols are removed from vector/search results with no stale hits in regression scenarios.
+- Watch lifecycle command surfaces now report and manage running state predictably under normal and edge-case runtime conditions.
+
+**Verification**
+- Commands run:
+  - `.venv/bin/python -m pytest tests/unit/test_vector_store.py tests/unit/test_watch_service.py tests/unit/test_cli_watch.py tests/integration/test_watch_cli_lifecycle_integration.py tests/integration/test_watch_regressions.py tests/integration/test_smoke.py::test_smoke_incremental_indexing -q`
+  - `.venv/bin/python -m pytest tests/unit/test_cli_watch.py tests/unit/test_watch_service.py tests/integration/test_watch_cli_lifecycle_integration.py tests/integration/test_watch_regressions.py -q`
+  - `scripts/gloggur watch status --json`
+- Results:
+  - Full F1-focused verification slice passed (`31 passed`), including watch lifecycle, stale-hit regressions, vector upsert/remove paths, and incremental smoke behavior.
+  - Watch-focused regression slice passed (`27 passed`), including lifecycle consistency regressions for stale status normalization and permission-aware PID liveness.
+  - Runtime status probe returned consistent stopped-state payload when no watcher PID is active.
+
+**Evidence**
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/cli/main.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/watch/service.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/storage/vector_store.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/indexer/indexer.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/indexer/cache.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/config.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_cli_watch.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_watch_service.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_vector_store.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_watch_cli_lifecycle_integration.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_watch_regressions.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_smoke.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/README.md`
+- Files: `/Users/auzi/vinnustofa/gloggur/docs/AGENT_INTEGRATION.md`
+- PR/commit/issues: local working tree changes
+
+**Follow-ups**
+- `R5 - Deterministic New-Session Bootstrap for Local Codex Worktrees` remains in `TODOs.md` as a separate low-priority reliability task.
+
 ## D1 - Document Semantic Search Embedding Inputs
 
 **Completed On**: 2026-02-12

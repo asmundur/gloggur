@@ -53,95 +53,48 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## Ordering / Priority
 
-1. F1 (watch mode) - product capability work after reliability hardening.
+1. R5 (session bootstrap ergonomics) - low-priority reliability follow-up after feature closure.
 
 ---
 
-## F1 - Configurable On-Save Incremental Indexing (Watch Mode)
+## R5 - Deterministic New-Session Bootstrap for Local Codex Worktrees
 
-**Status**: in_progress
-**Priority**: P1
+**Status**: planned
+**Priority**: P2
 **Owner**: codex
 
 **Problem**
-- Incremental indexing currently requires explicit command runs and does not update automatically on file save.
-- Reindexing changed files can leave stale vectors/results when symbol IDs shift, because vector entries are append-only today.
+- Fresh local Codex sessions can start with inconsistent developer ergonomics (for example, `gloggur` not immediately callable, watch runtime not visibly active, or session assumptions about `.venv`/PATH not met).
+- These are startup/bootstrap reliability concerns and can be confused with watch-mode feature correctness.
 
 **Goal**
-- Add first-class watch mode with background lifecycle commands and correct vector upsert/removal semantics.
+- Make new local worktree sessions deterministic and self-explanatory: either fully ready (wrapper callable + watch runtime healthy) or failing fast with actionable diagnostics.
 
 **Scope**
-- Add `watch` CLI commands (`init`, `start`, `stop`, `status`) and watch config keys/env overrides.
-- Implement watcher runtime with file filtering, debounce/coalescing, hash-based skip, and heartbeat state.
-- Add vector removal/upsert support for FAISS and fallback paths with legacy migration handling.
-- Add cache helpers for file metadata deletion and file counts.
-- Update README + agent docs and add tests for watch lifecycle and vector correctness.
+- Define and enforce an explicit startup-readiness contract for local Codex worktrees.
+- Harden startup flow to guarantee deterministic outcomes for:
+  - `gloggur` wrapper availability
+  - watch runtime initialization/daemon startup
+  - clear status semantics immediately after startup.
+- Document a single verification probe for session readiness.
 
 **Out of Scope**
-- IDE plugin development.
-- Full OS autostart installers.
+- Core watch indexing correctness semantics (covered by `F1`).
+- IDE/plugin autostart behavior and OS-level service installers.
 
 **Acceptance Criteria**
-- Save-triggered updates index changed files without manual `gloggur index`.
-- Unchanged content does not re-embed.
-- Deleted/renamed symbols do not appear as stale search hits.
-- Watch lifecycle commands report and manage running state predictably.
-- Worktree environment startup auto-initializes and starts watch mode (`watch init` + `watch start --daemon`) for the active worktree.
+- In a fresh local Codex session inside a worktree, startup either:
+  - completes with `gloggur status --json` and `gloggur watch status --json` working predictably, or
+  - fails non-zero with explicit actionable diagnostics.
+- No ambiguous startup state where the environment appears ready but watch/process status is contradictory.
+- README/agent docs include a short startup-readiness check for local worktree sessions.
 
 **Tests Required**
-- Unit coverage for vector `remove_ids`/`upsert_vectors` and watcher processing behavior.
-- Integration coverage for `watch init/start/status/stop` and stale-result regression scenarios.
+- Integration coverage that simulates a fresh local worktree session and validates startup-readiness contract outcomes.
+- Regression tests for contradictory startup runtime artifacts/signals (PID/state/status mismatch cases).
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
-
-**Blockers (2026-02-20, updated 2026-02-24)**
-- Resolved: env overrides for `watch_state_file`, `watch_pid_file`, and `watch_log_file` are now implemented in `src/gloggur/config.py` with unit coverage.
-- Still do not move to `DONEs.md` until full F1 scope and acceptance criteria are verified end-to-end.
-
-**Progress Update (2026-02-25)**
-- Fixed a daemon lifecycle race in `watch start` where the spawned foreground process could exit immediately as `already_running` after reading the parent-written PID file.
-- Added integration coverage for `watch init/start/status/stop` with real subprocess execution and env override verification for `watch_state_file`, `watch_pid_file`, and `watch_log_file` (`tests/integration/test_watch_cli_lifecycle_integration.py`).
-- Extended unit coverage to assert daemon child marker propagation during spawn (`tests/unit/test_cli_watch.py`).
-- Strengthened watch lifecycle integration assertions to require observed save-event processing and searchable post-save updates (using forced polling in test env for deterministic backend behavior).
-
-**Progress Update (2026-02-25, later)**
-- Hardened watch subcommands (`watch init/start/stop/status`) with `_with_io_failure_handling` so structured `io_failure` / `embedding_provider_error` payloads are emitted in `--json` mode instead of raw tracebacks.
-- Wrapped watch runtime file/config operations with deterministic I/O mapping:
-  - config payload read/write
-  - pid file write/delete
-  - watch state file write
-  - daemon log directory/file setup
-  - daemon process spawn failure path
-  - daemon early-exit startup verification path
-  - stop-signal race (`os.kill`) path.
-- Added daemon-startup cleanup for partial-initialization failures:
-  - if pid/state-file write fails after daemon spawn, watch start now attempts best-effort `SIGTERM` of the spawned process before surfacing structured `io_failure`.
-  - termination now escalates to bounded `SIGKILL` fallback when a wait-capable daemon does not exit after `SIGTERM`, reducing orphan-process risk during partial-startup failures.
-  - if state-file write fails after pid-file write, watch start now best-effort removes the just-written pid file to avoid stale-runtime artifacts.
-  - if daemon exits immediately after pid/state writes, watch start now detects the post-init exit, cleans stale pid file, writes `failed_startup` state, and returns structured `io_failure`.
-  - if daemon exits during the first startup liveness check (before pid file publication), watch start now records `failed_startup` state for deterministic observability.
-- Added unit regressions in `tests/unit/test_cli_watch.py` asserting structured JSON failures for:
-  - config write permission failure in `watch init`
-  - daemon log-directory permission failure in `watch start`
-  - daemon process spawn failure in `watch start`
-  - daemon early-exit startup failure in `watch start`
-  - daemon pid-write failure path terminates spawned process and returns stable `io_failure`.
-  - daemon state-write failure path terminates spawned process and removes stale pid file.
-  - daemon post-init early-exit path clears stale pid file, records failed-startup state, and returns stable `io_failure`.
-  - process-signal race failure in `watch stop`.
-- Added a guardrail for malformed watch config top-level payload type (non-mapping YAML/JSON now fails deterministically as structured `io_failure` in `watch init`, rather than silently coercing to `{}`).
-- Hardened watcher status observability by failing loudly on malformed runtime artifacts:
-  - malformed watch PID files now return structured `io_failure` (`operation=read watch pid file`) instead of silently reporting not-running.
-  - malformed watch state JSON now returns structured `io_failure` (`operation=read watch state file`) instead of being silently ignored.
-- Added regression tests in `tests/unit/test_cli_watch.py` covering malformed PID and malformed state-file status paths.
-- Normalized daemon startup failure-state payloads to include `watch_path` consistently across early-exit branches for deterministic status observability.
-- Added stale-runtime cleanup regression coverage for first-liveness-check daemon early-exit: pre-existing stale pid artifacts are now asserted to be removed on startup failure.
-- Added daemon-termination regression coverage for timed-out shutdown cleanup (`tests/unit/test_cli_watch.py`): `watch start --daemon` partial-init failure paths now assert `SIGTERM` then `SIGKILL` when the spawned process remains stuck.
-
-**Progress Update (2026-02-26)**
-- Updated worktree environment setup in `.codex/environments/environment.toml` to auto-run `scripts/gloggur watch init <worktree> --config .gloggur.yaml --json` and `scripts/gloggur watch start --daemon --json` on startup.
-- Startup hook is fail-fast by design: environment setup now errors immediately if watch initialization or daemon start fails.
 
 ---
 
