@@ -280,6 +280,14 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
         assert after_interrupt_status.returncode == 0, after_interrupt_status.stderr
         after_interrupt_payload = _parse_json_payload(after_interrupt_status.stdout)
         assert after_interrupt_payload["needs_reindex"] is True
+        reason_codes = after_interrupt_payload["resume_reason_codes"]
+        assert isinstance(reason_codes, list)
+        assert "index_interrupted" in reason_codes
+        remediation = after_interrupt_payload["resume_remediation"]
+        assert isinstance(remediation, dict)
+        assert "index_interrupted" in remediation
+        assert isinstance(remediation["index_interrupted"], list)
+        assert remediation["index_interrupted"]
 
         search_after_interrupt = _run_cli(
             ["search", "handler_99", "--json", "--top-k", "5"],
@@ -291,6 +299,14 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
         metadata = search_payload["metadata"]
         assert isinstance(metadata, dict)
         assert metadata["needs_reindex"] is True
+        search_codes = metadata["resume_reason_codes"]
+        assert isinstance(search_codes, list)
+        assert "index_interrupted" in search_codes
+        search_remediation = metadata["resume_remediation"]
+        assert isinstance(search_remediation, dict)
+        assert "index_interrupted" in search_remediation
+        assert isinstance(search_remediation["index_interrupted"], list)
+        assert search_remediation["index_interrupted"]
 
         recovery = _run_cli(["index", str(repo), "--json"], base_env, timeout=240)
         assert recovery.returncode == 0, recovery.stderr

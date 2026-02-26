@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import click
 import yaml
 
+from gloggur import __version__ as GLOGGUR_VERSION
 from gloggur.audit.docstring_audit import audit_docstrings
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
@@ -22,10 +23,15 @@ from gloggur.embeddings.errors import (
     wrap_embedding_error,
 )
 from gloggur.embeddings.factory import create_embedding_provider
-from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
+from gloggur.indexer.cache import (
+    CACHE_SCHEMA_VERSION,
+    CacheConfig,
+    CacheManager,
+    CacheRecoveryError,
+)
 from gloggur.indexer.concurrency import cache_write_lock
 from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
-from gloggur.indexer.indexer import Indexer
+from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
 from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.hybrid_search import HybridSearch
@@ -37,6 +43,53 @@ from gloggur.watch.service import WatchService, is_process_running, load_watch_s
 @click.group()
 def cli() -> None:
     """Gloggur CLI for indexing, search, and docstring inspection."""
+
+
+INSPECT_PAYLOAD_SCHEMA_VERSION = "1"
+DEFAULT_INDEX_FAILURE_REMEDIATION = (
+    "Inspect failed_samples and rerun indexing after resolving the underlying error."
+)
+DEFAULT_WATCH_STATUS_FAILURE_REMEDIATION = (
+    "Inspect watch-state counters and rerun `gloggur watch stop --json` then `gloggur watch start --json`."
+)
+WATCH_STATUS_FAILURE_REMEDIATION: Dict[str, List[str]] = {
+    "watch_state_inconsistent": [
+        "Watch state reports failures without reason codes; restart watch and verify state-file updates.",
+        "If this recurs, run `gloggur index . --json` to re-establish deterministic cache state.",
+    ],
+    "watch_last_batch_inconsistent": [
+        "Watch last_batch reports failures but reason codes are missing; restart watch and verify daemon state writes.",
+        "Run `gloggur index . --json` if inconsistent batch-state reporting persists.",
+    ],
+}
+DEFAULT_RESUME_REMEDIATION = (
+    "Inspect resume_reason_details and rerun `gloggur index . --json` after resolving the issue."
+)
+RESUME_REMEDIATION: Dict[str, List[str]] = {
+    "missing_index_metadata": [
+        "Run `gloggur index . --json` to rebuild missing metadata.",
+        "Avoid reusing cache state until the rebuild completes successfully.",
+    ],
+    "index_interrupted": [
+        "A previous index run appears interrupted; rerun `gloggur index . --json` to completion.",
+        "If interruption repeats, inspect process termination signals and cache write-lock timing.",
+    ],
+    "missing_cached_profile": [
+        "Rebuild the index so cache metadata records the active embedding profile.",
+    ],
+    "embedding_profile_changed": [
+        "Run `gloggur index . --json` using the current embedding profile to refresh vectors.",
+    ],
+    "tool_version_changed": [
+        "Reindex with the current CLI/tool version before relying on cached retrieval.",
+    ],
+    "cache_corruption_recovered": [
+        "Rebuild the index after corruption recovery to restore full symbol coverage.",
+    ],
+    "cache_schema_rebuilt": [
+        "Run a full `gloggur index . --json` after schema rebuild before search operations.",
+    ],
+}
 
 
 def _emit(payload: Dict[str, object], as_json: bool) -> None:
@@ -172,6 +225,194 @@ def _metadata_reindex_reason(metadata_present: bool) -> Optional[str]:
     if metadata_present:
         return None
     return "index metadata missing (index build in progress, interrupted, or never completed)"
+
+
+def _metadata_reindex_signal(
+    *,
+    metadata_present: bool,
+    has_last_success_marker: bool,
+) -> Optional[Tuple[str, str]]:
+    """Return machine-readable metadata reindex signal with interruption disambiguation."""
+    if metadata_present:
+        return None
+    if has_last_success_marker:
+        return (
+            "index_interrupted",
+            "index metadata missing after a previous successful index (index run interrupted or failed before completion)",
+        )
+    reason = _metadata_reindex_reason(metadata_present=False)
+    return ("missing_index_metadata", reason or "index metadata missing")
+
+
+def _tool_version_reindex_reason(
+    *,
+    last_success_tool_version: Optional[str],
+    current_tool_version: str,
+) -> Optional[str]:
+    """Return reason when tool-version drift invalidates previously successful cache state."""
+    if last_success_tool_version is None:
+        return None
+    if last_success_tool_version == current_tool_version:
+        return None
+    return (
+        "tool version changed "
+        f"(cached={last_success_tool_version}, current={current_tool_version})"
+    )
+
+
+def _stable_fingerprint(payload: Dict[str, object]) -> str:
+    """Return a stable SHA256 fingerprint for JSON-serializable payloads."""
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return _hash_content(serialized)
+
+
+def _index_metadata_digest(metadata: Optional[IndexMetadata]) -> Optional[str]:
+    """Return a deterministic digest of index metadata fields used for resume checks."""
+    if metadata is None:
+        return None
+    payload: Dict[str, object] = {
+        "version": metadata.version,
+        "last_updated": metadata.last_updated.isoformat(),
+        "total_symbols": metadata.total_symbols,
+        "indexed_files": metadata.indexed_files,
+    }
+    return _stable_fingerprint(payload)
+
+
+def _reset_reindex_signal(reset_reason: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Map cache reset reason text to a stable machine-readable code + detail."""
+    if not reset_reason:
+        return None
+    if "cache corruption detected" in reset_reason:
+        return ("cache_corruption_recovered", f"cache corruption recovered ({reset_reason})")
+    return ("cache_schema_rebuilt", f"cache schema rebuilt ({reset_reason})")
+
+
+def _build_resume_contract(
+    *,
+    metadata: Optional[IndexMetadata],
+    schema_version: Optional[str],
+    expected_profile: str,
+    cached_profile: Optional[str],
+    reset_reason: Optional[str],
+    needs_reindex: bool,
+    last_success_resume_fingerprint: Optional[str],
+    last_success_resume_at: Optional[str],
+    tool_version: str = GLOGGUR_VERSION,
+    last_success_tool_version: Optional[str] = None,
+) -> Dict[str, object]:
+    """Build deterministic resume/fingerprint metadata for status and search JSON payloads."""
+    metadata_present = metadata is not None
+    metadata_signal = _metadata_reindex_signal(
+        metadata_present=metadata_present,
+        has_last_success_marker=(
+            last_success_resume_fingerprint is not None or last_success_resume_at is not None
+        ),
+    )
+    profile_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
+    tool_version_reason = _tool_version_reindex_reason(
+        last_success_tool_version=last_success_tool_version,
+        current_tool_version=tool_version,
+    )
+    reset_signal = _reset_reindex_signal(reset_reason)
+
+    reason_codes: List[str] = []
+    reason_details: List[str] = []
+    if metadata_signal is not None:
+        reason_codes.append(metadata_signal[0])
+        reason_details.append(metadata_signal[1])
+        if metadata_signal[0] != "missing_index_metadata":
+            reason_codes.append("missing_index_metadata")
+            metadata_reason = _metadata_reindex_reason(metadata_present=False)
+            reason_details.append(metadata_reason or "index metadata missing")
+    if profile_reason is not None:
+        code = "missing_cached_profile" if cached_profile is None else "embedding_profile_changed"
+        reason_codes.append(code)
+        reason_details.append(profile_reason)
+    if tool_version_reason is not None:
+        reason_codes.append("tool_version_changed")
+        reason_details.append(tool_version_reason)
+    if reset_signal is not None:
+        reason_codes.append(reset_signal[0])
+        reason_details.append(reset_signal[1])
+    effective_needs_reindex = needs_reindex or tool_version_reason is not None
+
+    workspace_path_hash = _hash_content(os.path.abspath(os.getcwd()))
+    metadata_digest = _index_metadata_digest(metadata)
+    cached_tool_version = last_success_tool_version or tool_version
+    expected_resume_fingerprint = _stable_fingerprint(
+        {
+            "workspace_path_hash": workspace_path_hash,
+            "schema_version": schema_version or CACHE_SCHEMA_VERSION,
+            "index_profile": expected_profile,
+            "metadata_digest": metadata_digest,
+            "tool_version": tool_version,
+        }
+    )
+    cached_resume_fingerprint = _stable_fingerprint(
+        {
+            "workspace_path_hash": workspace_path_hash,
+            "schema_version": schema_version,
+            "index_profile": cached_profile,
+            "metadata_digest": metadata_digest,
+            "tool_version": cached_tool_version,
+        }
+    )
+    resume_remediation = {
+        code: RESUME_REMEDIATION.get(code, [DEFAULT_RESUME_REMEDIATION])
+        for code in reason_codes
+    }
+
+    return {
+        "resume_decision": "reindex_required" if effective_needs_reindex else "resume_ok",
+        "resume_reason_codes": reason_codes,
+        "resume_reason_details": reason_details,
+        "resume_remediation": resume_remediation,
+        "workspace_path_hash": workspace_path_hash,
+        "expected_resume_fingerprint": expected_resume_fingerprint,
+        "cached_resume_fingerprint": cached_resume_fingerprint,
+        "resume_fingerprint_match": expected_resume_fingerprint == cached_resume_fingerprint,
+        "last_success_resume_fingerprint": last_success_resume_fingerprint,
+        "last_success_resume_at": last_success_resume_at,
+        "tool_version": tool_version,
+        "last_success_tool_version": last_success_tool_version,
+        "last_success_tool_version_match": (
+            last_success_tool_version == tool_version
+            if last_success_tool_version is not None
+            else None
+        ),
+        "last_success_resume_fingerprint_match": (
+            last_success_resume_fingerprint == expected_resume_fingerprint
+            if last_success_resume_fingerprint is not None
+            else None
+        ),
+    }
+
+
+def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManager) -> None:
+    """Persist last-success resume fingerprint/timestamp when index state is reusable."""
+    metadata = cache.get_index_metadata()
+    if metadata is None:
+        return
+    resume_contract = _build_resume_contract(
+        metadata=metadata,
+        schema_version=cache.get_schema_version(),
+        expected_profile=config.embedding_profile(),
+        cached_profile=cache.get_index_profile(),
+        reset_reason=cache.last_reset_reason,
+        needs_reindex=False,
+        last_success_resume_fingerprint=cache.get_last_success_resume_fingerprint(),
+        last_success_resume_at=cache.get_last_success_resume_at(),
+        tool_version=GLOGGUR_VERSION,
+        last_success_tool_version=cache.get_last_success_tool_version(),
+    )
+    if resume_contract["resume_decision"] != "resume_ok":
+        return
+    fingerprint = resume_contract["expected_resume_fingerprint"]
+    if isinstance(fingerprint, str):
+        cache.set_last_success_resume_fingerprint(fingerprint)
+    cache.set_last_success_resume_at(metadata.last_updated.isoformat())
+    cache.set_last_success_tool_version(GLOGGUR_VERSION)
 
 
 def _resolve_config_file_path(config_path: Optional[str]) -> str:
@@ -362,6 +603,56 @@ def _read_watch_state_for_status(path: str) -> Dict[str, object]:
     )
 
 
+def _normalize_reason_counts(payload: object) -> Dict[str, int]:
+    """Normalize reason-count payloads into a stable positive-int mapping."""
+    normalized: Dict[str, int] = {}
+    if not isinstance(payload, dict):
+        return normalized
+    for raw_reason, raw_count in payload.items():
+        reason = str(raw_reason)
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
+            continue
+        normalized[reason] = normalized.get(reason, 0) + count
+    return normalized
+
+
+def _read_failed_count(payload: Dict[str, object]) -> int:
+    """Read failed/error_count from a watch payload with safe int coercion."""
+    raw_failed = payload.get("failed", payload.get("error_count", 0))
+    try:
+        return int(raw_failed)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _collect_watch_failure_signals(state: Dict[str, object]) -> tuple[int, Dict[str, int]]:
+    """Collect fail-closed failure counters/reasons from watch state + last_batch."""
+    normalized_reasons = _normalize_reason_counts(state.get("failed_reasons"))
+    failed_count = _read_failed_count(state)
+
+    last_batch_payload = state.get("last_batch")
+    if isinstance(last_batch_payload, dict):
+        last_batch_reasons = _normalize_reason_counts(last_batch_payload.get("failed_reasons"))
+        for reason, count in last_batch_reasons.items():
+            normalized_reasons[reason] = normalized_reasons.get(reason, 0) + count
+        last_batch_failed = _read_failed_count(last_batch_payload)
+        if failed_count <= 0:
+            failed_count = last_batch_failed
+        if failed_count > 0 and not normalized_reasons:
+            normalized_reasons["watch_last_batch_inconsistent"] = failed_count
+
+    if failed_count > 0 and not normalized_reasons:
+        normalized_reasons["watch_state_inconsistent"] = failed_count
+    elif failed_count <= 0 and normalized_reasons:
+        failed_count = sum(normalized_reasons.values())
+
+    return failed_count, normalized_reasons
+
+
 def _normalize_watch_status(running: bool, state: Dict[str, object]) -> str:
     """Return a status label consistent with observed liveness."""
 
@@ -370,6 +661,9 @@ def _normalize_watch_status(running: bool, state: Dict[str, object]) -> str:
     normalized = status.strip().lower()
 
     if running:
+        failed_count, _normalized_reasons = _collect_watch_failure_signals(state)
+        if failed_count > 0:
+            return "running_with_errors"
         if normalized in {"running", "running_with_errors", "starting"}:
             return normalized
         return "running"
@@ -377,6 +671,28 @@ def _normalize_watch_status(running: bool, state: Dict[str, object]) -> str:
     if normalized in {"failed_startup", "stopped"}:
         return normalized
     return "stopped"
+
+
+def _build_watch_failure_contract(state: Dict[str, object]) -> Dict[str, object]:
+    """Build deterministic watch failure codes/guidance from state counters."""
+    _failed_count, normalized_reasons = _collect_watch_failure_signals(state)
+    if not normalized_reasons:
+        return {}
+
+    return {
+        "failed_reasons": normalized_reasons,
+        "failure_codes": sorted(normalized_reasons),
+        "failure_guidance": {
+            reason: FAILURE_REMEDIATION.get(
+                reason,
+                WATCH_STATUS_FAILURE_REMEDIATION.get(
+                    reason,
+                    [DEFAULT_WATCH_STATUS_FAILURE_REMEDIATION],
+                ),
+            )
+            for reason in sorted(normalized_reasons)
+        },
+    }
 
 
 def _create_runtime(
@@ -468,13 +784,18 @@ def _build_status_payload(config: GloggurConfig, cache: CacheManager) -> Dict[st
     metadata = cache.get_index_metadata()
     schema_version = cache.get_schema_version()
     cached_profile = cache.get_index_profile()
+    last_success_tool_version = cache.get_last_success_tool_version()
     metadata_reason = _metadata_reindex_reason(metadata is not None)
     profile_reason = _profile_reindex_reason(
         metadata_present=metadata is not None,
         cached_profile=cached_profile,
         expected_profile=expected_profile,
     )
-    reindex_reason = metadata_reason or profile_reason
+    tool_version_reason = _tool_version_reindex_reason(
+        last_success_tool_version=last_success_tool_version,
+        current_tool_version=GLOGGUR_VERSION,
+    )
+    reindex_reason = metadata_reason or profile_reason or tool_version_reason
     if cache.last_reset_reason:
         reset_label = "cache schema rebuilt"
         if "cache corruption detected" in cache.last_reset_reason:
@@ -483,15 +804,29 @@ def _build_status_payload(config: GloggurConfig, cache: CacheManager) -> Dict[st
             f"{reset_label} "
             f"({cache.last_reset_reason})"
         )
+    needs_reindex = metadata is None or reindex_reason is not None
+    resume_contract = _build_resume_contract(
+        metadata=metadata,
+        schema_version=schema_version,
+        expected_profile=expected_profile,
+        cached_profile=cached_profile,
+        reset_reason=cache.last_reset_reason,
+        needs_reindex=needs_reindex,
+        last_success_resume_fingerprint=cache.get_last_success_resume_fingerprint(),
+        last_success_resume_at=cache.get_last_success_resume_at(),
+        tool_version=GLOGGUR_VERSION,
+        last_success_tool_version=last_success_tool_version,
+    )
     return {
         "cache_dir": config.cache_dir,
         "metadata": metadata.model_dump(mode="json") if metadata else None,
         "schema_version": schema_version,
         "expected_index_profile": expected_profile,
         "cached_index_profile": cached_profile,
-        "needs_reindex": metadata is None or reindex_reason is not None,
+        "needs_reindex": needs_reindex,
         "reindex_reason": reindex_reason,
         "total_symbols": len(cache.list_symbols()),
+        **resume_contract,
     }
 
 
@@ -523,6 +858,19 @@ def _create_embedding_provider_for_command(
             provider=config.embedding_provider,
             operation="initialize embedding provider",
         ) from exc
+
+
+def _build_index_failure_contract(failed_reasons: Dict[str, int]) -> Dict[str, object]:
+    """Build deterministic machine-readable failure codes and remediation for index payloads."""
+    if not failed_reasons:
+        return {}
+    return {
+        "failure_codes": sorted(failed_reasons),
+        "failure_guidance": {
+            reason: FAILURE_REMEDIATION.get(reason, [DEFAULT_INDEX_FAILURE_REMEDIATION])
+            for reason in sorted(failed_reasons)
+        },
+    }
 
 
 @cli.command()
@@ -568,6 +916,8 @@ def index(
         )
         if os.path.isdir(path):
             result = indexer.index_repository(path)
+            if result.failed == 0:
+                _persist_last_success_resume_state(config, cache)
             payload = result.as_payload()
             _emit(payload, as_json)
             if result.failed > 0 and not allow_partial:
@@ -584,16 +934,24 @@ def index(
         if files_considered:
             cache.delete_index_metadata()
         outcome = indexer.index_file_with_outcome(path) if files_considered else None
-        if vector_store and outcome and outcome.status == "indexed":
+        stale_cleanup = (
+            indexer.prune_missing_file_entries()
+            if files_considered
+            else {
+                "files_removed": 0,
+                "symbols_removed": 0,
+                "failed": 0,
+                "failed_reasons": {},
+                "failed_samples": [],
+            }
+        )
+        if vector_store and files_considered:
             vector_store.save()
-        if outcome and outcome.status != "failed":
-            metadata = IndexMetadata(
-                version=config.index_version,
-                total_symbols=len(cache.list_symbols()),
-                indexed_files=cache.count_files(),
-            )
-            cache.set_index_metadata(metadata)
-            cache.set_index_profile(config.embedding_profile())
+        consistency = (
+            indexer.validate_vector_metadata_consistency()
+            if files_considered
+            else {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+        )
         failed_reasons: Dict[str, int] = {}
         failed_samples: List[str] = []
         indexed = 0
@@ -612,6 +970,44 @@ def index(
                 failed_reasons[reason] = 1
                 detail = outcome.detail or "indexing failed"
                 failed_samples.append(f"{path}: {detail}")
+        files_removed = int(stale_cleanup.get("files_removed", 0))
+        symbols_removed = int(stale_cleanup.get("symbols_removed", 0))
+        stale_failed = int(stale_cleanup.get("failed", 0))
+        failed += stale_failed
+        stale_failed_reasons = stale_cleanup.get("failed_reasons", {})
+        if isinstance(stale_failed_reasons, dict):
+            for reason, count in stale_failed_reasons.items():
+                reason_key = str(reason)
+                reason_count = int(count)
+                failed_reasons[reason_key] = failed_reasons.get(reason_key, 0) + reason_count
+        stale_failed_samples = stale_cleanup.get("failed_samples", [])
+        if isinstance(stale_failed_samples, list):
+            for sample in stale_failed_samples:
+                if len(failed_samples) >= 5:
+                    break
+                failed_samples.append(str(sample))
+        failed += int(consistency.get("failed", 0))
+        consistency_failed_reasons = consistency.get("failed_reasons", {})
+        if isinstance(consistency_failed_reasons, dict):
+            for reason, count in consistency_failed_reasons.items():
+                reason_key = str(reason)
+                reason_count = int(count)
+                failed_reasons[reason_key] = failed_reasons.get(reason_key, 0) + reason_count
+        consistency_failed_samples = consistency.get("failed_samples", [])
+        if isinstance(consistency_failed_samples, list):
+            for sample in consistency_failed_samples:
+                if len(failed_samples) >= 5:
+                    break
+                failed_samples.append(str(sample))
+        if outcome and outcome.status != "failed" and failed == 0:
+            metadata = IndexMetadata(
+                version=config.index_version,
+                total_symbols=len(cache.list_symbols()),
+                indexed_files=cache.count_files(),
+            )
+            cache.set_index_metadata(metadata)
+            cache.set_index_profile(config.embedding_profile())
+            _persist_last_success_resume_state(config, cache)
         result = {
             "files_considered": files_considered,
             "indexed": indexed,
@@ -619,11 +1015,17 @@ def index(
             "failed": failed,
             "failed_reasons": failed_reasons,
             "failed_samples": failed_samples,
+            "files_changed": indexed,
+            "files_removed": files_removed,
+            "symbols_added": outcome.symbols_added if outcome else 0,
+            "symbols_updated": outcome.symbols_updated if outcome else 0,
+            "symbols_removed": (outcome.symbols_removed if outcome else 0) + symbols_removed,
             "indexed_files": indexed,
             "skipped_files": unchanged,
             "indexed_symbols": indexed_symbols,
             "duration_ms": 0,
         }
+        result.update(_build_index_failure_contract(failed_reasons))
         _emit(result, as_json)
         if failed > 0 and not allow_partial:
             raise click.exceptions.Exit(1)
@@ -650,11 +1052,30 @@ def search(
     """Search indexed symbols with optional filters."""
     config, cache, vector_store = _create_runtime(config_path=config_path)
     expected_profile = config.embedding_profile()
-    metadata_present = cache.get_index_metadata() is not None
+    metadata = cache.get_index_metadata()
+    metadata_present = metadata is not None
     cached_profile = cache.get_index_profile()
+    last_success_tool_version = cache.get_last_success_tool_version()
     metadata_reason = _metadata_reindex_reason(metadata_present)
     profile_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
-    reindex_reason = metadata_reason or profile_reason
+    tool_version_reason = _tool_version_reindex_reason(
+        last_success_tool_version=last_success_tool_version,
+        current_tool_version=GLOGGUR_VERSION,
+    )
+    reindex_reason = metadata_reason or profile_reason or tool_version_reason
+    needs_reindex = reindex_reason is not None
+    resume_contract = _build_resume_contract(
+        metadata=metadata,
+        schema_version=cache.get_schema_version(),
+        expected_profile=expected_profile,
+        cached_profile=cached_profile,
+        reset_reason=cache.last_reset_reason,
+        needs_reindex=needs_reindex,
+        last_success_resume_fingerprint=cache.get_last_success_resume_fingerprint(),
+        last_success_resume_at=cache.get_last_success_resume_at(),
+        tool_version=GLOGGUR_VERSION,
+        last_success_tool_version=last_success_tool_version,
+    )
     if reindex_reason is not None:
         payload = {
             "query": query,
@@ -666,6 +1087,7 @@ def search(
                 "reindex_reason": reindex_reason,
                 "expected_index_profile": expected_profile,
                 "cached_index_profile": cached_profile,
+                **resume_contract,
             },
         }
         _emit(payload, as_json)
@@ -682,11 +1104,119 @@ def search(
     if file_path:
         filters["file"] = file_path
     result = searcher.search(query, filters=filters, top_k=top_k)
+    metadata_payload = result.get("metadata")
+    if isinstance(metadata_payload, dict):
+        metadata_payload.update(resume_contract)
     if stream and as_json:
         for item in result["results"]:
             click.echo(json.dumps(item))
         return
     _emit(result, as_json)
+
+
+def _inspect_path_class(path: str) -> str:
+    """Classify a path into src/tests/scripts/other buckets for inspect summaries."""
+    normalized = os.path.normpath(os.path.abspath(path))
+    segments = {segment for segment in normalized.split(os.sep) if segment}
+    if "src" in segments:
+        return "src"
+    if "tests" in segments:
+        return "tests"
+    if "scripts" in segments:
+        return "scripts"
+    return "other"
+
+
+def _should_include_inspect_path(
+    path: str,
+    *,
+    include_tests: bool,
+    include_scripts: bool,
+) -> bool:
+    """Return True when a path should be included in inspect traversal."""
+    path_class = _inspect_path_class(path)
+    if path_class == "tests":
+        return include_tests
+    if path_class == "scripts":
+        return include_scripts
+    return True
+
+
+def _warning_type(warning: str) -> str:
+    """Normalize a warning string into a stable warning-type key."""
+    return warning.split(" (", 1)[0]
+
+
+def _symbol_id_file_path(symbol_id: str) -> Optional[str]:
+    """Best-effort extraction of file path from symbol id format path:start:name."""
+    parts = symbol_id.rsplit(":", 2)
+    if len(parts) != 3:
+        return None
+    return parts[0]
+
+
+def _build_inspect_warning_summary(
+    warning_reports: List[Dict[str, object]],
+    *,
+    symbol_file_paths: Dict[str, str],
+) -> Dict[str, object]:
+    """Build deterministic warning summaries for inspect JSON payloads."""
+    warning_counts_by_type: Dict[str, int] = {}
+    warning_counts_by_path_class: Dict[str, int] = {
+        "src": 0,
+        "tests": 0,
+        "scripts": 0,
+        "other": 0,
+    }
+    report_counts_by_path_class: Dict[str, int] = {
+        "src": 0,
+        "tests": 0,
+        "scripts": 0,
+        "other": 0,
+    }
+    warning_counts_by_file: Dict[str, int] = {}
+    total_warnings = 0
+
+    for report in warning_reports:
+        symbol_id = report.get("symbol_id")
+        if not isinstance(symbol_id, str):
+            continue
+        report_warnings = report.get("warnings")
+        if not isinstance(report_warnings, list):
+            continue
+        file_path = symbol_file_paths.get(symbol_id) or _symbol_id_file_path(symbol_id)
+        path_class = _inspect_path_class(file_path) if file_path else "other"
+        report_counts_by_path_class[path_class] += 1
+        if file_path:
+            warning_counts_by_file[file_path] = warning_counts_by_file.get(file_path, 0) + len(
+                report_warnings
+            )
+        for warning in report_warnings:
+            if not isinstance(warning, str):
+                continue
+            total_warnings += 1
+            warning_type = _warning_type(warning)
+            warning_counts_by_type[warning_type] = warning_counts_by_type.get(warning_type, 0) + 1
+            warning_counts_by_path_class[path_class] += 1
+
+    top_files = sorted(
+        warning_counts_by_file.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[:10]
+    return {
+        "total_warnings": total_warnings,
+        "by_warning_type": dict(sorted(warning_counts_by_type.items())),
+        "by_path_class": warning_counts_by_path_class,
+        "reports_by_path_class": report_counts_by_path_class,
+        "top_files": [
+            {
+                "file": file_path,
+                "warnings": count,
+                "path_class": _inspect_path_class(file_path),
+            }
+            for file_path, count in top_files
+        ],
+    }
 
 
 @cli.command()
@@ -706,6 +1236,18 @@ def search(
     help="Inspect only the specified symbol id(s). Can be repeated.",
 )
 @click.option(
+    "--include-tests",
+    is_flag=True,
+    default=False,
+    help="Include `tests/` paths when inspecting directories.",
+)
+@click.option(
+    "--include-scripts",
+    is_flag=True,
+    default=False,
+    help="Include `scripts/` paths when inspecting directories.",
+)
+@click.option(
     "--allow-partial",
     is_flag=True,
     default=False,
@@ -718,6 +1260,8 @@ def inspect(
     as_json: bool,
     force: bool,
     symbol_ids: tuple[str, ...],
+    include_tests: bool,
+    include_scripts: bool,
     allow_partial: bool,
 ) -> None:
     """Run docstring inspection and emit warnings/reports."""
@@ -734,15 +1278,30 @@ def inspect(
     failed_reasons: Dict[str, int] = {}
     failed_samples: List[str] = []
     skipped_files = 0
+    symbol_file_paths: Dict[str, str] = {}
+    include_tests_effective = include_tests
+    include_scripts_effective = include_scripts
     paths = [path]
     if os.path.isdir(path):
+        root_class = _inspect_path_class(path)
+        include_tests_effective = include_tests or root_class == "tests"
+        include_scripts_effective = include_scripts or root_class == "scripts"
         paths = []
         for root, dirs, files in os.walk(path):
+            dirs.sort()
+            files.sort()
             dirs[:] = [d for d in dirs if d not in config.excluded_dirs]
             for filename in files:
                 full_path = os.path.join(root, filename)
-                if any(full_path.endswith(ext) for ext in config.supported_extensions):
-                    paths.append(full_path)
+                if not any(full_path.endswith(ext) for ext in config.supported_extensions):
+                    continue
+                if not _should_include_inspect_path(
+                    full_path,
+                    include_tests=include_tests_effective,
+                    include_scripts=include_scripts_effective,
+                ):
+                    continue
+                paths.append(full_path)
     elif not any(path.endswith(ext) for ext in config.supported_extensions):
         paths = []
     else:
@@ -796,6 +1355,7 @@ def inspect(
             snippet_start = max(0, symbol.start_line - 1)
             snippet_end = min(len(lines), symbol.end_line)
             code_texts[symbol.id] = "\n".join(lines[snippet_start:snippet_end])
+            symbol_file_paths[symbol.id] = file_path
         symbols.extend(file_symbols)
         processed_files.append((file_path, content_hash))
         inspected_files += 1
@@ -814,13 +1374,24 @@ def inspect(
             AuditFileMetadata(path=file_path, content_hash=content_hash)
         )
     warning_reports = [report for report in reports if report.warnings]
+    warning_report_payloads = [report.__dict__ for report in warning_reports]
     payload = {
         "path": path,
         "symbol_ids": list(symbol_ids) if symbol_ids else None,
-        "warnings": [report.__dict__ for report in warning_reports],
+        "warnings": warning_report_payloads,
         "total": len(warning_reports),
         "reports": [report.__dict__ for report in reports],
         "reports_total": len(reports),
+        "inspect_payload_schema_version": INSPECT_PAYLOAD_SCHEMA_VERSION,
+        "inspect_scope": {
+            "default_src_focus": not include_tests and not include_scripts,
+            "include_tests": include_tests_effective,
+            "include_scripts": include_scripts_effective,
+        },
+        "warning_summary": _build_inspect_warning_summary(
+            warning_report_payloads,
+            symbol_file_paths=symbol_file_paths,
+        ),
         "files_considered": files_considered,
         "indexed": inspected_files,
         "unchanged": skipped_files,
@@ -1159,8 +1730,9 @@ def watch_status(config_path: Optional[str], as_json: bool) -> None:
         "log_file": config.watch_log_file,
     }
     payload.update(state)
+    payload.update(_build_watch_failure_contract(payload))
     payload["running"] = running
-    payload["status"] = _normalize_watch_status(running=running, state=state)
+    payload["status"] = _normalize_watch_status(running=running, state=payload)
     _emit(payload, as_json)
 
 

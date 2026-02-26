@@ -117,6 +117,10 @@ class VectorStore:
                 self._vector_id_to_symbol.pop(vector_id, None)
         self._persist_id_map()
 
+    def list_symbol_ids(self) -> List[str]:
+        """Return known vector symbol ids in deterministic order."""
+        return sorted(self._symbol_to_vector_id.keys())
+
     def search(self, query_vector: List[float], k: int) -> List[tuple[str, float]]:
         """Return k nearest symbol ids for a query vector."""
 

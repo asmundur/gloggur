@@ -14,6 +14,9 @@ from gloggur.io_failures import wrap_io_error
 
 SCHEMA_VERSION_KEY = "schema_version"
 INDEX_PROFILE_KEY = "index_profile"
+LAST_SUCCESS_RESUME_FINGERPRINT_KEY = "last_success_resume_fingerprint"
+LAST_SUCCESS_RESUME_AT_KEY = "last_success_resume_at"
+LAST_SUCCESS_TOOL_VERSION_KEY = "last_success_tool_version"
 CACHE_SCHEMA_VERSION = "2"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
@@ -288,6 +291,12 @@ class CacheManager:
             row = conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()
             return int(row["count"] if row else 0)
 
+    def list_file_paths(self) -> List[str]:
+        """Return all indexed file paths in deterministic order."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
+            return [str(row["path"]) for row in rows]
+
     def list_symbols_for_file(self, path: str) -> List[Symbol]:
         """Return cached symbols for a file path."""
         with self._connect() as conn:
@@ -340,6 +349,54 @@ class CacheManager:
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
                 (INDEX_PROFILE_KEY, profile),
+            )
+
+    def get_last_success_resume_fingerprint(self) -> Optional[str]:
+        """Return the cached last-success resume fingerprint marker."""
+        with self._connect() as conn:
+            return self._read_meta_value(conn, LAST_SUCCESS_RESUME_FINGERPRINT_KEY)
+
+    def set_last_success_resume_fingerprint(self, fingerprint: str) -> None:
+        """Persist the last-success resume fingerprint marker."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (LAST_SUCCESS_RESUME_FINGERPRINT_KEY, fingerprint),
+            )
+
+    def get_last_success_resume_at(self) -> Optional[str]:
+        """Return the last-success resume timestamp marker."""
+        with self._connect() as conn:
+            return self._read_meta_value(conn, LAST_SUCCESS_RESUME_AT_KEY)
+
+    def set_last_success_resume_at(self, timestamp: str) -> None:
+        """Persist the last-success resume timestamp marker."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (LAST_SUCCESS_RESUME_AT_KEY, timestamp),
+            )
+
+    def get_last_success_tool_version(self) -> Optional[str]:
+        """Return the last-success tool-version marker."""
+        with self._connect() as conn:
+            return self._read_meta_value(conn, LAST_SUCCESS_TOOL_VERSION_KEY)
+
+    def set_last_success_tool_version(self, version: str) -> None:
+        """Persist the last-success tool-version marker."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (LAST_SUCCESS_TOOL_VERSION_KEY, version),
             )
 
     def set_audit_warnings(self, symbol_id: str, warnings: List[str]) -> None:
@@ -415,6 +472,18 @@ class CacheManager:
                 (SCHEMA_VERSION_KEY, CACHE_SCHEMA_VERSION),
             )
             conn.execute("DELETE FROM meta WHERE key = ?", (INDEX_PROFILE_KEY,))
+            conn.execute(
+                "DELETE FROM meta WHERE key = ?",
+                (LAST_SUCCESS_RESUME_FINGERPRINT_KEY,),
+            )
+            conn.execute(
+                "DELETE FROM meta WHERE key = ?",
+                (LAST_SUCCESS_RESUME_AT_KEY,),
+            )
+            conn.execute(
+                "DELETE FROM meta WHERE key = ?",
+                (LAST_SUCCESS_TOOL_VERSION_KEY,),
+            )
 
     def _schema_reset_plan(self) -> Optional[_ResetPlan]:
         """Return a reset plan if schema is incompatible or DB corruption is detected."""

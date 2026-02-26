@@ -13,10 +13,20 @@ from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.concurrency import cache_write_lock
-from gloggur.indexer.indexer import Indexer
+from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
 from gloggur.models import IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
+
+DEFAULT_WATCH_FAILURE_REMEDIATION = (
+    "Inspect failed_samples and rerun watch/index after resolving the underlying error."
+)
+WATCH_FAILURE_REMEDIATION: Dict[str, List[str]] = {
+    "watch_incremental_inconsistent": [
+        "Watch incremental failure reported without reason codes; restart watch and verify version compatibility.",
+        "Run `gloggur index . --json` to restore deterministic cache/vector state.",
+    ],
+}
 
 
 def utc_now_iso() -> str:
@@ -91,8 +101,7 @@ class BatchResult:
 
     def as_dict(self) -> Dict[str, object]:
         """Convert to a JSON-friendly mapping."""
-
-        return {
+        payload: Dict[str, object] = {
             "changed_files": self.changed_files,
             "deleted_files": self.deleted_files,
             "files_considered": self.files_considered,
@@ -107,6 +116,16 @@ class BatchResult:
             "indexed_symbols": self.indexed_symbols,
             "last_error": self.last_error,
         }
+        if self.failed_reasons:
+            payload["failure_codes"] = sorted(self.failed_reasons)
+            payload["failure_guidance"] = {
+                reason: WATCH_FAILURE_REMEDIATION.get(
+                    reason,
+                    FAILURE_REMEDIATION.get(reason, [DEFAULT_WATCH_FAILURE_REMEDIATION]),
+                )
+                for reason in sorted(self.failed_reasons)
+            }
+        return payload
 
 
 class WatchService:
@@ -142,6 +161,56 @@ class WatchService:
         self._total_errors = 0
         self._total_failed_reasons: Dict[str, int] = {}
         self._total_failed_samples: List[str] = []
+
+    @staticmethod
+    def _failure_contract(failed_reasons: Dict[str, int]) -> Dict[str, object]:
+        """Build stable failure-code/remediation payload fields."""
+        if not failed_reasons:
+            return {}
+        return {
+            "failure_codes": sorted(failed_reasons),
+            "failure_guidance": {
+                reason: WATCH_FAILURE_REMEDIATION.get(
+                    reason,
+                    FAILURE_REMEDIATION.get(reason, [DEFAULT_WATCH_FAILURE_REMEDIATION]),
+                )
+                for reason in sorted(failed_reasons)
+            },
+        }
+
+    @staticmethod
+    def _merge_failure_payload(result: BatchResult, payload: Dict[str, object]) -> None:
+        """Merge indexed cleanup/consistency failures into a batch result."""
+        normalized_reasons: Dict[str, int] = {}
+        failed_reasons = payload.get("failed_reasons", {})
+        if isinstance(failed_reasons, dict):
+            for raw_reason, raw_count in failed_reasons.items():
+                reason = str(raw_reason)
+                try:
+                    count = int(raw_count)
+                except (TypeError, ValueError):
+                    count = 0
+                if count <= 0:
+                    continue
+                normalized_reasons[reason] = normalized_reasons.get(reason, 0) + count
+        raw_failed = payload.get("failed", 0)
+        try:
+            failed_count = int(raw_failed)
+        except (TypeError, ValueError):
+            failed_count = 0
+        if failed_count > 0 and not normalized_reasons:
+            normalized_reasons["watch_incremental_inconsistent"] = failed_count
+        for reason, count in normalized_reasons.items():
+            result.error_count += count
+            result.failed_reasons[reason] = result.failed_reasons.get(reason, 0) + count
+        failed_samples = payload.get("failed_samples", [])
+        if isinstance(failed_samples, list):
+            for sample in failed_samples:
+                sample_text = str(sample)
+                if len(result.failed_samples) >= 5:
+                    break
+                result.failed_samples.append(sample_text)
+                result.last_error = sample_text
 
     def run_forever(self, path: str) -> Dict[str, object]:
         """Watch filesystem changes and process until stopped."""
@@ -190,6 +259,7 @@ class WatchService:
                     failed=self._total_errors,
                     failed_reasons=dict(self._total_failed_reasons),
                     failed_samples=list(self._total_failed_samples),
+                    **self._failure_contract(self._total_failed_reasons),
                     indexed_files=self._total_indexed_files,
                     indexed_symbols=self._total_indexed_symbols,
                     skipped_files=self._total_skipped_files,
@@ -211,6 +281,7 @@ class WatchService:
                 failed=self._total_errors,
                 failed_reasons=dict(self._total_failed_reasons),
                 failed_samples=list(self._total_failed_samples),
+                **self._failure_contract(self._total_failed_reasons),
                 indexed_files=self._total_indexed_files,
                 indexed_symbols=self._total_indexed_symbols,
                 skipped_files=self._total_skipped_files,
@@ -226,6 +297,7 @@ class WatchService:
             "failed": self._total_errors,
             "failed_reasons": dict(self._total_failed_reasons),
             "failed_samples": list(self._total_failed_samples),
+            **self._failure_contract(self._total_failed_reasons),
             "indexed_files": self._total_indexed_files,
             "indexed_symbols": self._total_indexed_symbols,
             "skipped_files": self._total_skipped_files,
@@ -282,14 +354,21 @@ class WatchService:
                         )
 
                 if metadata_invalidated:
+                    stale_cleanup = self.indexer.prune_missing_file_entries()
+                    result.deleted_files += int(stale_cleanup.get("files_removed", 0))
+                    result.indexed_files += int(stale_cleanup.get("files_removed", 0))
+                    self._merge_failure_payload(result, stale_cleanup)
                     self.vector_store.save()
-                    metadata = IndexMetadata(
-                        version=self.config.index_version,
-                        total_symbols=len(self.cache.list_symbols()),
-                        indexed_files=self.cache.count_files(),
-                    )
-                    self.cache.set_index_metadata(metadata)
-                    self.cache.set_index_profile(self.config.embedding_profile())
+                    consistency = self.indexer.validate_vector_metadata_consistency()
+                    self._merge_failure_payload(result, consistency)
+                    if result.error_count == 0:
+                        metadata = IndexMetadata(
+                            version=self.config.index_version,
+                            total_symbols=len(self.cache.list_symbols()),
+                            indexed_files=self.cache.count_files(),
+                        )
+                        self.cache.set_index_metadata(metadata)
+                        self.cache.set_index_profile(self.config.embedding_profile())
         return result
 
     def _watch_changes(self, watch_target: str):

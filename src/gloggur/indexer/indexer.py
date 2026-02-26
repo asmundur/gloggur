@@ -15,6 +15,42 @@ from gloggur.parsers.registry import ParserRegistry
 from gloggur.storage.vector_store import VectorStore
 
 
+FAILURE_REMEDIATION: Dict[str, List[str]] = {
+    "decode_error": [
+        "Re-save the file in UTF-8 encoding.",
+        "Exclude non-source/binary files from the indexing path.",
+    ],
+    "read_error": [
+        "Verify file permissions and that the file still exists.",
+        "Retry indexing after fixing filesystem read errors.",
+    ],
+    "parser_unavailable": [
+        "Use a supported extension or register a parser for the file type.",
+        "Exclude unsupported files from the repository path.",
+    ],
+    "parse_error": [
+        "Fix syntax errors in the source file and rerun index.",
+        "Use --allow-partial to continue while collecting parse failures.",
+    ],
+    "storage_error": [
+        "Check cache directory writability and free disk space.",
+        "Retry `gloggur index . --json` after resolving storage issues.",
+    ],
+    "stale_cleanup_error": [
+        "Ensure stale file paths can be removed from cache metadata.",
+        "Run `gloggur clear-cache --json` and rebuild if cleanup keeps failing.",
+    ],
+    "vector_metadata_mismatch": [
+        "Rebuild vectors for the affected repository (`gloggur index . --json`).",
+        "Run `gloggur clear-cache --json` if vector/cache state remains inconsistent.",
+    ],
+    "vector_consistency_unverifiable": [
+        "Use a vector store implementation that supports deterministic symbol-id listing.",
+        "Rerun `gloggur index . --json` after enabling vector/cache consistency checks.",
+    ],
+}
+
+
 @dataclass
 class IndexResult:
     """Dataclass for indexing results with explicit terminal file outcomes."""
@@ -25,6 +61,11 @@ class IndexResult:
     failed: int
     indexed_symbols: int
     duration_ms: int
+    files_changed: int = 0
+    files_removed: int = 0
+    symbols_added: int = 0
+    symbols_updated: int = 0
+    symbols_removed: int = 0
     failed_reasons: Dict[str, int] = field(default_factory=dict)
     failed_samples: List[str] = field(default_factory=list)
 
@@ -42,19 +83,34 @@ class IndexResult:
 
     def as_payload(self) -> Dict[str, object]:
         """Build a CLI payload with explicit outcomes and legacy aliases."""
-
-        return {
+        payload: Dict[str, object] = {
             "files_considered": self.files_considered,
+            "files_scanned": self.files_considered,
             "indexed": self.indexed,
             "unchanged": self.unchanged,
             "failed": self.failed,
             "failed_reasons": dict(self.failed_reasons),
             "failed_samples": list(self.failed_samples),
             "indexed_symbols": self.indexed_symbols,
+            "files_changed": self.files_changed,
+            "files_removed": self.files_removed,
+            "symbols_added": self.symbols_added,
+            "symbols_updated": self.symbols_updated,
+            "symbols_removed": self.symbols_removed,
             "duration_ms": self.duration_ms,
             "indexed_files": self.indexed_files,
             "skipped_files": self.skipped_files,
         }
+        if self.failed_reasons:
+            payload["failure_codes"] = sorted(self.failed_reasons)
+            payload["failure_guidance"] = {
+                reason: FAILURE_REMEDIATION.get(
+                    reason,
+                    ["Inspect failed_samples and rerun indexing after resolving the underlying error."],
+                )
+                for reason in sorted(self.failed_reasons)
+            }
+        return payload
 
 
 @dataclass(frozen=True)
@@ -63,6 +119,9 @@ class FileIndexOutcome:
 
     status: str
     symbols_indexed: int = 0
+    symbols_added: int = 0
+    symbols_updated: int = 0
+    symbols_removed: int = 0
     reason: Optional[str] = None
     detail: Optional[str] = None
 
@@ -99,15 +158,24 @@ class Indexer:
         unchanged_files = 0
         failed_files = 0
         indexed_symbols = 0
+        symbols_added = 0
+        symbols_updated = 0
+        symbols_removed = 0
+        files_removed = 0
         failed_reasons: Dict[str, int] = {}
         failed_samples: List[str] = []
+        seen_paths: set[str] = set()
 
         for file_path in self._iter_source_files(path):
+            seen_paths.add(file_path)
             files_considered += 1
             outcome = self.index_file_with_outcome(file_path)
             if outcome.status == "indexed":
                 indexed_files += 1
                 indexed_symbols += outcome.symbols_indexed
+                symbols_added += outcome.symbols_added
+                symbols_updated += outcome.symbols_updated
+                symbols_removed += outcome.symbols_removed
                 continue
             if outcome.status == "unchanged":
                 unchanged_files += 1
@@ -122,8 +190,28 @@ class Indexer:
                 else:
                     failed_samples.append(file_path)
 
+        stale_cleanup = self._prune_stale_files(seen_paths)
+        files_removed += stale_cleanup["files_removed"]
+        symbols_removed += stale_cleanup["symbols_removed"]
+        stale_cleanup_failures = stale_cleanup["failed"]
+        failed_files += stale_cleanup_failures
+        for reason, count in stale_cleanup["failed_reasons"].items():
+            failed_reasons[reason] = failed_reasons.get(reason, 0) + count
+        for sample in stale_cleanup["failed_samples"]:
+            if len(failed_samples) >= 5:
+                break
+            failed_samples.append(sample)
+
         if self.vector_store:
             self.vector_store.save()
+        consistency = self._validate_vector_metadata_consistency()
+        failed_files += consistency["failed"]
+        for reason, count in consistency["failed_reasons"].items():
+            failed_reasons[reason] = failed_reasons.get(reason, 0) + count
+        for sample in consistency["failed_samples"]:
+            if len(failed_samples) >= 5:
+                break
+            failed_samples.append(sample)
 
         if failed_files == 0:
             metadata = IndexMetadata(
@@ -142,6 +230,11 @@ class Indexer:
             failed=failed_files,
             indexed_symbols=indexed_symbols,
             duration_ms=duration_ms,
+            files_changed=indexed_files,
+            files_removed=files_removed,
+            symbols_added=symbols_added,
+            symbols_updated=symbols_updated,
+            symbols_removed=symbols_removed,
             failed_reasons=failed_reasons,
             failed_samples=failed_samples,
         )
@@ -182,6 +275,11 @@ class Indexer:
 
         content_hash = self._hash_content(source)
         existing = self.cache.get_file_metadata(path)
+        existing_symbols_by_id: Dict[str, Symbol] = {}
+        if existing:
+            existing_symbols_by_id = {
+                symbol.id: symbol for symbol in self.cache.list_symbols_for_file(path)
+            }
         if existing and existing.content_hash == content_hash:
             return FileIndexOutcome(status="unchanged")
 
@@ -205,6 +303,19 @@ class Indexer:
         try:
             symbols = self._apply_embeddings(symbols, source)
             previous_symbol_ids = existing.symbols if existing else []
+            new_symbols_by_id = {symbol.id: symbol for symbol in symbols}
+            new_symbol_ids = set(new_symbols_by_id)
+            previous_symbol_ids_set = set(previous_symbol_ids)
+            symbols_added = len(new_symbol_ids - previous_symbol_ids_set)
+            symbols_removed = len(previous_symbol_ids_set - new_symbol_ids)
+            symbols_updated = 0
+            for symbol_id in new_symbol_ids & previous_symbol_ids_set:
+                previous_symbol = existing_symbols_by_id.get(symbol_id)
+                current_symbol = new_symbols_by_id.get(symbol_id)
+                if previous_symbol is None or current_symbol is None:
+                    continue
+                if previous_symbol.body_hash != current_symbol.body_hash:
+                    symbols_updated += 1
             if self.vector_store and previous_symbol_ids:
                 self.vector_store.remove_ids(previous_symbol_ids)
             self.cache.delete_symbols_for_file(path)
@@ -226,7 +337,13 @@ class Indexer:
                 detail=f"{type(exc).__name__}: {exc}",
             )
 
-        return FileIndexOutcome(status="indexed", symbols_indexed=len(symbols))
+        return FileIndexOutcome(
+            status="indexed",
+            symbols_indexed=len(symbols),
+            symbols_added=symbols_added,
+            symbols_updated=symbols_updated,
+            symbols_removed=symbols_removed,
+        )
 
     def index_file(self, path: str) -> Optional[int]:
         """Index a file and return symbol count when indexed, else None."""
@@ -254,6 +371,90 @@ class Indexer:
             if path.endswith(ext):
                 return True
         return False
+
+    def _prune_stale_files(self, seen_paths: set[str]) -> Dict[str, object]:
+        """Remove cached file/symbol rows for files no longer present in the index walk."""
+        files_removed = 0
+        symbols_removed = 0
+        failed = 0
+        failed_reasons: Dict[str, int] = {}
+        failed_samples: List[str] = []
+        cached_paths = set(self.cache.list_file_paths())
+        stale_paths = sorted(cached_paths - seen_paths)
+        for stale_path in stale_paths:
+            try:
+                metadata = self.cache.get_file_metadata(stale_path)
+                previous_symbol_ids = metadata.symbols if metadata else []
+                if self.vector_store and previous_symbol_ids:
+                    self.vector_store.remove_ids(previous_symbol_ids)
+                self.cache.delete_symbols_for_file(stale_path)
+                self.cache.delete_file_metadata(stale_path)
+                files_removed += 1
+                symbols_removed += len(previous_symbol_ids)
+            except Exception as exc:
+                failed += 1
+                reason = "stale_cleanup_error"
+                failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+                if len(failed_samples) < 5:
+                    failed_samples.append(f"{stale_path}: {type(exc).__name__}: {exc}")
+        return {
+            "files_removed": files_removed,
+            "symbols_removed": symbols_removed,
+            "failed": failed,
+            "failed_reasons": failed_reasons,
+            "failed_samples": failed_samples,
+        }
+
+    def prune_missing_file_entries(self) -> Dict[str, object]:
+        """Remove cached entries whose files no longer exist on disk."""
+        cached_paths = set(self.cache.list_file_paths())
+        existing_paths = {path for path in cached_paths if os.path.exists(path)}
+        return self._prune_stale_files(existing_paths)
+
+    def _validate_vector_metadata_consistency(self) -> Dict[str, object]:
+        """Detect vector/cache symbol-id divergence and return stable failure metadata."""
+        if self.embedding_provider is None or self.vector_store is None:
+            return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+        list_symbol_ids = getattr(self.vector_store, "list_symbol_ids", None)
+        if not callable(list_symbol_ids):
+            return {
+                "failed": 1,
+                "failed_reasons": {"vector_consistency_unverifiable": 1},
+                "failed_samples": [
+                    "vector consistency check unavailable: vector store does not expose list_symbol_ids()"
+                ],
+            }
+        try:
+            vector_symbol_ids = {str(symbol_id) for symbol_id in list_symbol_ids()}
+        except Exception as exc:
+            return {
+                "failed": 1,
+                "failed_reasons": {"vector_metadata_mismatch": 1},
+                "failed_samples": [f"vector metadata check failed: {type(exc).__name__}: {exc}"],
+            }
+
+        cache_symbol_ids = {symbol.id for symbol in self.cache.list_symbols()}
+        missing_vectors = sorted(cache_symbol_ids - vector_symbol_ids)
+        stale_vectors = sorted(vector_symbol_ids - cache_symbol_ids)
+        if not missing_vectors and not stale_vectors:
+            return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+        sample = (
+            "vector/cache mismatch "
+            f"(missing_vectors={len(missing_vectors)}, stale_vectors={len(stale_vectors)})"
+        )
+        if missing_vectors:
+            sample += f"; missing_example={missing_vectors[0]}"
+        if stale_vectors:
+            sample += f"; stale_example={stale_vectors[0]}"
+        return {
+            "failed": 1,
+            "failed_reasons": {"vector_metadata_mismatch": 1},
+            "failed_samples": [sample],
+        }
+
+    def validate_vector_metadata_consistency(self) -> Dict[str, object]:
+        """Public post-index consistency check used by both repo and single-file index flows."""
+        return self._validate_vector_metadata_consistency()
 
     def _apply_embeddings(self, symbols: List[Symbol], source: str) -> List[Symbol]:
         """Attach embedding vectors to symbols when a provider is available."""

@@ -836,6 +836,147 @@ def test_watch_status_json_reports_malformed_state_file(
     assert "Traceback (most recent call last)" not in result.output
 
 
+def test_watch_status_json_synthesizes_inconsistent_failure_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """watch status should fail closed when failure counts lack machine-readable reason codes."""
+    runner = CliRunner()
+    pid_file = tmp_path / "watch.pid"
+    state_file = tmp_path / "watch_state.json"
+    pid_file.write_text("4242\n", encoding="utf8")
+    state_file.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "running": True,
+                "failed": 2,
+            }
+        ),
+        encoding="utf8",
+    )
+    config = GloggurConfig(
+        watch_pid_file=str(pid_file),
+        watch_state_file=str(state_file),
+    )
+    monkeypatch.setattr("gloggur.cli.main._load_config", lambda _path: config)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: True)
+
+    result = runner.invoke(cli, ["watch", "status", "--json"])
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["running"] is True
+    assert payload["status"] == "running_with_errors"
+    reasons = payload["failed_reasons"]
+    assert isinstance(reasons, dict)
+    assert reasons == {"watch_state_inconsistent": 2}
+    failure_codes = payload["failure_codes"]
+    assert isinstance(failure_codes, list)
+    assert failure_codes == ["watch_state_inconsistent"]
+    guidance = payload["failure_guidance"]
+    assert isinstance(guidance, dict)
+    assert "watch_state_inconsistent" in guidance
+    assert isinstance(guidance["watch_state_inconsistent"], list)
+    assert guidance["watch_state_inconsistent"]
+
+
+def test_watch_status_json_uses_last_batch_failure_reasons_when_top_level_counters_drift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """watch status should fail closed using last_batch reasons when top-level counters drift."""
+    runner = CliRunner()
+    pid_file = tmp_path / "watch.pid"
+    state_file = tmp_path / "watch_state.json"
+    pid_file.write_text("4242\n", encoding="utf8")
+    state_file.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "running": True,
+                "failed": 0,
+                "failed_reasons": {},
+                "last_batch": {
+                    "failed": 1,
+                    "failed_reasons": {"vector_metadata_mismatch": 1},
+                },
+            }
+        ),
+        encoding="utf8",
+    )
+    config = GloggurConfig(
+        watch_pid_file=str(pid_file),
+        watch_state_file=str(state_file),
+    )
+    monkeypatch.setattr("gloggur.cli.main._load_config", lambda _path: config)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: True)
+
+    result = runner.invoke(cli, ["watch", "status", "--json"])
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["running"] is True
+    assert payload["status"] == "running_with_errors"
+    reasons = payload["failed_reasons"]
+    assert isinstance(reasons, dict)
+    assert reasons == {"vector_metadata_mismatch": 1}
+    failure_codes = payload["failure_codes"]
+    assert isinstance(failure_codes, list)
+    assert failure_codes == ["vector_metadata_mismatch"]
+    guidance = payload["failure_guidance"]
+    assert isinstance(guidance, dict)
+    assert "vector_metadata_mismatch" in guidance
+    assert isinstance(guidance["vector_metadata_mismatch"], list)
+    assert guidance["vector_metadata_mismatch"]
+
+
+def test_watch_status_json_synthesizes_last_batch_inconsistent_failure_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """watch status should emit a deterministic code when last_batch failed count lacks reason codes."""
+    runner = CliRunner()
+    pid_file = tmp_path / "watch.pid"
+    state_file = tmp_path / "watch_state.json"
+    pid_file.write_text("4242\n", encoding="utf8")
+    state_file.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "running": True,
+                "failed": 0,
+                "last_batch": {"failed": 2},
+            }
+        ),
+        encoding="utf8",
+    )
+    config = GloggurConfig(
+        watch_pid_file=str(pid_file),
+        watch_state_file=str(state_file),
+    )
+    monkeypatch.setattr("gloggur.cli.main._load_config", lambda _path: config)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: True)
+
+    result = runner.invoke(cli, ["watch", "status", "--json"])
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["running"] is True
+    assert payload["status"] == "running_with_errors"
+    reasons = payload["failed_reasons"]
+    assert isinstance(reasons, dict)
+    assert reasons == {"watch_last_batch_inconsistent": 2}
+    failure_codes = payload["failure_codes"]
+    assert isinstance(failure_codes, list)
+    assert failure_codes == ["watch_last_batch_inconsistent"]
+    guidance = payload["failure_guidance"]
+    assert isinstance(guidance, dict)
+    assert "watch_last_batch_inconsistent" in guidance
+    assert isinstance(guidance["watch_last_batch_inconsistent"], list)
+    assert guidance["watch_last_batch_inconsistent"]
+
+
 def test_watch_status_normalizes_stale_running_state_when_process_is_dead(
     tmp_path: Path,
     monkeypatch,

@@ -283,6 +283,9 @@ These tasks track reliability hardening for cache/index operations after the sch
   - emits bounded `pip debug --verbose` output for resolver/environment triage
   - runs verbose install (`python -m pip install ... -v`) and captures a bounded `pip freeze` snapshot
 - Added workflow regression coverage in `tests/unit/test_verification_workflow.py` asserting those diagnostics remain present.
+- Added inverted-failure workflow regression coverage to prevent silent false-green CI states:
+  - asserts matrix has no `exclude` block and no duplicate Python lanes (guards against hidden lane suppression)
+  - asserts the `Run pytest` step has no `if:` condition so no lane can skip execution silently
 - Remaining closure gap: CI run evidence from at least one PR/branch showing all matrix jobs triggered.
 
 ---
@@ -293,7 +296,7 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 
 ## F5 - Deterministic Index Fingerprinting and Session Continuity
 
-**Status**: planned
+**Status**: in_progress
 **Priority**: P0
 **Owner**: codex
 
@@ -333,11 +336,47 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
 
+**Progress Update (2026-02-26)**
+- Added deterministic resume-contract metadata to CLI JSON outputs:
+  - `status --json` now includes `resume_decision`, machine-readable `resume_reason_codes`, and deterministic `expected_resume_fingerprint`/`cached_resume_fingerprint`.
+  - `search --json` now includes the same resume metadata in both normal and `needs_reindex` response paths.
+- Added persisted last-success resume-state markers in cache metadata:
+  - `index` now saves `last_success_resume_fingerprint` and `last_success_resume_at` only when index state is reusable (`resume_ok`).
+  - `status`/`search` now expose `last_success_resume_fingerprint_match` to flag stale previously-successful state under new compatibility expectations.
+- Added deterministic fingerprint helpers in `src/gloggur/cli/main.py`:
+  - stable JSON hashing (`sort_keys=True`) to avoid ordering-dependent fingerprint drift
+  - metadata digest normalization for index metadata state.
+- Added explicit tool-version input to resume fingerprint schema:
+  - resume fingerprint payload now includes current `tool_version`.
+  - persisted state now includes `last_success_tool_version`, with `*_tool_version_match` exposure in `status`/`search`.
+- Hardened tool-version drift policy to fail closed:
+  - `status`/`search` now treat `last_success_tool_version` mismatch as `reindex_required` with machine-readable `tool_version_changed` code.
+  - cached fingerprint construction now uses cached tool-version marker when available, so version drift deterministically flips `resume_fingerprint_match`.
+  - legacy caches without `last_success_tool_version` remain resume-compatible (no forced false-positive reindex).
+- Added unit coverage in `tests/unit/test_cli_main.py` for:
+  - fingerprint stability across payload key ordering
+  - machine-readable profile-change reason coding
+  - missing-metadata reason coding.
+- Added unit coverage for version-drift behavior:
+  - tool-version mismatch now enforces `reindex_required` (`tool_version_changed`) without false profile-drift codes.
+  - legacy missing-marker behavior stays `resume_ok` to preserve old-cache compatibility.
+- Added cache metadata regression coverage in `tests/unit/test_cache.py` for last-success resume marker round-trip and clear semantics.
+- Extended integration coverage in `tests/integration/test_cli.py` to assert `status` and `search` resume decision fields across profile-drift and post-reindex recovery flows.
+- Added fresh-process integration coverage in `tests/integration/test_resume_contract_integration.py`:
+  - verifies `last_success_resume_*` markers persist across independent CLI process invocations (`index` -> `status` -> `status` -> `search`).
+  - verifies schema-version mismatch emits deterministic machine-readable compatibility decision codes (`cache_schema_rebuilt`, `missing_index_metadata`) and avoids false profile-change attribution.
+- Added inverted-failure integration coverage:
+  - direct cache-meta tampering (`last_success_tool_version`) now correctly blocks resume and returns `tool_version_changed` in both `status` and `search`.
+- Updated `README.md` with a copy-paste session-resume decision flow driven by `gloggur status --json`.
+- Inverted failure-mode insight applied: protect against "false reusable cache" states where only free-text reasons are emitted by adding stable reason codes and fingerprint comparison fields for agent-safe branching.
+- Remaining closure gaps:
+  - add an explicit operator override path (if desired) for controlled tool-version drift acceptance in offline/air-gapped environments.
+
 ---
 
 ## F6 - Incremental Rebuild Engine for Changed Files Only
 
-**Status**: planned
+**Status**: in_progress
 **Priority**: P0
 **Owner**: codex
 
@@ -376,6 +415,234 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
+
+**Progress Update (2026-02-26)**
+- Added stale-file pruning during full `index` runs in `src/gloggur/indexer/indexer.py`:
+  - reindex now computes `cached_paths - seen_paths` and removes stale file metadata/symbol rows.
+  - vector ids for stale files are removed when vector store is active, preventing lingering vector-only artifacts.
+- Added incremental observability counters to index results (`IndexResult.as_payload()`):
+  - `files_scanned` (alias of files considered),
+  - `files_changed`,
+  - `files_removed`,
+  - `symbols_added`,
+  - `symbols_updated`,
+  - `symbols_removed`.
+- Added per-file delta accounting in `index_file_with_outcome`:
+  - compares previous and current symbol sets/body hashes to classify add/update/remove symbol deltas.
+- Added cache helper `list_file_paths()` for deterministic stale-path pruning input.
+- Added regression coverage:
+  - unit: `tests/unit/test_indexer.py::test_indexer_prunes_deleted_files_and_reports_symbol_removals`.
+  - integration: `tests/integration/test_cli.py::test_cli_index_reports_incremental_observability_and_prunes_deleted_files`.
+  - inverted failure-mode regression (priority scenario #1): `tests/integration/test_cli.py::test_cli_index_rename_does_not_leave_ghost_symbols`.
+- Inverted failure-mode insight applied:
+  - addressed "success reported but wrong index retained" for rename/delete flows where stale old-path symbols could survive and create ghost retrieval candidates.
+- Remaining closure gaps:
+  - add explicit regression for symbol add/remove mismatches where vector and metadata counts diverge under repeated same-file edits.
+  - add regression for docstring-only edits to confirm content-hash path does not falsely classify changes as unchanged.
+
+**Progress Update (2026-02-26, inverted-failure follow-up)**
+- Added deterministic stale-cleanup failure signaling in `src/gloggur/indexer/indexer.py`:
+  - stale-prune exceptions now produce stable reason code `stale_cleanup_error` in `failed_reasons`.
+  - index payload now emits structured `failure_guidance` remediation steps keyed by error code.
+  - cleanup failures are counted in `failed` so runs cannot report success when stale rows were not fully cleaned.
+- Inverted problem explicitly targeted:
+  - possible wrong-success mode: rename/delete flow leaves old-path cache rows if cleanup partially fails, while run appears successful.
+  - regression now ensures this cannot be silently successful by asserting `failed=1` + `failed_reasons={"stale_cleanup_error": 1}` + remediation payload.
+- Regression tests added/strengthened:
+  - `tests/unit/test_indexer.py::test_indexer_surfaces_stale_cleanup_failures_with_deterministic_reason_code`
+  - `tests/integration/test_cli.py::test_cli_index_rename_does_not_leave_ghost_symbols` (kept as priority #1 guard)
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_indexer.py tests/integration/test_cli.py::test_cli_index_reports_incremental_observability_and_prunes_deleted_files tests/integration/test_cli.py::test_cli_index_rename_does_not_leave_ghost_symbols -q` (6 passed)
+- Remaining gap:
+  - add scenario #2 regression for vector/metadata divergence under repeated symbol add/remove edits within one file.
+
+**Progress Update (2026-02-26, scenario #2 hardening)**
+- Added deterministic vector/cache consistency validation in `src/gloggur/indexer/indexer.py`:
+  - post-index runs now compare cached symbol ids vs vector symbol ids when embeddings + vector store are active.
+  - mismatch now emits stable error code `vector_metadata_mismatch` (in `failed_reasons`) and structured `failure_guidance` remediation in JSON payload.
+- Added vector-store support method `list_symbol_ids()` in `src/gloggur/storage/vector_store.py` for deterministic consistency checks.
+- Inverted problem explicitly targeted:
+  - possible wrong-success mode: symbol removal updates cache rows but stale vectors remain, so search can return ghost vector hits while index reports success.
+  - added regression that simulates stale vectors surviving removals and verifies the run fails closed with `vector_metadata_mismatch`.
+- Added/strengthened regression test:
+  - `tests/unit/test_indexer.py::test_indexer_detects_vector_metadata_mismatch_under_symbol_removal`
+  - this would have failed before because index runs did not validate vector/cache consistency and would report success.
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_indexer.py -q` (5 passed)
+- Remaining gap:
+  - add an integration-level CLI regression that injects on-disk vector-id drift and asserts `index --json` surfaces `vector_metadata_mismatch` + `failure_guidance`.
+
+**Progress Update (2026-02-26, scenario #2 CLI regression + error-contract hardening)**
+- Added deterministic failure-contract field for index JSON payloads in `src/gloggur/indexer/indexer.py`:
+  - `failure_codes` (sorted stable list derived from `failed_reasons`) for branch-safe automation handling.
+  - retained `failure_guidance` remediation mapping by code.
+- Closed the prior scenario #2 integration gap with explicit drift injection:
+  - new integration test `tests/integration/test_cli.py::test_cli_index_reports_vector_metadata_mismatch_on_tampered_vector_map`.
+  - test mutates `.gloggur-cache/vectors.json` (`symbol_to_vector_id`) to simulate on-disk vector/cache divergence.
+  - verifies `index --json` fails closed with:
+    - `failed_reasons={"vector_metadata_mismatch": 1}`
+    - `failure_codes=["vector_metadata_mismatch"]`
+    - structured remediation in `failure_guidance`.
+- Strengthened unit coverage for deterministic failure payload shape:
+  - `tests/unit/test_indexer.py` now asserts `failure_codes` for `stale_cleanup_error` and `vector_metadata_mismatch` paths.
+- Inverted problem explicitly targeted:
+  - possible wrong-success mode: vectors map drifts from cached symbols on disk and incremental index still reports success.
+  - regression now proves this is surfaced as deterministic failure instead of silent success.
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_indexer.py tests/integration/test_cli.py::test_cli_index_reports_vector_metadata_mismatch_on_tampered_vector_map tests/integration/test_cli.py::test_cli_index_rename_does_not_leave_ghost_symbols -q` (7 passed)
+- Remaining gap:
+  - add scenario #3 regression for docstring-only edits to ensure index/search semantics do not silently serve stale vectors under unchanged content-hash assumptions.
+
+**Progress Update (2026-02-26, scenario #3 inversion + fail-closed verification hardening)**
+- Added a deterministic fail-closed reason code in `src/gloggur/indexer/indexer.py`:
+  - `vector_consistency_unverifiable` is now emitted when embeddings + vector store are active but the vector store cannot expose `list_symbol_ids()` for deterministic cache/vector validation.
+  - `failure_guidance` remediation text was added for this code, and payloads continue to emit stable `failure_codes`.
+- Added unit regression `tests/unit/test_indexer.py::test_indexer_fails_closed_when_vector_consistency_is_unverifiable`:
+  - before this change, indexing would report success in this unverifiable state;
+  - now it fails closed with `failed_reasons={"vector_consistency_unverifiable": 1}` and structured remediation.
+- Inverted problem explicitly targeted (priority scenario #3):
+  - possible wrong-success mode: a docstring-only edit is treated as unchanged, leaving stale docstring text/vectors while index reports success.
+  - added integration regression `tests/integration/test_cli.py::test_cli_index_docstring_only_change_is_not_skipped` asserting:
+    - second index run reports `indexed_files=1`, `files_changed=1`, `skipped_files=0`, `symbols_updated>=1`;
+    - cached symbol docstring is refreshed to the new token (old token absent).
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_indexer.py tests/integration/test_cli.py::test_cli_index_docstring_only_change_is_not_skipped tests/integration/test_cli.py::test_cli_index_reports_vector_metadata_mismatch_on_tampered_vector_map tests/integration/test_cli.py::test_cli_index_rename_does_not_leave_ghost_symbols -q` (9 passed)
+  - `gloggur inspect . --json --allow-partial` (exit 0 sanity pass)
+- Remaining gap:
+  - add scenario #4 regression for injected mid-run failure to ensure freshness markers and resume contracts cannot remain stale-success after partial/index-interrupted runs.
+
+**Progress Update (2026-02-26, scenario #4 interruption contract hardening)**
+- Added deterministic interruption signaling for resume contracts in `src/gloggur/cli/main.py`:
+  - new machine-readable reason code `index_interrupted` is emitted when index metadata is missing but prior last-success markers exist.
+  - `missing_index_metadata` is still emitted for backward compatibility, but interruption is now explicitly disambiguated for automation.
+- Added structured remediation guidance for resume failures:
+  - status/search JSON now include `resume_remediation` keyed by `resume_reason_codes`.
+  - includes deterministic remediation entries for `index_interrupted`, `missing_index_metadata`, `embedding_profile_changed`, `tool_version_changed`, and cache-reset reason codes.
+- Inverted problem explicitly targeted:
+  - wrong-success mode: an interrupted index leaves stale last-success markers and agents may treat cache as fresh because metadata loss is only reported generically.
+  - hardened by requiring explicit interruption code + remediation in status/search payloads after interruption windows.
+- Added/strengthened regression coverage:
+  - unit: `tests/unit/test_cli_main.py::test_resume_contract_interrupted_index_has_machine_reason_and_remediation` (new)
+  - unit strengthened: `tests/unit/test_cli_main.py::test_resume_contract_missing_metadata_has_machine_reason_code` now asserts `resume_remediation` contract.
+  - integration strengthened: `tests/integration/test_concurrency_integration.py::test_interrupted_index_run_preserves_needs_reindex_signal` now asserts `index_interrupted` + `resume_remediation` in both `status --json` and `search --json` metadata.
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_cli_main.py::test_resume_contract_missing_metadata_has_machine_reason_code tests/unit/test_cli_main.py::test_resume_contract_interrupted_index_has_machine_reason_and_remediation tests/integration/test_concurrency_integration.py::test_interrupted_index_run_preserves_needs_reindex_signal -q` (3 passed)
+  - `gloggur inspect . --json --allow-partial` (exit 0 sanity pass)
+- Remaining gap:
+  - extend interruption/freshness contract parity to single-file `index <file>` path so post-write consistency checks and interruption semantics are identical to repository indexing.
+
+**Progress Update (2026-02-26, single-file index parity fail-closed hardening)**
+- Closed the previously noted parity gap for single-file indexing in `src/gloggur/cli/main.py`:
+  - `index <file> --json` now executes the same vector/cache consistency post-check used by repository indexing.
+  - single-file indexing now fails closed on drift instead of reporting a false success with stale vector state.
+- Added deterministic single-file failure-contract fields:
+  - new helper emits `failure_codes` and `failure_guidance` for single-file index payloads from stable reason codes (matching repository index payload contract semantics).
+  - remediation is stable and machine-readable for automation branching.
+- Added `Indexer` public post-check hook in `src/gloggur/indexer/indexer.py`:
+  - `validate_vector_metadata_consistency()` exposes deterministic consistency checks to both repository and single-file CLI flows.
+- Inverted problem explicitly targeted:
+  - wrong-success mode: `index <file>` returns success/unchanged while `vectors.json` is already drifted from cache symbols, leaving retrieval candidates wrong.
+  - hardened by forcing post-index vector/cache validation and deterministic failure signaling on the single-file path.
+- Added regression that would fail before this change:
+  - `tests/integration/test_cli.py::test_cli_single_file_index_fails_closed_on_tampered_vector_map`
+  - test first indexes repository, then tampers `.gloggur-cache/vectors.json`, then runs `index <file>` and asserts:
+    - non-zero exit,
+    - `failed_reasons={"vector_metadata_mismatch": 1}`,
+    - `failure_codes=["vector_metadata_mismatch"]`,
+    - structured remediation under `failure_guidance`.
+- Verified:
+  - `.venv/bin/python -m pytest tests/integration/test_cli.py::test_cli_single_file_index_fails_closed_on_tampered_vector_map tests/integration/test_cli.py::test_cli_index_reports_vector_metadata_mismatch_on_tampered_vector_map tests/unit/test_cli_main.py::test_index_json_reports_vector_store_write_failure -q` (3 passed)
+  - `gloggur inspect . --json --allow-partial` (exit 0 sanity pass)
+- Remaining gap:
+  - unify stale-path pruning semantics for targeted file indexing vs repository indexing so rename/delete cleanup guarantees are explicit when only `index <file>` is run repeatedly.
+
+**Progress Update (2026-02-26, single-file stale-path cleanup parity + deterministic failure contract)**
+- Extended single-file index parity in `src/gloggur/cli/main.py` and `src/gloggur/indexer/indexer.py`:
+  - added `Indexer.prune_missing_file_entries()` so `index <file>` can prune stale metadata/symbol rows for missing paths instead of leaving ghost cache entries.
+  - wired single-file `index` to run stale-entry cleanup + vector/cache consistency checks before publishing success metadata.
+  - single-file payload now includes incremental parity counters (`files_changed/files_removed/symbols_*`) and deterministic `failure_codes`/`failure_guidance`.
+- Deterministic failure mode hardened for single-file flow:
+  - stale cleanup failures now surface as `stale_cleanup_error` with structured remediation in JSON, matching full-index failure-contract semantics.
+- Inverted problem explicitly targeted:
+  - wrong-success mode: after rename/delete, running only `index <file>` could previously report success while stale old-path symbols remained indexed.
+  - now single-file runs prune missing stale paths and fail closed if that cleanup cannot complete.
+- Added regressions:
+  - `tests/integration/test_cli.py::test_cli_single_file_index_rename_prunes_missing_old_path_entries`
+    - asserts rename + `index <new_file>` removes old-path metadata/symbols and reports `files_removed=1`.
+  - `tests/integration/test_cli.py::test_cli_single_file_index_surfaces_stale_cleanup_error_with_failure_contract`
+    - injects deterministic stale-delete failure and asserts non-zero exit with:
+      - `failed_reasons={"stale_cleanup_error": 1}`,
+      - `failure_codes=["stale_cleanup_error"]`,
+      - structured remediation under `failure_guidance`.
+- Verified:
+  - `.venv/bin/python -m pytest tests/integration/test_cli.py::test_cli_single_file_index_rename_prunes_missing_old_path_entries tests/integration/test_cli.py::test_cli_single_file_index_surfaces_stale_cleanup_error_with_failure_contract tests/integration/test_cli.py::test_cli_single_file_index_fails_closed_on_tampered_vector_map tests/integration/test_cli.py::test_cli_index_rename_does_not_leave_ghost_symbols -q` (4 passed)
+  - `gloggur inspect . --json --allow-partial` (exit 0 sanity pass)
+- Remaining gap:
+  - add a watch-mode parity regression ensuring these stale-cleanup/failure-contract guarantees hold under daemonized `watch start` incremental updates, not only direct `index` commands.
+
+**Progress Update (2026-02-26, watch-mode stale-sweep parity + fail-closed contract)**
+- Extended watch incremental processing in `src/gloggur/watch/service.py` to prevent rename ghost-success in change-only batches:
+  - when metadata is invalidated in a watch batch, watch now runs `Indexer.prune_missing_file_entries()` to remove stale cache/vector rows for files that no longer exist on disk.
+  - this closes a fail-open path where a rename event missing the old-path delete could leave stale symbols while batch processing appeared successful.
+- Added deterministic watch failure-contract payload fields:
+  - `BatchResult.as_dict()` now emits stable `failure_codes` and `failure_guidance` derived from reason codes.
+  - watch run state/final payloads now also include `failure_codes` + `failure_guidance` for automation-safe branching.
+- Hardened fail-closed watch semantics:
+  - after stale-sweep and vector/cache consistency validation, index metadata/profile are only refreshed when `error_count == 0`.
+  - if cleanup/consistency fails, metadata remains invalidated so status/search can require rebuild instead of silently serving stale state.
+- Inverted problem explicitly targeted:
+  - wrong-success mode: watch rename emits only changed-new-path event; old-path rows remain and search still returns ghost hits even though watch batch reports no failure.
+  - regression added to prove old-path ghosts are pruned in this change-only rename scenario.
+- Added/strengthened regressions:
+  - integration: `tests/integration/test_watch_regressions.py::test_watch_rename_change_only_batch_prunes_ghost_old_path` (new).
+  - unit: `tests/unit/test_watch_service.py::test_watch_service_surfaces_stale_cleanup_failure_contract_and_keeps_metadata_invalid` (new).
+    - injects deterministic `stale_cleanup_error`,
+    - asserts `failure_codes=["stale_cleanup_error"]` + structured `failure_guidance`,
+    - asserts metadata remains invalid (fail-closed).
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_watch_service.py::test_watch_service_surfaces_stale_cleanup_failure_contract_and_keeps_metadata_invalid tests/integration/test_watch_regressions.py::test_watch_rename_change_only_batch_prunes_ghost_old_path tests/integration/test_watch_regressions.py::test_watch_rename_replaces_search_results -q` (3 passed)
+  - `gloggur inspect . --json --allow-partial` (exit 0 sanity pass)
+- Remaining gap:
+  - add daemon lifecycle integration coverage asserting `watch start --daemon` state-file `last_batch` carries failure-contract fields (`failure_codes`/`failure_guidance`) after a forced incremental failure, not only direct `WatchService.process_batch` calls.
+
+**Progress Update (2026-02-26, watch-status inconsistent-failure fail-closed signaling)**
+- Added deterministic watch-status failure-contract synthesis in `src/gloggur/cli/main.py`:
+  - new `watch_state_inconsistent` reason code is emitted when watch state reports failures (`failed`/`error_count`) but lacks machine-readable `failed_reasons`.
+  - `watch status --json` now emits structured `failure_codes` + `failure_guidance` derived from normalized reason counts.
+  - this prevents fail-open automation branches where status appears running but error semantics are missing/non-actionable.
+- Hardened watch status normalization:
+  - running watchers with non-zero failure counts now report `status="running_with_errors"` deterministically (instead of plain `running`).
+- Inverted problem explicitly targeted:
+  - wrong-success mode: watch status reports `running` with failure counters present but no reason codes/guidance, so automation can treat an unhealthy daemon as healthy.
+  - regression added to force this inconsistent state and assert fail-closed machine-readable output.
+- Added/strengthened regression coverage:
+  - unit: `tests/unit/test_cli_watch.py::test_watch_status_json_synthesizes_inconsistent_failure_contract` (new).
+  - strengthened watch regression continuity by re-running:
+    - `tests/unit/test_cli_watch.py::test_watch_status_normalizes_stale_running_state_when_process_is_dead`
+    - `tests/unit/test_watch_service.py::test_watch_service_surfaces_stale_cleanup_failure_contract_and_keeps_metadata_invalid`
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_cli_watch.py::test_watch_status_json_synthesizes_inconsistent_failure_contract tests/unit/test_cli_watch.py::test_watch_status_normalizes_stale_running_state_when_process_is_dead tests/unit/test_watch_service.py::test_watch_service_surfaces_stale_cleanup_failure_contract_and_keeps_metadata_invalid -q` (3 passed)
+  - `gloggur inspect . --json --allow-partial` (exit 0 sanity pass)
+- Remaining gap:
+  - add daemon lifecycle integration that intentionally triggers a watch incremental failure and asserts `watch status --json` includes `failure_codes`/`failure_guidance` sourced from real daemon state transitions, not synthetic state fixtures.
+
+**Progress Update (2026-02-26, daemon-state drift fail-closed parity via last_batch contract)**
+- Strengthened `watch status --json` fail-closed behavior in `src/gloggur/cli/main.py`:
+  - status/failure normalization now aggregates failure signals from both top-level watch counters and `last_batch`.
+  - running daemons now deterministically report `running_with_errors` when `last_batch` indicates failures, even if top-level counters drift to zero.
+  - added deterministic reason code `watch_last_batch_inconsistent` plus structured `failure_guidance` remediation when `last_batch` reports failures without reason codes.
+- Inverted problem explicitly targeted:
+  - wrong-success mode: daemon state can report `running` with `failed=0` after counter drift/manual state skew while `last_batch` still records real incremental failure, causing automation to branch as healthy.
+  - hardened by deriving failure contract/status from `last_batch` as a fail-closed source of truth.
+- Added/strengthened regression coverage:
+  - unit: `tests/unit/test_cli_watch.py::test_watch_status_json_uses_last_batch_failure_reasons_when_top_level_counters_drift` (new).
+  - unit: `tests/unit/test_cli_watch.py::test_watch_status_json_synthesizes_last_batch_inconsistent_failure_contract` (new deterministic failure code/remediation contract).
+  - integration: `tests/integration/test_watch_cli_lifecycle_integration.py::test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift` (new real daemon lifecycle regression: forced `vector_metadata_mismatch`, then top-level counter drift).
+- Verified:
+  - `.venv/bin/python -m pytest tests/unit/test_cli_watch.py::test_watch_status_json_uses_last_batch_failure_reasons_when_top_level_counters_drift tests/unit/test_cli_watch.py::test_watch_status_json_synthesizes_last_batch_inconsistent_failure_contract tests/unit/test_cli_watch.py::test_watch_status_json_synthesizes_inconsistent_failure_contract tests/integration/test_watch_cli_lifecycle_integration.py::test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift -q` (4 passed).
+  - `gloggur inspect . --json --allow-partial` (exit 0 sanity pass).
+- Remaining gap:
+  - add restart-resilience coverage proving `watch stop`/`watch start` rollover does not preserve stale `last_batch` failures as active health signals when the new daemon has not yet processed any batch.
 
 ---
 
@@ -527,7 +794,7 @@ Observed problem output (snapshot):
 
 ## F10 - Make Inspect Output Actionable by Default
 
-**Status**: planned
+**Status**: in_progress
 **Priority**: P0
 **Owner**: codex
 
@@ -565,6 +832,34 @@ Observed problem output (snapshot):
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
+
+**Progress Update (2026-02-26)**
+- Added first-class inspect scope controls in `src/gloggur/cli/main.py`:
+  - new CLI flags: `--include-tests` and `--include-scripts`.
+  - default directory traversal now excludes `tests/` + `scripts/` noise while retaining `src/` (and non-tests/scripts paths) for high-signal output.
+  - explicit path intent is preserved: inspecting `tests/` or `scripts/` directly still includes those classes without requiring flags.
+- Added deterministic warning summaries in inspect JSON payload (backward-compatible legacy fields retained):
+  - `inspect_scope` with effective include toggles.
+  - `warning_summary.by_warning_type`.
+  - `warning_summary.by_path_class` and `warning_summary.reports_by_path_class`.
+  - `warning_summary.top_files` (stable sort by warning count desc, then path).
+- Added deterministic traversal ordering (`dirs.sort()` / `files.sort()`) to reduce output jitter across runs.
+- Added unit coverage in `tests/unit/test_cli_main.py` for:
+  - path-class classification and default filter behavior.
+  - warning summary grouping/counting for type + path-class + top-file shapes.
+- Added integration coverage in `tests/integration/test_cli.py`:
+  - verifies `inspect` default source focus (`tests/scripts` excluded).
+  - verifies `--include-tests --include-scripts` restores full-audit behavior.
+  - verifies explicit `inspect tests/` path remains included (avoids accidental over-filtering on intentional test-only audits).
+  - adds payload-schema regression assertions for `inspect_scope` + `warning_summary` keys/types to keep automation contracts stable.
+- Added explicit payload contract versioning:
+  - `inspect --json` now emits `inspect_payload_schema_version` (initial value: `"1"`).
+  - schema regression coverage now asserts presence and value of the schema version marker.
+- Inverted failure-mode insight applied:
+  - hardened against a fail-open triage mode where test/tooling warnings drown production issues by requiring explicit opt-in for test/script classes in directory scans.
+  - hardened against silent automation breakage from JSON shape drift by asserting deterministic summary-schema fields and value types.
+- Remaining closure gaps:
+  - define and document schema-version bump policy (what changes require incrementing `inspect_payload_schema_version`).
 
 ## F11 - Burn Down Source Missing-Docstring Hotspots
 

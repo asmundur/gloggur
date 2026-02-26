@@ -162,3 +162,167 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
         if log_file.exists():
             log_content = log_file.read_text(encoding="utf8")
             assert "already_running" not in log_content
+
+
+def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
+    tmp_path: Path,
+) -> None:
+    """watch status should remain unhealthy when last_batch reports failure but summary counters drift."""
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    target = repo / "sample.py"
+    target.write_text(
+        "def watch_target() -> str:\n"
+        '    """before watch failure contract drift"""\n'
+        '    return "before"\n',
+        encoding="utf8",
+    )
+    cache_dir = tmp_path / "cache"
+    config_path = tmp_path / ".gloggur.yaml"
+    state_file = tmp_path / "runtime" / "custom_watch_state.json"
+    pid_file = tmp_path / "runtime" / "custom_watch.pid"
+    log_file = tmp_path / "runtime" / "custom_watch.log"
+    env = {
+        **os.environ,
+        "GLOGGUR_CACHE_DIR": str(cache_dir),
+        "GLOGGUR_LOCAL_MODEL": "local",
+        "GLOGGUR_LOCAL_FALLBACK": "1",
+        "WATCHFILES_FORCE_POLLING": "1",
+        "WATCHFILES_POLL_DELAY_MS": "50",
+        "GLOGGUR_WATCH_STATE_FILE": str(state_file),
+        "GLOGGUR_WATCH_PID_FILE": str(pid_file),
+        "GLOGGUR_WATCH_LOG_FILE": str(log_file),
+    }
+
+    init = _run_cli(
+        ["watch", "init", str(repo), "--config", str(config_path), "--json"],
+        env,
+        timeout=30,
+    )
+    assert init.returncode == 0, f"{init.stderr}\n{init.stdout}"
+
+    index = _run_cli(["index", str(repo), "--json"], env, timeout=60)
+    assert index.returncode == 0, f"{index.stderr}\n{index.stdout}"
+
+    vectors_path = cache_dir / "vectors.json"
+    vectors_payload = json.loads(vectors_path.read_text(encoding="utf8"))
+    assert isinstance(vectors_payload, dict)
+    raw_map = vectors_payload.get("symbol_to_vector_id", {})
+    assert isinstance(raw_map, dict)
+    ghost_vector_id = int(vectors_payload.get("next_vector_id", 1))
+    raw_map["ghost::watch::symbol"] = ghost_vector_id
+    vectors_payload["symbol_to_vector_id"] = raw_map
+    vectors_payload["next_vector_id"] = ghost_vector_id + 1
+    vectors_path.write_text(json.dumps(vectors_payload, indent=2), encoding="utf8")
+
+    started_pid: int | None = None
+    try:
+        started = _run_cli(
+            ["watch", "start", "--config", str(config_path), "--daemon", "--json"],
+            env,
+            timeout=30,
+        )
+        assert started.returncode == 0, f"{started.stderr}\n{started.stdout}"
+        started_payload = _parse_json_payload(started.stdout)
+        assert started_payload["started"] is True
+        started_pid = int(started_payload["pid"])
+        assert started_pid > 0
+
+        for _ in range(50):
+            status = _run_cli(
+                ["watch", "status", "--config", str(config_path), "--json"],
+                env,
+                timeout=30,
+            )
+            assert status.returncode == 0, f"{status.stderr}\n{status.stdout}"
+            payload = _parse_json_payload(status.stdout)
+            if payload.get("running") is True:
+                break
+            time.sleep(0.1)
+
+        target.write_text(
+            "def watch_target() -> str:\n"
+            '    """after watch failure contract drift"""\n'
+            '    return "after"\n',
+            encoding="utf8",
+        )
+
+        failed_payload: dict[str, object] | None = None
+        for _ in range(120):
+            status = _run_cli(
+                ["watch", "status", "--config", str(config_path), "--json"],
+                env,
+                timeout=30,
+            )
+            assert status.returncode == 0, f"{status.stderr}\n{status.stdout}"
+            payload = _parse_json_payload(status.stdout)
+            reasons = payload.get("failed_reasons", {})
+            if isinstance(reasons, dict) and reasons.get("vector_metadata_mismatch", 0):
+                failed_payload = payload
+                break
+            time.sleep(0.1)
+        assert failed_payload is not None, "watch daemon did not report vector_metadata_mismatch"
+
+        assert failed_payload["status"] == "running_with_errors"
+        failure_codes = failed_payload.get("failure_codes", [])
+        assert isinstance(failure_codes, list)
+        assert "vector_metadata_mismatch" in failure_codes
+        guidance = failed_payload.get("failure_guidance", {})
+        assert isinstance(guidance, dict)
+        assert "vector_metadata_mismatch" in guidance
+        assert isinstance(guidance["vector_metadata_mismatch"], list)
+        assert guidance["vector_metadata_mismatch"]
+        last_batch = failed_payload.get("last_batch", {})
+        assert isinstance(last_batch, dict)
+        last_batch_codes = last_batch.get("failure_codes", [])
+        assert isinstance(last_batch_codes, list)
+        assert "vector_metadata_mismatch" in last_batch_codes
+        last_batch_guidance = last_batch.get("failure_guidance", {})
+        assert isinstance(last_batch_guidance, dict)
+        assert "vector_metadata_mismatch" in last_batch_guidance
+        assert isinstance(last_batch_guidance["vector_metadata_mismatch"], list)
+        assert last_batch_guidance["vector_metadata_mismatch"]
+
+        state_payload = json.loads(state_file.read_text(encoding="utf8"))
+        assert isinstance(state_payload, dict)
+        state_payload["failed"] = 0
+        state_payload["error_count"] = 0
+        state_payload["failed_reasons"] = {}
+        state_payload.pop("failure_codes", None)
+        state_payload.pop("failure_guidance", None)
+        state_file.write_text(json.dumps(state_payload, indent=2), encoding="utf8")
+
+        drifted_status = _run_cli(
+            ["watch", "status", "--config", str(config_path), "--json"],
+            env,
+            timeout=30,
+        )
+        assert drifted_status.returncode == 0, f"{drifted_status.stderr}\n{drifted_status.stdout}"
+        drifted_payload = _parse_json_payload(drifted_status.stdout)
+        assert drifted_payload.get("running") is True
+        assert drifted_payload.get("status") == "running_with_errors"
+        drifted_reasons = drifted_payload.get("failed_reasons", {})
+        assert isinstance(drifted_reasons, dict)
+        assert drifted_reasons.get("vector_metadata_mismatch", 0) >= 1
+        drifted_codes = drifted_payload.get("failure_codes", [])
+        assert isinstance(drifted_codes, list)
+        assert "vector_metadata_mismatch" in drifted_codes
+        drifted_guidance = drifted_payload.get("failure_guidance", {})
+        assert isinstance(drifted_guidance, dict)
+        assert "vector_metadata_mismatch" in drifted_guidance
+        assert isinstance(drifted_guidance["vector_metadata_mismatch"], list)
+        assert drifted_guidance["vector_metadata_mismatch"]
+    finally:
+        stopped = _run_cli(
+            ["watch", "stop", "--config", str(config_path), "--json"],
+            env,
+            timeout=30,
+        )
+        if stopped.returncode == 0:
+            stopped_payload = _parse_json_payload(stopped.stdout)
+            assert stopped_payload.get("running") is False
+        elif started_pid:
+            try:
+                os.kill(started_pid, signal.SIGTERM)
+            except OSError:
+                pass

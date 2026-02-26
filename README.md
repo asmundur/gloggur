@@ -98,6 +98,19 @@ Inspect docstrings (semantic similarity scoring):
 gloggur inspect . --json
 ```
 
+By default, directory inspect focuses on high-signal runtime paths (`src/` + non-test/script files)
+and excludes `tests/` + `scripts/`. Opt in to full-audit mode with:
+
+```bash
+gloggur inspect . --json --include-tests --include-scripts
+```
+
+Inspect JSON now includes grouped summaries under `warning_summary`:
+- `by_warning_type`
+- `by_path_class` / `reports_by_path_class`
+- `top_files`
+- `inspect_payload_schema_version` for stable automation parsing contracts
+
 `gloggur inspect` skips unchanged files by default. Use `--force` to reinspect everything.
 
 Check status:
@@ -129,6 +142,20 @@ gloggur clear-cache --json
 Cache compatibility is automatic:
 - If cache schema changes, Gloggur rebuilds `.gloggur-cache/index.db` automatically.
 - If embedding provider/model changes, the next `gloggur index ...` run rebuilds cache and vectors automatically.
+- `gloggur status --json` and `gloggur search --json` expose session-resume fields:
+  - `resume_decision` (`resume_ok` or `reindex_required`)
+  - `resume_reason_codes` (machine-readable mismatch causes)
+  - `expected_resume_fingerprint` / `cached_resume_fingerprint` for deterministic compatibility checks
+  - `last_success_resume_fingerprint` / `last_success_resume_at` to compare current state against the last successful reusable index state
+  - `tool_version` / `last_success_tool_version` to detect version drift; when marker drift is detected, compatibility is `reindex_required` (`tool_version_changed`)
+
+Session resume decision flow:
+
+```bash
+gloggur status --json
+# if resume_decision == "resume_ok": reuse cache
+# if resume_decision == "reindex_required": run `gloggur index . --json` first
+```
 
 Concurrency behavior:
 - Readers (`status`, `search`) are safe to run concurrently.

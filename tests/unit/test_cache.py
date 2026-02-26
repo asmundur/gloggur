@@ -99,6 +99,22 @@ def test_cache_index_profile_round_trip_and_clear() -> None:
     assert cache.get_index_profile() is None
 
 
+def test_cache_last_success_resume_markers_round_trip_and_clear() -> None:
+    """Last-success resume markers should round-trip and be removed by clear."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.set_last_success_resume_fingerprint("fingerprint-a")
+    cache.set_last_success_resume_at("2026-02-26T00:00:00+00:00")
+    cache.set_last_success_tool_version("0.1.0")
+    assert cache.get_last_success_resume_fingerprint() == "fingerprint-a"
+    assert cache.get_last_success_resume_at() == "2026-02-26T00:00:00+00:00"
+    assert cache.get_last_success_tool_version() == "0.1.0"
+    cache.clear()
+    assert cache.get_last_success_resume_fingerprint() is None
+    assert cache.get_last_success_resume_at() is None
+    assert cache.get_last_success_tool_version() is None
+
+
 def test_cache_recovers_from_corrupted_db_and_sidecars() -> None:
     """Corrupted DB artifacts should be quarantined/removed and replaced with a healthy DB."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")

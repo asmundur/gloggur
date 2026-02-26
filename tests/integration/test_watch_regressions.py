@@ -173,3 +173,70 @@ def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -
         new_results = new_query.get("results", [])
         assert isinstance(new_results, list) and new_results
         assert any(item.get("file") == str(new_path) for item in new_results)
+
+
+def test_watch_rename_change_only_batch_prunes_ghost_old_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watch should not report success while stale old-path rows survive a rename change-only batch."""
+    monkeypatch.setattr(VectorStore, "_check_faiss", staticmethod(lambda: False))
+    runner = CliRunner()
+    old_source = (
+        "def old_symbol() -> str:\n"
+        '    """watch rename change-only old token"""\n'
+        '    return "old"\n'
+    )
+    new_source = (
+        "def new_symbol() -> str:\n"
+        '    """watch rename change-only new token"""\n'
+        '    return "new"\n'
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"module.py": old_source})
+        old_path = repo / "module.py"
+        new_path = repo / "module_renamed.py"
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir, "GLOGGUR_LOCAL_MODEL": "local"}
+
+        _invoke_json(runner, ["index", str(repo), "--json"], env)
+        before = _invoke_json(
+            runner,
+            ["search", "watch rename change-only old token", "--json", "--top-k", "10"],
+            env,
+        )
+        _assert_search_ready(before)
+        before_results = before.get("results", [])
+        assert isinstance(before_results, list) and before_results
+        assert any(item.get("file") == str(old_path) for item in before_results)
+
+        old_path.rename(new_path)
+        new_path.write_text(new_source, encoding="utf8")
+        service = _build_watch_service(repo, cache_dir)
+        batch = service.process_batch(
+            changes=[(2, str(new_path))],
+            watch_root=str(repo),
+        )
+        assert batch.changed_files == 1
+        assert batch.deleted_files == 1
+        assert batch.error_count == 0
+
+        old_query = _invoke_json(
+            runner,
+            ["search", "watch rename change-only old token", "--json", "--top-k", "10"],
+            env,
+        )
+        _assert_search_ready(old_query)
+        old_results = old_query.get("results", [])
+        assert isinstance(old_results, list)
+        assert all(item.get("file") != str(old_path) for item in old_results)
+
+        new_query = _invoke_json(
+            runner,
+            ["search", "watch rename change-only new token", "--json", "--top-k", "10"],
+            env,
+        )
+        _assert_search_ready(new_query)
+        new_results = new_query.get("results", [])
+        assert isinstance(new_results, list) and new_results
+        assert any(item.get("file") == str(new_path) for item in new_results)

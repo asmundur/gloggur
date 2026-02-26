@@ -14,7 +14,16 @@ import gloggur.indexer.cache as cache_module
 import gloggur.storage.metadata_store as metadata_store_module
 import gloggur.storage.vector_store as vector_store_module
 from gloggur.cli import main as cli_main
-from gloggur.cli.main import _metadata_reindex_reason, _profile_reindex_reason
+from gloggur.cli.main import (
+    _build_inspect_warning_summary,
+    _build_resume_contract,
+    _inspect_path_class,
+    _metadata_reindex_reason,
+    _profile_reindex_reason,
+    _should_include_inspect_path,
+    _stable_fingerprint,
+    _tool_version_reindex_reason,
+)
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.io_failures import StorageIOError
 from gloggur.models import IndexMetadata
@@ -71,6 +80,329 @@ def test_metadata_reindex_reason_present_metadata() -> None:
     """Existing metadata should not add metadata-specific reindex reason."""
     reason = _metadata_reindex_reason(metadata_present=True)
     assert reason is None
+
+
+def test_tool_version_reindex_reason_is_legacy_safe() -> None:
+    """Missing legacy tool-version marker should not force a reindex."""
+    reason = _tool_version_reindex_reason(
+        last_success_tool_version=None,
+        current_tool_version="0.2.0",
+    )
+    assert reason is None
+
+
+def test_tool_version_reindex_reason_detects_version_drift() -> None:
+    """Mismatched tool-version markers should force deterministic rebuild signaling."""
+    reason = _tool_version_reindex_reason(
+        last_success_tool_version="0.1.0",
+        current_tool_version="0.2.0",
+    )
+    assert reason == "tool version changed (cached=0.1.0, current=0.2.0)"
+
+
+def test_stable_fingerprint_is_order_independent() -> None:
+    """Fingerprint helper should be deterministic regardless of dict key ordering."""
+    payload_a = {
+        "b": 2,
+        "a": {
+            "z": 1,
+            "y": ["x", "w"],
+        },
+    }
+    payload_b = {
+        "a": {
+            "y": ["x", "w"],
+            "z": 1,
+        },
+        "b": 2,
+    }
+    assert _stable_fingerprint(payload_a) == _stable_fingerprint(payload_b)
+
+
+def test_inspect_path_class_and_default_filter_scope() -> None:
+    """Inspect defaults should include src/other and exclude tests/scripts noise."""
+    src_path = "/tmp/repo/src/module.py"
+    test_path = "/tmp/repo/tests/test_module.py"
+    script_path = "/tmp/repo/scripts/tool.py"
+    other_path = "/tmp/repo/examples/demo.py"
+
+    assert _inspect_path_class(src_path) == "src"
+    assert _inspect_path_class(test_path) == "tests"
+    assert _inspect_path_class(script_path) == "scripts"
+    assert _inspect_path_class(other_path) == "other"
+
+    assert _should_include_inspect_path(
+        src_path,
+        include_tests=False,
+        include_scripts=False,
+    )
+    assert _should_include_inspect_path(
+        other_path,
+        include_tests=False,
+        include_scripts=False,
+    )
+    assert not _should_include_inspect_path(
+        test_path,
+        include_tests=False,
+        include_scripts=False,
+    )
+    assert not _should_include_inspect_path(
+        script_path,
+        include_tests=False,
+        include_scripts=False,
+    )
+
+
+def test_inspect_warning_summary_groups_by_type_path_class_and_top_files() -> None:
+    """Inspect warning summary should be deterministic and machine-readable."""
+    warning_reports = [
+        {
+            "symbol_id": "/tmp/repo/src/a.py:1:a",
+            "warnings": [
+                "Missing docstring",
+                "Low semantic similarity (score=0.100, threshold=0.200)",
+            ],
+        },
+        {
+            "symbol_id": "/tmp/repo/tests/test_a.py:1:test_a",
+            "warnings": ["Missing docstring"],
+        },
+        {
+            "symbol_id": "/tmp/repo/scripts/tool.py:1:tool",
+            "warnings": ["Missing docstring"],
+        },
+    ]
+    summary = _build_inspect_warning_summary(
+        warning_reports,
+        symbol_file_paths={},
+    )
+
+    assert summary["total_warnings"] == 4
+    assert summary["by_warning_type"] == {
+        "Low semantic similarity": 1,
+        "Missing docstring": 3,
+    }
+    assert summary["by_path_class"] == {
+        "src": 2,
+        "tests": 1,
+        "scripts": 1,
+        "other": 0,
+    }
+    assert summary["reports_by_path_class"] == {
+        "src": 1,
+        "tests": 1,
+        "scripts": 1,
+        "other": 0,
+    }
+    top_files = summary["top_files"]
+    assert isinstance(top_files, list)
+    assert len(top_files) == 3
+    assert top_files[0]["file"] == "/tmp/repo/src/a.py"
+    assert top_files[0]["warnings"] == 2
+    assert top_files[0]["path_class"] == "src"
+
+
+def test_resume_contract_profile_change_is_machine_readable() -> None:
+    """Profile drift should produce stable machine-readable resume metadata signals."""
+    metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
+    payload = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-b",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=True,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+    )
+
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["embedding_profile_changed"]
+    assert payload["resume_fingerprint_match"] is False
+
+
+def test_resume_contract_missing_metadata_has_machine_reason_code() -> None:
+    """Missing index metadata should surface explicit stable reason codes for agents."""
+    payload = _build_resume_contract(
+        metadata=None,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile=None,
+        reset_reason=None,
+        needs_reindex=True,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+    )
+
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["missing_index_metadata"]
+    remediation = payload["resume_remediation"]
+    assert isinstance(remediation, dict)
+    assert "missing_index_metadata" in remediation
+    assert isinstance(remediation["missing_index_metadata"], list)
+    assert remediation["missing_index_metadata"]
+
+
+def test_resume_contract_interrupted_index_has_machine_reason_and_remediation() -> None:
+    """Interrupted runs should emit explicit interruption reason code and deterministic guidance."""
+    payload = _build_resume_contract(
+        metadata=None,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=True,
+        last_success_resume_fingerprint="last-success-fingerprint",
+        last_success_resume_at="2026-02-26T00:00:00+00:00",
+    )
+
+    assert payload["resume_decision"] == "reindex_required"
+    codes = payload["resume_reason_codes"]
+    assert isinstance(codes, list)
+    assert "index_interrupted" in codes
+    assert "missing_index_metadata" in codes
+    remediation = payload["resume_remediation"]
+    assert isinstance(remediation, dict)
+    assert "index_interrupted" in remediation
+    assert isinstance(remediation["index_interrupted"], list)
+    assert remediation["index_interrupted"]
+
+
+def test_resume_contract_reports_last_success_fingerprint_match_signal() -> None:
+    """Resume contract should expose whether last-success fingerprint still matches expected."""
+    metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
+    expected = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+    )["expected_resume_fingerprint"]
+    assert isinstance(expected, str)
+
+    match_payload = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=expected,
+        last_success_resume_at="2026-02-26T00:00:00+00:00",
+    )
+    mismatch_payload = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint="stale-fingerprint",
+        last_success_resume_at="2026-02-26T00:00:00+00:00",
+    )
+
+    assert match_payload["last_success_resume_fingerprint_match"] is True
+    assert mismatch_payload["last_success_resume_fingerprint_match"] is False
+
+
+def test_resume_contract_detects_tool_version_drift_since_last_success() -> None:
+    """Tool-version drift should be detectable without mislabeling profile drift."""
+    metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
+    old_fingerprint = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+        tool_version="0.1.0",
+    )["expected_resume_fingerprint"]
+    assert isinstance(old_fingerprint, str)
+    payload = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=old_fingerprint,
+        last_success_resume_at="2026-02-26T00:00:00+00:00",
+        tool_version="0.2.0",
+        last_success_tool_version="0.1.0",
+    )
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["tool_version_changed"]
+    assert payload["resume_fingerprint_match"] is False
+    assert payload["last_success_tool_version_match"] is False
+    assert payload["last_success_resume_fingerprint_match"] is False
+
+
+def test_resume_contract_missing_tool_version_marker_remains_resume_ok() -> None:
+    """Legacy caches without tool-version markers should keep resume compatibility logic stable."""
+    metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
+    payload = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+        tool_version="0.2.0",
+        last_success_tool_version=None,
+    )
+
+    assert payload["resume_decision"] == "resume_ok"
+    assert payload["resume_reason_codes"] == []
+    assert payload["resume_fingerprint_match"] is True
+    assert payload["last_success_tool_version_match"] is None
+
+
+def test_build_status_payload_requires_reindex_on_tool_version_drift() -> None:
+    """Status payload should fail closed when last-success tool version drifts."""
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir="/tmp/cache",
+    )
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=3, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_tool_version(self) -> str:
+            return "0.0.1"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def list_symbols(self) -> list[object]:
+            return [object(), object(), object()]
+
+    payload = cli_main._build_status_payload(config, FakeCache())
+
+    assert payload["needs_reindex"] is True
+    assert "tool version changed" in str(payload["reindex_reason"])
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["tool_version_changed"]
+    assert payload["resume_fingerprint_match"] is False
 
 
 def test_status_supports_tilde_expanded_config_path(tmp_path: Path) -> None:
@@ -230,6 +562,15 @@ def test_status_retries_transient_no_such_table_race_once(
             return "2"
 
         def get_index_profile(self) -> None:
+            return None
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> None:
             return None
 
         def list_symbols(self) -> list[object]:
@@ -681,6 +1022,58 @@ def test_search_json_reports_missing_embedding_provider_configuration(
     assert "Traceback (most recent call last)" not in result.output
 
 
+def test_search_json_requires_reindex_on_tool_version_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """search --json should fail closed when cached tool-version marker drifts."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return "0.0.1"
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+
+    result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["results"] == []
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["needs_reindex"] is True
+    assert "tool version changed" in str(metadata["reindex_reason"])
+    assert metadata["resume_decision"] == "reindex_required"
+    assert metadata["resume_reason_codes"] == ["tool_version_changed"]
+
+
 def test_search_json_wraps_metadata_store_connect_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -689,11 +1082,25 @@ def test_search_json_wraps_metadata_store_connect_failure(
     runner = CliRunner()
 
     class FakeCache:
+        last_reset_reason = None
+
         def get_index_metadata(self) -> IndexMetadata:
             return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
 
+        def get_schema_version(self) -> str:
+            return "2"
+
         def get_index_profile(self) -> str:
             return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> None:
+            return None
 
     class FakeVectorStore:
         def search(self, _query_vector: list[float], k: int) -> list[tuple[str, float]]:

@@ -54,6 +54,49 @@ def test_verification_workflow_python_matrix_policy_is_stable() -> None:
     assert provisional_versions == {"3.14"}
 
 
+def test_verification_workflow_matrix_has_no_hidden_exclusions_or_duplicates() -> None:
+    """Workflow should not silently mask lanes via matrix exclusions or duplicate entries."""
+    tests_job = _verification_tests_job()
+    strategy = tests_job.get("strategy")
+    assert isinstance(strategy, dict)
+
+    matrix = strategy.get("matrix")
+    assert isinstance(matrix, dict)
+    assert "exclude" not in matrix
+
+    include = matrix.get("include")
+    assert isinstance(include, list)
+    versions = []
+    for lane in include:
+        assert isinstance(lane, dict)
+        version = lane.get("python-version")
+        assert isinstance(version, str)
+        versions.append(version)
+
+    assert len(versions) == len(set(versions))
+
+
+def test_verification_workflow_pytest_lane_is_unconditional() -> None:
+    """Pytest execution should not be conditionally skipped for any matrix lane."""
+    tests_job = _verification_tests_job()
+    steps = tests_job.get("steps")
+    assert isinstance(steps, list)
+
+    pytest_step = next(
+        (
+            step
+            for step in steps
+            if isinstance(step, dict) and step.get("name") == "Run pytest"
+        ),
+        None,
+    )
+    assert isinstance(pytest_step, dict)
+    assert "if" not in pytest_step
+    run_script = pytest_step.get("run")
+    assert isinstance(run_script, str)
+    assert "pytest" in run_script
+
+
 def test_verification_workflow_includes_runtime_and_resolver_diagnostics() -> None:
     """Install step should emit interpreter/pip diagnostics for failure triage."""
     tests_job = _verification_tests_job()
