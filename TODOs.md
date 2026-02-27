@@ -53,7 +53,12 @@ These tasks track reliability hardening for cache/index operations after the sch
 
 ## Ordering / Priority
 
-1. R5 (session bootstrap ergonomics) - low-priority reliability follow-up after feature closure.
+1. **P0 now (complete before starting new workstreams):** `F2`, `F5`, `F6`, `F10`.
+2. **P1 after P0 reliability closure:** `F3`, `F4`, `F7`, `F8`, `F9`, `F11`, `F12`, `R6`, `R7`, `R8`, `R9`.
+3. **P2 deferred follow-ups:** `R5`, `R10`.
+
+Execution rule:
+- Do not start net-new `P1` implementation until all `P0` tasks are either `ready_for_review` or explicitly `blocked` with documented unblock conditions.
 
 ---
 
@@ -92,6 +97,211 @@ These tasks track reliability hardening for cache/index operations after the sch
 **Tests Required**
 - Integration coverage that simulates a fresh local worktree session and validates startup-readiness contract outcomes.
 - Regression tests for contradictory startup runtime artifacts/signals (PID/state/status mismatch cases).
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## R6 - End-to-End Smoke-Test Harness for Full Workflow
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Current tests validate individual features, but there is no single deterministic workflow check for `index -> watch -> resume -> search -> inspect`.
+- Cross-component regressions can ship when each subsystem passes in isolation.
+
+**Goal**
+- Add a CI-friendly smoke harness that verifies the full Glöggur happy path and fails with stage-specific diagnostics.
+
+**Scope**
+- Implement one headless command/script for full-workflow smoke execution against a stable fixture repo.
+- Validate these stages in order:
+  - clean index build
+  - incremental update through watch mode
+  - session resume contract (`status --json`)
+  - retrieval (`search --json`)
+  - inspect summary output (`inspect --json`)
+- Emit structured per-stage pass/fail output and deterministic non-zero exit on failure.
+- Wire the harness into CI as a non-optional gate for core reliability lanes.
+
+**Out of Scope**
+- Exhaustive scenario fuzzing (kept in targeted integration tests such as `F6` regressions).
+- Performance benchmarking (covered by `R10`).
+
+**Acceptance Criteria**
+- One command runs the full smoke workflow on a clean workspace and exits zero only if all stages pass.
+- On any stage failure, output identifies the failed stage with a machine-readable code and remediation hint.
+- CI runs the smoke harness on at least one required Python lane.
+- Smoke harness is documented for local reproduction by contributors and agents.
+
+**Tests Required**
+- Integration test that executes the smoke harness end-to-end against fixtures.
+- Regression test for deterministic stage-order and failure-code contract.
+- CI validation proving harness is wired and enforced on required lanes.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## R7 - CLI and Docs Quickstart for Agent/Developer Onboarding
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- New users currently assemble setup and command flows from multiple docs, increasing misconfiguration risk.
+- Embedding-provider setup and troubleshooting paths are not centralized into a concise operator guide.
+
+**Goal**
+- Publish a short, deterministic quickstart that gets a fresh user from install to successful `index`, `watch`, `search`, and `inspect` runs with clear troubleshooting.
+
+**Scope**
+- Add a quickstart section/doc with copy-paste commands for:
+  - install and environment bootstrap
+  - embedding provider configuration (`openai:*`, `gemini:*`)
+  - first index and incremental/watch usage
+  - search and inspect usage
+- Add a troubleshooting section keyed by common machine-readable failure codes and remediation.
+- Ensure CLI reference links point to quickstart paths and remain consistent with current flags/JSON fields.
+
+**Out of Scope**
+- Marketing-style long-form product documentation.
+- Provider-quality comparisons and model benchmarking guidance.
+
+**Acceptance Criteria**
+- A new contributor can follow one quickstart document and complete first-run workflow without reading multiple files.
+- Quickstart includes explicit provider setup and at least one failure-mode troubleshooting example per provider path.
+- CLI reference docs and quickstart are consistent with current command/flag behavior.
+- Documentation changes are validated by at least one fresh-environment dry run.
+
+**Tests Required**
+- Docs regression check or scripted verification for referenced command examples.
+- Integration smoke pass confirming quickstart command sequence works on fixture repo.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## R8 - Standardized Error Codes and Diagnostics Across CLI Paths
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Error signaling is partially standardized (`failed_reasons`, `failure_codes`, `failure_guidance`) but not consistent across all commands and failure paths.
+- Inconsistent contracts block deterministic automation and agent branching.
+
+**Goal**
+- Enforce a single machine-readable error contract across CLI/index/watch flows and document the complete error-code catalog.
+
+**Scope**
+- Audit all major command paths (`status`, `index`, `search`, `inspect`, `watch *`) for failure-output consistency.
+- Normalize JSON failure payload shape so non-zero outcomes include deterministic code(s) and actionable remediation.
+- Replace generic/unstructured exceptions in user-facing paths with stable code-mapped failures where feasible.
+- Publish and maintain an error-code catalog with meanings, likely causes, and operator actions.
+
+**Out of Scope**
+- Internationalization/localization of error text.
+- Redesigning command UX outside diagnostics contract consistency.
+
+**Acceptance Criteria**
+- Every non-zero CLI command path emits machine-readable failure code(s) in JSON mode.
+- Error-code names are stable, documented, and covered by regression tests.
+- Catalog documentation includes at least command, code, meaning, remediation, and retryability guidance.
+- No generic catch-all message is returned where a known deterministic code can be emitted.
+
+**Tests Required**
+- Unit tests for error mapping/normalization helpers.
+- Integration tests that trigger representative failures per command and assert code + guidance shape.
+- Contract test ensuring new codes must be added to the published catalog.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## R9 - Packaging and Distribution Hardening
+
+**Status**: planned
+**Priority**: P1
+**Owner**: codex
+
+**Problem**
+- Editable-install path drift (for example stale `__editable__*.pth` pointers) can break `gloggur` invocations in new worktrees.
+- Distribution/install guidance is not yet robust for repeatable deployment across environments.
+
+**Goal**
+- Provide a dependable packaging and distribution path that supports clean install, upgrade, and rollback workflows.
+
+**Scope**
+- Define primary packaging strategy for phase one (wheel/sdist release path) with reproducible build steps.
+- Add release-validation checks for fresh install and upgrade scenarios.
+- Document deterministic install/update/repair commands for local dev, CI runners, and ephemeral environments.
+- Evaluate optional secondary distribution channel (for example Homebrew tap) and capture decision criteria.
+
+**Out of Scope**
+- Enterprise package hosting policy and credential management.
+- Full multi-platform installer GUI workflows.
+
+**Acceptance Criteria**
+- Fresh environment can install Glöggur using documented commands and run `gloggur --help` + `gloggur status --json` successfully.
+- Upgrade flow from previous release is documented and validated.
+- Troubleshooting section includes explicit remediation for stale editable-install path issues.
+- Release process includes artifact integrity checks and versioned changelog linkage.
+
+**Tests Required**
+- Packaging checks (`build`, metadata validation, wheel install smoke) in CI.
+- Integration smoke test in isolated environment for install -> run -> upgrade path.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+---
+
+## R10 - Performance Benchmarking and Regression Tracking
+
+**Status**: planned
+**Priority**: P2
+**Owner**: codex
+
+**Problem**
+- Correctness hardening is progressing, but there is no baseline for index/search performance on representative repositories.
+- Performance regressions can land unnoticed without trend tracking and explicit thresholds.
+
+**Goal**
+- Establish repeatable benchmarks and lightweight regression gates for indexing and retrieval latency.
+
+**Scope**
+- Create benchmark harness for:
+  - cold index runtime
+  - incremental index runtime
+  - search latency (`top-k` common query sizes)
+  - optional memory footprint sampling
+- Define baseline datasets/repos and capture initial benchmark snapshots.
+- Add CI/perf-check policy for acceptable drift with configurable thresholds.
+- Document benchmark methodology and interpretation guidance.
+
+**Out of Scope**
+- Micro-optimization of every command path in this task.
+- Provider-level model optimization experiments.
+
+**Acceptance Criteria**
+- Benchmark harness can be run locally and in CI with deterministic output format.
+- Baseline performance report exists for defined fixture corpora.
+- Regression policy flags significant slowdowns with clear pass/fail criteria.
+- Docs explain how to update baselines when intentional performance tradeoffs are accepted.
+
+**Tests Required**
+- Unit tests for benchmark result parsing/aggregation utilities.
+- CI validation that harness executes and stores benchmark artifacts.
+- Regression test for threshold-evaluation logic.
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
@@ -160,8 +370,12 @@ These tasks track reliability hardening for cache/index operations after the sch
 ## F3 - Portable Index Artifact Publishing for CI/CD and Codex Cloud
 
 **Status**: planned
-**Priority**: P0
+**Priority**: P1
 **Owner**: codex
+
+**Priority Assessment**
+- `P1` because core reliability blockers (`F2`, `F5`, `F6`, `F10`) directly affect deterministic local indexing/search correctness and must close first.
+- Promote back toward `P0` only when those blockers are `ready_for_review` and artifact publishing becomes the critical path for CI/cloud rollout.
 
 **Problem**
 - `.gloggur-cache` is local to a workspace and is not directly available in ephemeral CI runners or Codex cloud execution environments.
