@@ -24,6 +24,7 @@ def create_embedding_provider(config: GloggurConfig) -> EmbeddingProvider:
         return LocalEmbeddingProvider(
             model_name=config.local_embedding_model,
             cache_dir=config.model_cache_dir,
+            fallback_cache_dir=config.cache_dir,
         )
     if provider == "openai":
         provider_cls: Optional[Type[EmbeddingProvider]] = OpenAIEmbeddingProvider

@@ -13,6 +13,7 @@ jobs:
     continue-on-error: ${{ !matrix.required }}
     env:
       PYTHONUNBUFFERED: "1"
+      GLOGGUR_LOCAL_FALLBACK: "1"
     strategy:
       fail-fast: false
       matrix:

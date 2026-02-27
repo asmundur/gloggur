@@ -12,14 +12,22 @@ from gloggur.embeddings.base import EmbeddingProvider
 
 class LocalEmbeddingProvider(EmbeddingProvider):
     """Embedding provider backed by sentence-transformers with a fallback."""
-    def __init__(self, model_name: str, cache_dir: Optional[str] = None) -> None:
-        """Configure the local embedding model and cache settings."""
+
+    def __init__(
+        self,
+        model_name: str,
+        cache_dir: Optional[str] = None,
+        fallback_cache_dir: Optional[str] = None,
+    ) -> None:
+        """Configure model artifact cache and fallback marker locations."""
         self.provider = "local"
         self.model_name = model_name
         self.cache_dir = cache_dir
+        self.fallback_cache_dir = fallback_cache_dir
         self._model = None
         self._fallback_dimension = 256
-        self._fallback_marker = Path(self.cache_dir or ".gloggur-cache") / ".local_embedding_fallback"
+        fallback_root = self.fallback_cache_dir or self.cache_dir or ".gloggur-cache"
+        self._fallback_marker = Path(fallback_root) / ".local_embedding_fallback"
         env_flag = os.getenv("GLOGGUR_LOCAL_FALLBACK")
         if env_flag is None:
             self._use_fallback = self._fallback_marker.exists()

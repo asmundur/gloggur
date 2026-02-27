@@ -179,6 +179,24 @@ def test_local_embedding_fallback_vector_is_normalized(tmp_path: Path) -> None:
     assert sum(v * v for v in vector) == pytest.approx(1.0, rel=1e-6)
 
 
+def test_local_embedding_fallback_marker_uses_fallback_cache_dir(tmp_path: Path) -> None:
+    """Fallback marker should be read from cache dir independent of model cache dir."""
+    model_cache_dir = tmp_path / "models"
+    fallback_cache_dir = tmp_path / "index-cache"
+    marker = fallback_cache_dir / ".local_embedding_fallback"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch(exist_ok=True)
+
+    provider = LocalEmbeddingProvider(
+        "local",
+        cache_dir=str(model_cache_dir),
+        fallback_cache_dir=str(fallback_cache_dir),
+    )
+    assert provider._fallback_marker == marker
+    assert provider._use_fallback is True
+    assert provider.get_dimension() == 256
+
+
 def test_local_embedding_model_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Local embedding provider uses model encode paths."""
     class FakeVector:

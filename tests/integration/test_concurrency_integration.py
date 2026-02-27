@@ -39,6 +39,54 @@ def _run_cli(
     )
 
 
+def _start_lock_holder(
+    *,
+    cache_dir: str,
+    env: dict[str, str],
+) -> tuple[subprocess.Popen[str], Path]:
+    ready_path = Path(cache_dir) / ".lock-held"
+    release_path = Path(cache_dir) / ".lock-release"
+    holder_env = {
+        **env,
+        "GLOGGUR_TEST_LOCK_READY_FILE": str(ready_path),
+        "GLOGGUR_TEST_LOCK_RELEASE_FILE": str(release_path),
+    }
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os, time\n"
+                "from gloggur.indexer.concurrency import cache_write_lock\n"
+                "cache_dir = os.environ['GLOGGUR_CACHE_DIR']\n"
+                "ready = os.environ['GLOGGUR_TEST_LOCK_READY_FILE']\n"
+                "release = os.environ['GLOGGUR_TEST_LOCK_RELEASE_FILE']\n"
+                "with cache_write_lock(cache_dir):\n"
+                "    with open(ready, 'w', encoding='utf8') as handle:\n"
+                "        handle.write('1')\n"
+                "    deadline = time.monotonic() + 15.0\n"
+                "    while not os.path.exists(release) and time.monotonic() < deadline:\n"
+                "        time.sleep(0.01)\n"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=holder_env,
+    )
+    for _ in range(200):
+        if ready_path.exists():
+            break
+        time.sleep(0.01)
+    assert ready_path.exists()
+    return holder, release_path
+
+
+def _stop_lock_holder(holder: subprocess.Popen[str], release_path: Path) -> None:
+    release_path.write_text("1", encoding="utf8")
+    holder.wait(timeout=10)
+
+
 def test_concurrent_index_runs_keep_cache_consistent() -> None:
     """Two concurrent index runs should produce valid searchable cache state."""
     with TestFixtures() as fixtures:
@@ -81,20 +129,24 @@ def test_concurrent_index_runs_keep_cache_consistent() -> None:
         first_stdout, first_stderr = first.communicate(timeout=240)
         second_stdout, second_stderr = second.communicate(timeout=240)
 
-        assert first.returncode == 0, f"{first_stderr}\n{first_stdout}"
-        first_payload = _parse_json_payload(first_stdout)
-        assert int(first_payload["indexed_files"]) > 0
-
-        if second.returncode == 0:
-            second_payload = _parse_json_payload(second_stdout)
-            assert int(second_payload["indexed_files"]) > 0
-        else:
-            second_payload = _parse_json_payload(second_stdout)
-            error = second_payload["error"]
+        results = (
+            ("first", first.returncode, first_stdout, first_stderr),
+            ("second", second.returncode, second_stdout, second_stderr),
+        )
+        successful_runs = 0
+        for _name, returncode, stdout, stderr in results:
+            payload = _parse_json_payload(stdout)
+            if returncode == 0:
+                assert int(payload["indexed_files"]) > 0
+                successful_runs += 1
+                continue
+            error = payload["error"]
             assert isinstance(error, dict)
             assert error["operation"] == "acquire cache write lock"
             assert "timed out" in str(error["detail"])
-            assert "IO failure [unknown_io_error]" in second_stderr
+            assert "IO failure [unknown_io_error]" in stderr
+
+        assert successful_runs >= 1
 
         status = _run_cli(["status", "--json"], env, timeout=60)
         assert status.returncode == 0, status.stderr
@@ -128,34 +180,8 @@ def test_index_lock_contention_fails_fast_without_hanging() -> None:
             "GLOGGUR_CACHE_DIR": cache_dir,
             "GLOGGUR_LOCAL_MODEL": "local",
         }
-        holder = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import os, time\n"
-                    "from gloggur.indexer.concurrency import cache_write_lock\n"
-                    "cache_dir = os.environ['GLOGGUR_CACHE_DIR']\n"
-                    "ready = os.path.join(cache_dir, '.lock-held')\n"
-                    "with cache_write_lock(cache_dir):\n"
-                    "    with open(ready, 'w', encoding='utf8') as handle:\n"
-                    "        handle.write('1')\n"
-                    "    time.sleep(1.5)\n"
-                ),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
+        holder, release_path = _start_lock_holder(cache_dir=cache_dir, env=env)
         try:
-            ready_path = Path(cache_dir) / ".lock-held"
-            for _ in range(100):
-                if ready_path.exists():
-                    break
-                time.sleep(0.01)
-            assert ready_path.exists()
-
             blocked_env = {**env, "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": "100"}
             start = time.monotonic()
             blocked = _run_cli(["index", str(repo), "--json"], blocked_env, timeout=10)
@@ -168,7 +194,7 @@ def test_index_lock_contention_fails_fast_without_hanging() -> None:
             assert error["operation"] == "acquire cache write lock"
             assert "timed out" in str(error["detail"])
         finally:
-            holder.wait(timeout=10)
+            _stop_lock_holder(holder, release_path)
 
 
 def test_clear_cache_lock_contention_fails_fast_without_hanging() -> None:
@@ -180,34 +206,8 @@ def test_clear_cache_lock_contention_fails_fast_without_hanging() -> None:
         "GLOGGUR_CACHE_DIR": cache_dir,
         "GLOGGUR_LOCAL_MODEL": "local",
     }
-    holder = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import os, time\n"
-                "from gloggur.indexer.concurrency import cache_write_lock\n"
-                "cache_dir = os.environ['GLOGGUR_CACHE_DIR']\n"
-                "ready = os.path.join(cache_dir, '.lock-held')\n"
-                "with cache_write_lock(cache_dir):\n"
-                "    with open(ready, 'w', encoding='utf8') as handle:\n"
-                "        handle.write('1')\n"
-                "    time.sleep(1.5)\n"
-            ),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
+    holder, release_path = _start_lock_holder(cache_dir=cache_dir, env=env)
     try:
-        ready_path = Path(cache_dir) / ".lock-held"
-        for _ in range(100):
-            if ready_path.exists():
-                break
-            time.sleep(0.01)
-        assert ready_path.exists()
-
         blocked_env = {**env, "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": "100"}
         start = time.monotonic()
         blocked = _run_cli(["clear-cache", "--json"], blocked_env, timeout=10)
@@ -220,7 +220,7 @@ def test_clear_cache_lock_contention_fails_fast_without_hanging() -> None:
         assert error["operation"] == "acquire cache write lock"
         assert "timed out" in str(error["detail"])
     finally:
-        holder.wait(timeout=10)
+        _stop_lock_holder(holder, release_path)
 
 
 def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
