@@ -125,6 +125,8 @@ These tasks track reliability hardening for cache/index operations after the sch
 - Adding new embedding providers beyond OpenAI and Gemini.
 
 **Acceptance Criteria**
+- Indexes are retained per embedding profile (`provider:model`): switching models/providers must not overwrite previously built indexes, and prior profiles remain available for reuse when reselected.
+- Inactive embedding-profile indexes are allowed to be stale while inactive; freshness is required only for the currently active profile.
 - OpenAI provider path can be selected and produces embeddings successfully with valid configuration.
 - Gemini provider path can be selected and produces embeddings successfully with valid configuration.
 - Missing/invalid credentials fail with explicit actionable errors (no silent fallback that masks provider failures).
