@@ -103,12 +103,49 @@ class GloggurConfig:
             return json.load(handle)
 
     @staticmethod
+    def _load_dotenv(path: str = ".env") -> Dict[str, str]:
+        """Load dotenv-style key/value pairs from ``path`` when present."""
+        if not os.path.exists(path):
+            return {}
+        data: Dict[str, str] = {}
+        with open(path, "r", encoding="utf8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if not key or any(char.isspace() for char in key):
+                    continue
+                if (
+                    len(value) >= 2
+                    and value[0] in {"'", '"'}
+                    and value[-1] == value[0]
+                ):
+                    value = value[1:-1]
+                data[key] = value
+        return data
+
+    @staticmethod
     def _load_env() -> Dict[str, object]:
         """Load config values from GLOGGUR_* environment variables."""
         data: Dict[str, object] = {}
+        env_values: Dict[str, str] = GloggurConfig._load_dotenv()
+        env_values.update(os.environ)
+
+        def _env_value(name: str) -> Optional[str]:
+            value = env_values.get(name)
+            if value is None or value == "":
+                return None
+            return value
 
         def _env_bool(name: str) -> Optional[bool]:
-            value = os.getenv(name)
+            value = _env_value(name)
             if value is None:
                 return None
             normalized = value.strip().lower()
@@ -118,43 +155,43 @@ class GloggurConfig:
                 return False
             return None
 
-        if os.getenv("GLOGGUR_EMBEDDING_PROVIDER"):
-            data["embedding_provider"] = os.getenv("GLOGGUR_EMBEDDING_PROVIDER")
-        if os.getenv("GLOGGUR_LOCAL_MODEL"):
-            data["local_embedding_model"] = os.getenv("GLOGGUR_LOCAL_MODEL")
-        if os.getenv("GLOGGUR_OPENAI_MODEL"):
-            data["openai_embedding_model"] = os.getenv("GLOGGUR_OPENAI_MODEL")
-        if os.getenv("GLOGGUR_GEMINI_MODEL"):
-            data["gemini_embedding_model"] = os.getenv("GLOGGUR_GEMINI_MODEL")
-        if os.getenv("GLOGGUR_GEMINI_API_KEY"):
-            data["gemini_api_key"] = os.getenv("GLOGGUR_GEMINI_API_KEY")
+        if _env_value("GLOGGUR_EMBEDDING_PROVIDER"):
+            data["embedding_provider"] = _env_value("GLOGGUR_EMBEDDING_PROVIDER")
+        if _env_value("GLOGGUR_LOCAL_MODEL"):
+            data["local_embedding_model"] = _env_value("GLOGGUR_LOCAL_MODEL")
+        if _env_value("GLOGGUR_OPENAI_MODEL"):
+            data["openai_embedding_model"] = _env_value("GLOGGUR_OPENAI_MODEL")
+        if _env_value("GLOGGUR_GEMINI_MODEL"):
+            data["gemini_embedding_model"] = _env_value("GLOGGUR_GEMINI_MODEL")
+        if _env_value("GLOGGUR_GEMINI_API_KEY"):
+            data["gemini_api_key"] = _env_value("GLOGGUR_GEMINI_API_KEY")
         watch_enabled = _env_bool("GLOGGUR_WATCH_ENABLED")
         if watch_enabled is not None:
             data["watch_enabled"] = watch_enabled
-        if os.getenv("GLOGGUR_WATCH_PATH"):
-            data["watch_path"] = os.getenv("GLOGGUR_WATCH_PATH")
-        if os.getenv("GLOGGUR_WATCH_MODE"):
-            data["watch_mode"] = os.getenv("GLOGGUR_WATCH_MODE")
-        if os.getenv("GLOGGUR_WATCH_DEBOUNCE_MS"):
+        if _env_value("GLOGGUR_WATCH_PATH"):
+            data["watch_path"] = _env_value("GLOGGUR_WATCH_PATH")
+        if _env_value("GLOGGUR_WATCH_MODE"):
+            data["watch_mode"] = _env_value("GLOGGUR_WATCH_MODE")
+        if _env_value("GLOGGUR_WATCH_DEBOUNCE_MS"):
             try:
                 data["watch_debounce_ms"] = int(
-                    os.getenv("GLOGGUR_WATCH_DEBOUNCE_MS", "300")
+                    _env_value("GLOGGUR_WATCH_DEBOUNCE_MS") or "300"
                 )
             except ValueError:
                 pass
-        if os.getenv("GLOGGUR_WATCH_STATE_FILE"):
-            data["watch_state_file"] = os.getenv("GLOGGUR_WATCH_STATE_FILE")
-        if os.getenv("GLOGGUR_WATCH_PID_FILE"):
-            data["watch_pid_file"] = os.getenv("GLOGGUR_WATCH_PID_FILE")
-        if os.getenv("GLOGGUR_WATCH_LOG_FILE"):
-            data["watch_log_file"] = os.getenv("GLOGGUR_WATCH_LOG_FILE")
-        if os.getenv("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS"):
+        if _env_value("GLOGGUR_WATCH_STATE_FILE"):
+            data["watch_state_file"] = _env_value("GLOGGUR_WATCH_STATE_FILE")
+        if _env_value("GLOGGUR_WATCH_PID_FILE"):
+            data["watch_pid_file"] = _env_value("GLOGGUR_WATCH_PID_FILE")
+        if _env_value("GLOGGUR_WATCH_LOG_FILE"):
+            data["watch_log_file"] = _env_value("GLOGGUR_WATCH_LOG_FILE")
+        if _env_value("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS"):
             try:
                 data["docstring_semantic_min_chars"] = int(
-                    os.getenv("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS", "0")
+                    _env_value("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS") or "0"
                 )
             except ValueError:
                 pass
-        if os.getenv("GLOGGUR_CACHE_DIR"):
-            data["cache_dir"] = os.getenv("GLOGGUR_CACHE_DIR")
+        if _env_value("GLOGGUR_CACHE_DIR"):
+            data["cache_dir"] = _env_value("GLOGGUR_CACHE_DIR")
         return data

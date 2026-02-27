@@ -292,6 +292,8 @@ Environment variables:
 - `GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS`
 - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
 
+Gloggur also auto-loads a repo-local `.env` file at runtime; exported process environment variables still take precedence over `.env` values.
+
 ## Output Schema
 
 Search results are returned as JSON:

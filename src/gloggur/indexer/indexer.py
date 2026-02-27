@@ -145,6 +145,7 @@ class Indexer:
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self._progress_callback: Optional[Callable[[int, int], None]] = None
+        self._scan_callback: Optional[Callable[[int, str], None]] = None
 
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
@@ -171,6 +172,8 @@ class Indexer:
             seen_paths.add(file_path)
             files_considered += 1
             outcome = self.index_file_with_outcome(file_path)
+            if self._scan_callback is not None:
+                self._scan_callback(files_considered, outcome.status)
             if outcome.status == "indexed":
                 indexed_files += 1
                 indexed_symbols += outcome.symbols_indexed
@@ -474,6 +477,8 @@ class Indexer:
         total = len(symbols)
         chunk_size = getattr(self.embedding_provider, "_chunk_size", 50)
         done = 0
+        if progress_callback is not None:
+            progress_callback(0, total)
         for i in range(0, total, chunk_size):
             chunk_texts = texts[i : i + chunk_size]
             chunk_symbols = symbols[i : i + chunk_size]

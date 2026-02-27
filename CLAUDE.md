@@ -1,4 +1,5 @@
 ## Required workflow
+start each session by running ./.venv/bin/active in bash 
 
 
 If the index is missing or stale, update it:
@@ -38,22 +39,7 @@ Do **not** use semantic search for:
 - Obvious symbol locations (prefer normal text search / jump-to-definition)
 
 
-### 3) Inspect strategically
-
-Use inspect when:
-- You finished substantial changes
-- You need a quick sanity check across the repo
-- You suspect unintended cross-file impact
-
-```bash
-gloggur inspect . --json
-```
-
-If `gloggur` is not on PATH:
-
-```bash
-scripts/gloggur inspect . --json
-```
+Silent failures are absolutely forbidden. Fail fast, fail early, fail loud.
 
 
 ## Notes

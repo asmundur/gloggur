@@ -39,6 +39,7 @@ def test_index_and_search_use_selected_provider_with_mocked_embeddings(
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
+        monkeypatch.chdir(repo)
         cache_dir = tempfile.mkdtemp(prefix=f"gloggur-{provider}-cache-")
         observed_models: list[str] = []
 
@@ -92,6 +93,7 @@ def test_index_and_search_use_selected_provider_with_mocked_embeddings(
 )
 def test_missing_provider_credentials_fail_without_traceback_and_with_json_payload(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     provider: str,
     detail_hint: str,
 ) -> None:
@@ -99,6 +101,7 @@ def test_missing_provider_credentials_fail_without_traceback_and_with_json_paylo
     runner = CliRunner()
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(repo)
     (repo / "sample.py").write_text(
         "def add(a: int, b: int) -> int:\n"
         "    return a + b\n",
@@ -131,6 +134,7 @@ def test_gemini_profile_not_overwritten_by_different_provider(
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
+        monkeypatch.chdir(repo)
         gemini_cache = tmp_path / "gemini-cache"
         openai_cache = tmp_path / "openai-cache"
 
@@ -202,3 +206,63 @@ def test_gemini_profile_not_overwritten_by_different_provider(
         assert openai_cache.exists()
         openai_files = set(openai_cache.rglob("*"))
         assert openai_files, "OpenAI cache should have files after indexing"
+
+
+def test_index_uses_gemini_model_and_key_from_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Index should resolve Gemini provider config from local .env without exported env vars."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        monkeypatch.chdir(repo)
+        (repo / ".env").write_text(
+            "GLOGGUR_EMBEDDING_PROVIDER=gemini\n"
+            "GLOGGUR_GEMINI_MODEL=gemini-dotenv-model\n"
+            "GLOGGUR_GEMINI_API_KEY=gemini-dotenv-key\n",
+            encoding="utf8",
+        )
+
+        monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)
+        monkeypatch.delenv("GLOGGUR_GEMINI_MODEL", raising=False)
+        monkeypatch.delenv("GLOGGUR_GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+        observed: dict[str, str | None] = {"model": None, "api_key": None}
+
+        class FakeGeminiProvider:
+            provider = "gemini"
+
+            def __init__(self, model: str, api_key: str | None = None) -> None:
+                observed["model"] = model
+                observed["api_key"] = api_key
+
+            def embed_text(self, text: str) -> list[float]:
+                _ = text
+                return [0.1, 0.2, 0.3]
+
+            def embed_batch(self, texts: list[str]) -> list[list[float]]:
+                return [[0.1, 0.2, 0.3] for _ in texts]
+
+            def get_dimension(self) -> int:
+                return 3
+
+        monkeypatch.setattr(
+            "gloggur.embeddings.factory.GeminiEmbeddingProvider",
+            FakeGeminiProvider,
+        )
+
+        result = runner.invoke(
+            cli,
+            ["index", str(repo), "--json"],
+            env={"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")},
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert int(payload["indexed_files"]) == 1
+        assert observed["model"] == "gemini-dotenv-model"
+        assert observed["api_key"] == "gemini-dotenv-key"

@@ -7,6 +7,7 @@ from gloggur.config import GloggurConfig
 
 def test_load_from_yaml_and_env_overrides(tmp_path, monkeypatch) -> None:
     """Config loads YAML and applies env overrides."""
+    monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "embedding_provider: openai\ncache_dir: file-cache\nopenai_embedding_model: model-a\n",
@@ -90,3 +91,101 @@ def test_embedding_profile_uses_active_provider_model() -> None:
     assert local.embedding_profile() == "local:local-a"
     assert openai.embedding_profile() == "openai:openai-a"
     assert gemini.embedding_profile() == "gemini:gemini-a"
+
+
+def test_load_env_reads_dotenv_when_process_env_unset(tmp_path, monkeypatch) -> None:
+    """Config should read embedding settings from local .env when process env is unset."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n"
+        "GLOGGUR_GEMINI_MODEL=dotenv-gemini-model\n"
+        "GLOGGUR_GEMINI_API_KEY=dotenv-gemini-key\n",
+        encoding="utf8",
+    )
+    monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("GLOGGUR_GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GLOGGUR_GEMINI_API_KEY", raising=False)
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.embedding_provider == "gemini"
+    assert config.gemini_embedding_model == "dotenv-gemini-model"
+    assert config.gemini_api_key == "dotenv-gemini-key"
+
+
+def test_process_env_overrides_dotenv(tmp_path, monkeypatch) -> None:
+    """Process environment values should override .env values."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n"
+        "GLOGGUR_GEMINI_MODEL=dotenv-model\n"
+        "GLOGGUR_GEMINI_API_KEY=dotenv-key\n",
+        encoding="utf8",
+    )
+    monkeypatch.setenv("GLOGGUR_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("GLOGGUR_OPENAI_MODEL", "openai-env-model")
+    monkeypatch.setenv("GLOGGUR_GEMINI_MODEL", "gemini-env-model")
+    monkeypatch.setenv("GLOGGUR_GEMINI_API_KEY", "gemini-env-key")
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.embedding_provider == "openai"
+    assert config.openai_embedding_model == "openai-env-model"
+    assert config.gemini_embedding_model == "gemini-env-model"
+    assert config.gemini_api_key == "gemini-env-key"
+
+
+def test_dotenv_model_mapping_for_gemini(tmp_path, monkeypatch) -> None:
+    """Gemini model from .env should flow into embedding profile computation."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n"
+        "GLOGGUR_GEMINI_MODEL=sentinel-gemini-model\n",
+        encoding="utf8",
+    )
+    monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("GLOGGUR_GEMINI_MODEL", raising=False)
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.embedding_provider == "gemini"
+    assert config.gemini_embedding_model == "sentinel-gemini-model"
+    assert config.embedding_profile() == "gemini:sentinel-gemini-model"
+
+
+def test_dotenv_ignores_malformed_lines(tmp_path, monkeypatch) -> None:
+    """Malformed .env entries should be skipped instead of breaking config load."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "NOT_AN_ASSIGNMENT\n"
+        " =missing_key\n"
+        "BAD KEY=bad\n"
+        "export GLOGGUR_CACHE_DIR=dotenv-cache\n",
+        encoding="utf8",
+    )
+    monkeypatch.delenv("GLOGGUR_CACHE_DIR", raising=False)
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.cache_dir == "dotenv-cache"
+    assert config.embedding_provider == "local"
+
+
+def test_dotenv_empty_values_do_not_override(tmp_path, monkeypatch) -> None:
+    """Empty .env values should behave like unset variables."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "GLOGGUR_EMBEDDING_PROVIDER=\n"
+        "GLOGGUR_GEMINI_MODEL=\n"
+        "GLOGGUR_GEMINI_API_KEY=\n",
+        encoding="utf8",
+    )
+    monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("GLOGGUR_GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GLOGGUR_GEMINI_API_KEY", raising=False)
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.embedding_provider == "local"
+    assert config.gemini_embedding_model == "gemini-embedding-001"
+    assert config.gemini_api_key is None

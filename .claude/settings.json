@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c \":*)",
+      "Bash(.venv/bin/python -m gloggur.cli.main index .)",
+      "Bash(.venv/bin/pytest tests/unit/test_embeddings.py tests/unit/test_indexer.py tests/integration/test_provider_cli_integration.py -x -q --tb=short)",
+      "Bash(scripts/gloggur index .)",
+      "Read(//tmp/**)"
+    ]
+  }
+}

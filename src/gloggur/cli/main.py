@@ -914,14 +914,25 @@ def index(
             embedding_provider=embedding,
             vector_store=vector_store,
         )
-        if not as_json and embedding is not None:
-            def _progress(done: int, total: int) -> None:
-                click.echo(f"\rEmbedding symbols: {done}/{total}", nl=False, err=True)
-            indexer._progress_callback = _progress
+        if not as_json:
+            def _scan(count: int, status: str) -> None:
+                click.echo(f"\rScanning: {count} files    ", nl=False, err=True)
+
+            indexer._scan_callback = _scan
+
+            if embedding is not None:
+                def _progress(done: int, total: int) -> None:
+                    click.echo(
+                        f"\rEmbedding: {done}/{total} symbols    ",
+                        nl=False,
+                        err=True,
+                    )
+                indexer._progress_callback = _progress
+
         if os.path.isdir(path):
             result = indexer.index_repository(path)
-            if not as_json and embedding is not None:
-                click.echo("", err=True)  # newline after progress line
+            if not as_json:
+                click.echo("", err=True)  # newline after final progress line
             if result.failed == 0:
                 _persist_last_success_resume_state(config, cache)
             payload = result.as_payload()

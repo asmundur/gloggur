@@ -14,7 +14,11 @@
       "Bash(.venv/bin/python -m gloggur status --json)",
       "Bash(.venv/bin/python -m pytest tests/unit/test_docstring_audit.py -v)",
       "Bash(.venv/bin/python -m pytest tests/unit/ -q)",
-      "Bash(scripts/gloggur inspect src/gloggur --json --force --allow-partial)"
+      "Bash(scripts/gloggur inspect src/gloggur --json --force --allow-partial)",
+      "Bash(python3 -c \"import sys, json; d=json.load\\(sys.stdin\\); print\\(''cached files:'', d.get\\(''metadata'', {}\\).get\\(''indexed_files'', ''N/A''\\) if d.get\\(''metadata''\\) else ''no metadata''\\); print\\(''profile:'', d.get\\(''cached_index_profile''\\)\\); print\\(''needs reindex:'', d.get\\(''needs_reindex''\\)\\)\")",
+      "Bash(.venv/bin/pytest -x -q --tb=short)",
+      "Bash(.venv/bin/pytest tests/unit/test_embeddings.py tests/unit/test_indexer.py tests/integration/test_provider_cli_integration.py -x -q --tb=short --no-header)",
+      "Bash(.venv/bin/pytest tests/ --ignore=tests/unit/test_embeddings.py --ignore=tests/unit/test_indexer.py --ignore=tests/integration/test_provider_cli_integration.py -x -q --tb=short --no-header)"
     ]
   }
 }

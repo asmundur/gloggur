@@ -88,6 +88,7 @@ Pytest defaults for this repo:
 ## Configuration
 
 You can tailor indexing and embedding behavior via `.gloggur.yaml` or `.gloggur.json` at the repo root. See the README for supported keys and environment variables.
+Gloggur also auto-loads a repo-local `.env` file; exported process environment variables take precedence over `.env`.
 
 ## Cache handling
 
