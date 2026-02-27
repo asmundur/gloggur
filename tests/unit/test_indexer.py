@@ -281,6 +281,38 @@ def test_indexer_fails_closed_when_vector_consistency_is_unverifiable() -> None:
         assert isinstance(guidance["vector_consistency_unverifiable"], list)
         assert guidance["vector_consistency_unverifiable"]
 
+
+def test_indexer_scan_callback_reports_done_and_total_counts() -> None:
+    """Repository scan callback should receive deterministic done/total progress values."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "a.py": "def a() -> int:\n    return 1\n",
+                "b.py": "def b() -> int:\n    return 2\n",
+                "c.py": "def c() -> int:\n    return 3\n",
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+        scan_calls: list[tuple[int, int, str]] = []
+
+        def _scan(done: int, total: int, status: str) -> None:
+            scan_calls.append((done, total, status))
+
+        indexer._scan_callback = _scan
+
+        result = indexer.index_repository(str(repo))
+
+    assert result.files_considered == 3
+    assert len(scan_calls) == 3
+    assert [done for done, _, _ in scan_calls] == [1, 2, 3]
+    assert all(total == 3 for _, total, _ in scan_calls)
+    assert scan_calls[-1][0] == scan_calls[-1][1]
+    assert all(status == "prepared" for _, _, status in scan_calls)
+
+
 def test_apply_embeddings_calls_progress_callback() -> None:
     """_apply_embeddings fires progress_callback after each chunk with correct counts."""
 

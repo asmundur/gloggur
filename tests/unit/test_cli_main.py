@@ -850,6 +850,61 @@ def test_index_json_reports_vector_store_write_failure(
     assert "no space left on device" in str(error["detail"])
 
 
+@pytest.mark.parametrize("provider", ["local", "openai", "gemini"])
+def test_index_plain_progress_reports_done_over_total_for_all_embedding_providers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider: str,
+) -> None:
+    """index (non-json) should show done/total scan progress regardless of embedding provider."""
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "sample.py").write_text(
+        "def add(a: int, b: int) -> int:\n"
+        "    return a + b\n",
+        encoding="utf8",
+    )
+    seen_providers: list[str] = []
+
+    class FakeEmbedding:
+        provider = "fake"
+
+        def embed_text(self, _text: str) -> list[float]:
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1, 0.2] for _ in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    def _fake_create_embedding(
+        config: cli_main.GloggurConfig,
+        *,
+        require_provider: bool = False,
+    ) -> FakeEmbedding:
+        _ = require_provider
+        seen_providers.append(config.embedding_provider)
+        return FakeEmbedding()
+
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        _fake_create_embedding,
+    )
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["index", str(repo), "--embedding-provider", provider],
+        env={"GLOGGUR_CACHE_DIR": str(tmp_path / f"cache-{provider}")},
+    )
+
+    assert result.exit_code == 0
+    assert seen_providers == [provider]
+    assert "Scanning: 1/1 files" in result.output
+
+
 def test_clear_cache_json_reports_vector_artifact_delete_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -950,6 +1005,53 @@ def test_clear_cache_json_ignores_invalid_fallback_vector_matrix_and_clears_arti
     payload = _parse_json_output(result.output)
     assert payload["cleared"] is True
     assert not fallback_matrix.exists()
+
+
+def test_clear_cache_json_profile_filter_miss_keeps_cache_intact(
+    tmp_path: Path,
+) -> None:
+    """clear-cache with non-matching profile filter should no-op."""
+    runner = CliRunner()
+    cache_dir = tmp_path / "cache"
+    cache = CacheManager(CacheConfig(str(cache_dir)))
+    cache.set_index_profile("local:microsoft/codebert-base")
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["clear-cache", "--json", "--profile-filter", "gemini"],
+        env={"GLOGGUR_CACHE_DIR": str(cache_dir)},
+    )
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["cleared"] is False
+    assert payload["reason"] == "profile_filter_miss"
+    assert payload["cached_index_profile"] == "local:microsoft/codebert-base"
+    reloaded = CacheManager(CacheConfig(str(cache_dir)))
+    assert reloaded.get_index_profile() == "local:microsoft/codebert-base"
+
+
+def test_clear_cache_json_profile_filter_match_clears_cache(
+    tmp_path: Path,
+) -> None:
+    """clear-cache with matching profile filter should clear cache artifacts."""
+    runner = CliRunner()
+    cache_dir = tmp_path / "cache"
+    cache = CacheManager(CacheConfig(str(cache_dir)))
+    cache.set_index_profile("local:microsoft/codebert-base")
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["clear-cache", "--json", "--profile-filter", "codebert"],
+        env={"GLOGGUR_CACHE_DIR": str(cache_dir)},
+    )
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["cleared"] is True
+    assert payload["cached_index_profile"] == "local:microsoft/codebert-base"
+    reloaded = CacheManager(CacheConfig(str(cache_dir)))
+    assert reloaded.get_index_profile() is None
 
 
 def test_index_json_reports_missing_embedding_provider_configuration(

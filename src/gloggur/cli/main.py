@@ -860,6 +860,19 @@ def _create_embedding_provider_for_command(
         ) from exc
 
 
+def _profile_matches_filter(cached_profile: Optional[str], profile_filter: str) -> bool:
+    """Return whether a cached profile matches a user-provided clear-cache filter."""
+    if not cached_profile:
+        return False
+    normalized_filter = profile_filter.strip().lower()
+    if not normalized_filter:
+        return False
+    normalized_profile = cached_profile.strip().lower()
+    if ":" in normalized_filter:
+        return normalized_profile == normalized_filter
+    return normalized_filter in normalized_profile
+
+
 def _build_index_failure_contract(failed_reasons: Dict[str, int]) -> Dict[str, object]:
     """Build deterministic machine-readable failure codes and remediation for index payloads."""
     if not failed_reasons:
@@ -915,8 +928,9 @@ def index(
             vector_store=vector_store,
         )
         if not as_json:
-            def _scan(count: int, status: str) -> None:
-                click.echo(f"\rScanning: {count} files    ", nl=False, err=True)
+            def _scan(done: int, total: int, status: str) -> None:
+                _ = status
+                click.echo(f"\rScanning: {done}/{total} files    ", nl=False, err=True)
 
             indexer._scan_callback = _scan
 
@@ -1779,20 +1793,50 @@ def status(config_path: Optional[str], as_json: bool) -> None:
 @cli.command("clear-cache")
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--profile-filter",
+    type=str,
+    default=None,
+    help=(
+        "Only clear when cached_index_profile matches this exact profile "
+        "(provider:model) or contains this substring."
+    ),
+)
 @_with_io_failure_handling
-def clear_cache(config_path: Optional[str], as_json: bool) -> None:
+def clear_cache(config_path: Optional[str], as_json: bool, profile_filter: Optional[str]) -> None:
     """Clear the index cache."""
     resolved_config_path = _normalize_config_path(config_path)
     config = _load_config(resolved_config_path)
     with cache_write_lock(config.cache_dir):
         cache = _create_cache_manager(config.cache_dir)
+        cached_profile = cache.get_index_profile()
+        if profile_filter and not _profile_matches_filter(cached_profile, profile_filter):
+            _emit(
+                {
+                    "cleared": False,
+                    "cache_dir": config.cache_dir,
+                    "cached_index_profile": cached_profile,
+                    "profile_filter": profile_filter,
+                    "reason": "profile_filter_miss",
+                },
+                as_json,
+            )
+            return
         cache.clear()
         vector_store = VectorStore(
             VectorStoreConfig(config.cache_dir),
             load_existing=False,
         )
         vector_store.clear()
-    _emit({"cleared": True, "cache_dir": config.cache_dir}, as_json)
+    _emit(
+        {
+            "cleared": True,
+            "cache_dir": config.cache_dir,
+            "cached_index_profile": cached_profile,
+            "profile_filter": profile_filter,
+        },
+        as_json,
+    )
 
 
 if __name__ == "__main__":

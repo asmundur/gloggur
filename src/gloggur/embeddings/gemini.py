@@ -28,7 +28,13 @@ class _RateLimitError(Exception):
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
     """Embedding provider that calls the Gemini embeddings API."""
-    def __init__(self, model: str, api_key: str | None = None, _chunk_size: int = 50) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str | None = None,
+        _chunk_size: int = 50,
+        _batch_first: bool = True,
+    ) -> None:
         """Initialize the Gemini client and model selection."""
         self.provider = "gemini"
         self.model = model
@@ -50,6 +56,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         self._client = genai.Client(api_key=self.api_key)
         self._dimension: int | None = None
         self._chunk_size = _chunk_size
+        self._batch_first = _batch_first
 
     def embed_text(self, text: str) -> List[float]:
         """Embed a single text string."""
@@ -59,10 +66,19 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return vectors[0]
 
     def embed_batch(self, texts: Iterable[str]) -> List[List[float]]:
-        """Embed a batch of text strings, chunking with unlimited rate-limit retry."""
+        """Embed a batch of text strings, preferring one full request then chunk fallback."""
         payload = list(texts)
         if not payload:
             return []
+        if self._batch_first and len(payload) > self._chunk_size:
+            try:
+                vectors = self._embed_chunk_with_retry(payload)
+                if vectors:
+                    self._dimension = len(vectors[0])
+                return vectors
+            except RuntimeError:
+                # Fall back to chunked mode when a provider/account cannot accept large requests.
+                pass
         results: List[List[float]] = []
         for i in range(0, len(payload), self._chunk_size):
             chunk = payload[i : i + self._chunk_size]

@@ -337,6 +337,76 @@ def test_gemini_embed_batch_rate_limit_multiple_retries_does_not_abort(
     assert fail_count == max_fails
 
 
+def test_gemini_embed_batch_prefers_single_large_request_when_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When supported, embed_batch should send one large Gemini request first."""
+    call_sizes: list[int] = []
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            _ = model
+            size = len(list(contents))
+            call_sizes.append(size)
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[0.1, 0.2])] * size
+            )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            _ = api_key
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    provider = GeminiEmbeddingProvider(
+        model="gemini-embedding-001",
+        _chunk_size=2,
+        _batch_first=True,
+    )
+    result = provider.embed_batch(["a", "b", "c", "d", "e"])
+
+    assert len(result) == 5
+    assert call_sizes == [5]
+
+
+def test_gemini_embed_batch_falls_back_to_chunked_mode_when_large_request_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large-batch failures should fall back to chunked Gemini requests."""
+    call_sizes: list[int] = []
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            _ = model
+            size = len(list(contents))
+            call_sizes.append(size)
+            if size > 2:
+                raise RuntimeError("400 request payload too large")
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[0.1, 0.2])] * size
+            )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            _ = api_key
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    provider = GeminiEmbeddingProvider(
+        model="gemini-embedding-001",
+        _chunk_size=2,
+        _batch_first=True,
+    )
+    result = provider.embed_batch(["a", "b", "c", "d", "e"])
+
+    assert len(result) == 5
+    assert call_sizes == [5, 2, 2, 1]
+
+
 def test_local_embedding_fallback_vector_is_normalized(tmp_path: Path) -> None:
     """Fallback embeddings are normalized to unit length."""
     provider = LocalEmbeddingProvider("local", cache_dir=str(tmp_path))

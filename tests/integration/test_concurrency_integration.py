@@ -224,6 +224,62 @@ def test_clear_cache_lock_contention_fails_fast_without_hanging() -> None:
         _stop_lock_holder(holder, release_path)
 
 
+def test_clear_cache_during_index_run_fails_fast_and_index_completes_cleanly() -> None:
+    """clear-cache during an active index run should fail fast and not corrupt the eventual index."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                f"module_{idx}.py": (
+                    f"def handler_{idx}(value: int) -> int:\n"
+                    f"    return value + {idx}\n"
+                )
+                for idx in range(40)
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        index_env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_MODEL": "local",
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_MS": "1500",
+        }
+        index_proc = subprocess.Popen(
+            [sys.executable, "-m", "gloggur.cli.main", "index", str(repo), "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=index_env,
+        )
+        try:
+            time.sleep(0.1)
+            blocked_env = {
+                **os.environ,
+                "GLOGGUR_CACHE_DIR": cache_dir,
+                "GLOGGUR_LOCAL_MODEL": "local",
+                "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": "100",
+            }
+            blocked = _run_cli(["clear-cache", "--json"], blocked_env, timeout=10)
+            assert blocked.returncode == 1
+            payload = _parse_json_payload(blocked.stdout)
+            error = payload["error"]
+            assert isinstance(error, dict)
+            assert error["operation"] == "acquire cache write lock"
+            assert "timed out" in str(error["detail"])
+        finally:
+            index_stdout, index_stderr = index_proc.communicate(timeout=240)
+
+        assert index_proc.returncode == 0, index_stderr
+        index_payload = _parse_json_payload(index_stdout)
+        assert int(index_payload["failed"]) == 0
+
+        status = _run_cli(["status", "--json"], blocked_env, timeout=60)
+        assert status.returncode == 0, status.stderr
+        status_payload = _parse_json_payload(status.stdout)
+        assert status_payload["needs_reindex"] is False
+        assert int(status_payload["total_symbols"]) > 0
+
+
 def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
     """Interrupted index runs must not advertise healthy status/search state."""
     with TestFixtures() as fixtures:

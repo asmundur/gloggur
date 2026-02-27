@@ -126,6 +126,21 @@ class FileIndexOutcome:
     detail: Optional[str] = None
 
 
+@dataclass
+class PreparedFileIndex:
+    """Prepared file payload carried from parse phase into embedding/persist phase."""
+
+    path: str
+    language: str
+    content_hash: str
+    source: str
+    symbols: List[Symbol]
+    previous_symbol_ids: List[str]
+    symbols_added: int
+    symbols_updated: int
+    symbols_removed: int
+
+
 class Indexer:
     """Incremental repository indexer that hashes files and stores symbols."""
 
@@ -145,7 +160,7 @@ class Indexer:
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self._progress_callback: Optional[Callable[[int, int], None]] = None
-        self._scan_callback: Optional[Callable[[int, str], None]] = None
+        self._scan_callback: Optional[Callable[[int, int, str], None]] = None
 
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
@@ -155,6 +170,8 @@ class Indexer:
         # Test-only hook to make interruption windows deterministic.
         self._maybe_pause_after_metadata_delete()
 
+        source_files = list(self._iter_source_files(path))
+        total_files = len(source_files)
         files_considered = 0
         indexed_files = 0
         unchanged_files = 0
@@ -167,20 +184,19 @@ class Indexer:
         failed_reasons: Dict[str, int] = {}
         failed_samples: List[str] = []
         seen_paths: set[str] = set()
+        prepared_files: List[PreparedFileIndex] = []
 
-        for file_path in self._iter_source_files(path):
+        for file_path in source_files:
             seen_paths.add(file_path)
             files_considered += 1
-            outcome = self.index_file_with_outcome(file_path)
-            if self._scan_callback is not None:
-                self._scan_callback(files_considered, outcome.status)
-            if outcome.status == "indexed":
-                indexed_files += 1
-                indexed_symbols += outcome.symbols_indexed
-                symbols_added += outcome.symbols_added
-                symbols_updated += outcome.symbols_updated
-                symbols_removed += outcome.symbols_removed
+            prepared, outcome = self._prepare_file_for_index(file_path)
+            if prepared is not None:
+                prepared_files.append(prepared)
+                if self._scan_callback is not None:
+                    self._scan_callback(files_considered, total_files, "prepared")
                 continue
+            if self._scan_callback is not None:
+                self._scan_callback(files_considered, total_files, outcome.status)
             if outcome.status == "unchanged":
                 unchanged_files += 1
                 continue
@@ -193,6 +209,49 @@ class Indexer:
                     failed_samples.append(f"{file_path}: {outcome.detail}")
                 else:
                     failed_samples.append(file_path)
+
+        total_embedding_symbols = sum(len(prepared.symbols) for prepared in prepared_files)
+        embedded_symbols_done = 0
+        for prepared in prepared_files:
+            file_symbols_total = len(prepared.symbols)
+            file_progress_done = 0
+            progress_callback = None
+            if self._progress_callback is not None and total_embedding_symbols > 0:
+
+                def _progress(
+                    done: int,
+                    total: int,
+                    base: int = embedded_symbols_done,
+                ) -> None:
+                    nonlocal file_progress_done
+                    _ = total
+                    file_progress_done = done
+                    self._progress_callback(base + done, total_embedding_symbols)
+
+                progress_callback = _progress
+
+            try:
+                prepared.symbols = self._apply_embeddings(
+                    prepared.symbols,
+                    prepared.source,
+                    progress_callback,
+                )
+                self._persist_prepared_file(prepared)
+            except Exception as exc:
+                failed_files += 1
+                reason = "storage_error"
+                failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+                if len(failed_samples) < 5:
+                    failed_samples.append(f"{prepared.path}: {type(exc).__name__}: {exc}")
+                embedded_symbols_done += file_progress_done
+                continue
+
+            embedded_symbols_done += file_symbols_total
+            indexed_files += 1
+            indexed_symbols += len(prepared.symbols)
+            symbols_added += prepared.symbols_added
+            symbols_updated += prepared.symbols_updated
+            symbols_removed += prepared.symbols_removed
 
         stale_cleanup = self._prune_stale_files(seen_paths)
         files_removed += stale_cleanup["files_removed"]
@@ -260,18 +319,46 @@ class Indexer:
 
     def index_file_with_outcome(self, path: str) -> FileIndexOutcome:
         """Index a file and return an explicit terminal outcome."""
+        prepared, outcome = self._prepare_file_for_index(path)
+        if prepared is None:
+            return outcome
+
+        try:
+            prepared.symbols = self._apply_embeddings(
+                prepared.symbols,
+                prepared.source,
+                self._progress_callback,
+            )
+            self._persist_prepared_file(prepared)
+        except Exception as exc:
+            return FileIndexOutcome(
+                status="failed",
+                reason="storage_error",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+
+        return FileIndexOutcome(
+            status="indexed",
+            symbols_indexed=len(prepared.symbols),
+            symbols_added=prepared.symbols_added,
+            symbols_updated=prepared.symbols_updated,
+            symbols_removed=prepared.symbols_removed,
+        )
+
+    def _prepare_file_for_index(self, path: str) -> tuple[Optional[PreparedFileIndex], FileIndexOutcome]:
+        """Read/parse a file and compute symbol diff metadata for later persistence."""
 
         try:
             with open(path, "r", encoding="utf8") as handle:
                 source = handle.read()
         except UnicodeDecodeError as exc:
-            return FileIndexOutcome(
+            return None, FileIndexOutcome(
                 status="failed",
                 reason="decode_error",
                 detail=f"{type(exc).__name__}: {exc}",
             )
         except OSError as exc:
-            return FileIndexOutcome(
+            return None, FileIndexOutcome(
                 status="failed",
                 reason="read_error",
                 detail=f"{type(exc).__name__}: {exc}",
@@ -285,11 +372,11 @@ class Indexer:
                 symbol.id: symbol for symbol in self.cache.list_symbols_for_file(path)
             }
         if existing and existing.content_hash == content_hash:
-            return FileIndexOutcome(status="unchanged")
+            return None, FileIndexOutcome(status="unchanged")
 
         parser_entry = self.parser_registry.get_parser_for_path(path)
         if not parser_entry:
-            return FileIndexOutcome(
+            return None, FileIndexOutcome(
                 status="failed",
                 reason="parser_unavailable",
                 detail="No parser registered for file extension.",
@@ -298,56 +385,56 @@ class Indexer:
         try:
             symbols = parser_entry.parser.extract_symbols(path, source)
         except Exception as exc:
-            return FileIndexOutcome(
+            return None, FileIndexOutcome(
                 status="failed",
                 reason="parse_error",
                 detail=f"{type(exc).__name__}: {exc}",
             )
 
-        try:
-            symbols = self._apply_embeddings(symbols, source, self._progress_callback)
-            previous_symbol_ids = existing.symbols if existing else []
-            new_symbols_by_id = {symbol.id: symbol for symbol in symbols}
-            new_symbol_ids = set(new_symbols_by_id)
-            previous_symbol_ids_set = set(previous_symbol_ids)
-            symbols_added = len(new_symbol_ids - previous_symbol_ids_set)
-            symbols_removed = len(previous_symbol_ids_set - new_symbol_ids)
-            symbols_updated = 0
-            for symbol_id in new_symbol_ids & previous_symbol_ids_set:
-                previous_symbol = existing_symbols_by_id.get(symbol_id)
-                current_symbol = new_symbols_by_id.get(symbol_id)
-                if previous_symbol is None or current_symbol is None:
-                    continue
-                if previous_symbol.body_hash != current_symbol.body_hash:
-                    symbols_updated += 1
-            if self.vector_store and previous_symbol_ids:
-                self.vector_store.remove_ids(previous_symbol_ids)
-            self.cache.delete_symbols_for_file(path)
-            self.cache.upsert_symbols(symbols)
-            self.cache.upsert_file_metadata(
-                FileMetadata(
-                    path=path,
-                    language=parser_entry.language,
-                    content_hash=content_hash,
-                    symbols=[symbol.id for symbol in symbols],
-                )
-            )
-            if self.vector_store and symbols:
-                self.vector_store.upsert_vectors(symbols)
-        except Exception as exc:
-            return FileIndexOutcome(
-                status="failed",
-                reason="storage_error",
-                detail=f"{type(exc).__name__}: {exc}",
-            )
+        previous_symbol_ids = existing.symbols if existing else []
+        new_symbols_by_id = {symbol.id: symbol for symbol in symbols}
+        new_symbol_ids = set(new_symbols_by_id)
+        previous_symbol_ids_set = set(previous_symbol_ids)
+        symbols_added = len(new_symbol_ids - previous_symbol_ids_set)
+        symbols_removed = len(previous_symbol_ids_set - new_symbol_ids)
+        symbols_updated = 0
+        for symbol_id in new_symbol_ids & previous_symbol_ids_set:
+            previous_symbol = existing_symbols_by_id.get(symbol_id)
+            current_symbol = new_symbols_by_id.get(symbol_id)
+            if previous_symbol is None or current_symbol is None:
+                continue
+            if previous_symbol.body_hash != current_symbol.body_hash:
+                symbols_updated += 1
 
-        return FileIndexOutcome(
-            status="indexed",
-            symbols_indexed=len(symbols),
+        prepared = PreparedFileIndex(
+            path=path,
+            language=parser_entry.language,
+            content_hash=content_hash,
+            source=source,
+            symbols=symbols,
+            previous_symbol_ids=previous_symbol_ids,
             symbols_added=symbols_added,
             symbols_updated=symbols_updated,
             symbols_removed=symbols_removed,
         )
+        return prepared, FileIndexOutcome(status="prepared", symbols_indexed=len(symbols))
+
+    def _persist_prepared_file(self, prepared: PreparedFileIndex) -> None:
+        """Persist one prepared file into cache and vector store."""
+        if self.vector_store and prepared.previous_symbol_ids:
+            self.vector_store.remove_ids(prepared.previous_symbol_ids)
+        self.cache.delete_symbols_for_file(prepared.path)
+        self.cache.upsert_symbols(prepared.symbols)
+        self.cache.upsert_file_metadata(
+            FileMetadata(
+                path=prepared.path,
+                language=prepared.language,
+                content_hash=prepared.content_hash,
+                symbols=[symbol.id for symbol in prepared.symbols],
+            )
+        )
+        if self.vector_store and prepared.symbols:
+            self.vector_store.upsert_vectors(prepared.symbols)
 
     def index_file(self, path: str) -> Optional[int]:
         """Index a file and return symbol count when indexed, else None."""
