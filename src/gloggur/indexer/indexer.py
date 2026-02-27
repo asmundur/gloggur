@@ -4,7 +4,7 @@ import hashlib
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
@@ -144,6 +144,7 @@ class Indexer:
         self.parser_registry = parser_registry or ParserRegistry()
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        self._progress_callback: Optional[Callable[[int, int], None]] = None
 
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
@@ -301,7 +302,7 @@ class Indexer:
             )
 
         try:
-            symbols = self._apply_embeddings(symbols, source)
+            symbols = self._apply_embeddings(symbols, source, self._progress_callback)
             previous_symbol_ids = existing.symbols if existing else []
             new_symbols_by_id = {symbol.id: symbol for symbol in symbols}
             new_symbol_ids = set(new_symbols_by_id)
@@ -456,7 +457,12 @@ class Indexer:
         """Public post-index consistency check used by both repo and single-file index flows."""
         return self._validate_vector_metadata_consistency()
 
-    def _apply_embeddings(self, symbols: List[Symbol], source: str) -> List[Symbol]:
+    def _apply_embeddings(
+        self,
+        symbols: List[Symbol],
+        source: str,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> List[Symbol]:
         """Attach embedding vectors to symbols when a provider is available."""
 
         if not self.embedding_provider:
@@ -465,16 +471,25 @@ class Indexer:
         texts = [self._symbol_text(symbol, lines) for symbol in symbols]
         if not texts:
             return symbols
-        try:
-            vectors = self.embedding_provider.embed_batch(texts)
-        except Exception as exc:
-            raise wrap_embedding_error(
-                exc,
-                provider=self.config.embedding_provider,
-                operation="embed symbol batch for indexing",
-            ) from exc
-        for symbol, vector in zip(symbols, vectors):
-            symbol.embedding_vector = vector
+        total = len(symbols)
+        chunk_size = getattr(self.embedding_provider, "_chunk_size", 50)
+        done = 0
+        for i in range(0, total, chunk_size):
+            chunk_texts = texts[i : i + chunk_size]
+            chunk_symbols = symbols[i : i + chunk_size]
+            try:
+                vectors = self.embedding_provider.embed_batch(chunk_texts)
+            except Exception as exc:
+                raise wrap_embedding_error(
+                    exc,
+                    provider=self.config.embedding_provider,
+                    operation="embed symbol batch for indexing",
+                ) from exc
+            for symbol, vector in zip(chunk_symbols, vectors):
+                symbol.embedding_vector = vector
+            done = min(i + chunk_size, total)
+            if progress_callback is not None:
+                progress_callback(done, total)
         return symbols
 
     @staticmethod

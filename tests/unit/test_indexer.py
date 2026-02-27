@@ -280,3 +280,132 @@ def test_indexer_fails_closed_when_vector_consistency_is_unverifiable() -> None:
         assert "vector_consistency_unverifiable" in guidance
         assert isinstance(guidance["vector_consistency_unverifiable"], list)
         assert guidance["vector_consistency_unverifiable"]
+
+def test_apply_embeddings_calls_progress_callback() -> None:
+    """_apply_embeddings fires progress_callback after each chunk with correct counts."""
+
+    class FakeProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self._chunk_size = 2
+
+        def embed_text(self, text: str) -> list[float]:
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1, 0.2]] * len(list(texts))
+
+        def get_dimension(self) -> int:
+            return 2
+
+    source = (
+        "def alpha() -> None:\n    pass\n"
+        "def beta() -> None:\n    pass\n"
+        "def gamma() -> None:\n    pass\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=FakeProvider(),
+        )
+        result = indexer.index_repository(str(repo))
+
+    assert result.indexed_symbols > 0
+
+    # Now test _apply_embeddings directly with progress_callback
+    from gloggur.models import Symbol
+
+    def _make_symbol(name: str) -> Symbol:
+        return Symbol(
+            id=name,
+            name=name,
+            kind="function",
+            file_path="f.py",
+            start_line=1,
+            end_line=3,
+            signature=f"def {name}():",
+            body_hash="abc",
+        )
+
+    symbols = [_make_symbol(f"fn{i}") for i in range(5)]
+    progress_calls: list[tuple[int, int]] = []
+
+    fake_provider = FakeProvider()
+    cache_dir2 = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config2 = GloggurConfig(cache_dir=cache_dir2)
+    cache2 = CacheManager(CacheConfig(cache_dir2))
+    indexer2 = Indexer(
+        config=config2,
+        cache=cache2,
+        parser_registry=ParserRegistry(),
+        embedding_provider=fake_provider,
+    )
+
+    result_symbols = indexer2._apply_embeddings(
+        symbols,
+        "def fn0(): pass\ndef fn1(): pass\ndef fn2(): pass\ndef fn3(): pass\ndef fn4(): pass\n",
+        progress_callback=lambda done, total: progress_calls.append((done, total)),
+    )
+
+    total = len(symbols)
+    assert len(result_symbols) == total
+    assert len(progress_calls) >= 1
+    # All totals should be the total symbol count
+    assert all(t == total for _, t in progress_calls)
+    # Final call should be (total, total)
+    assert progress_calls[-1] == (total, total)
+    # Calls should be monotonically non-decreasing
+    dones = [d for d, _ in progress_calls]
+    assert dones == sorted(dones)
+
+
+def test_apply_embeddings_no_progress_callback_works() -> None:
+    """_apply_embeddings works normally when no progress_callback is provided."""
+
+    class FakeProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self._chunk_size = 2
+
+        def embed_text(self, text: str) -> list[float]:
+            return [0.5, 0.5]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[0.5, 0.5]] * len(list(texts))
+
+        def get_dimension(self) -> int:
+            return 2
+
+    from gloggur.models import Symbol
+
+    def _make_symbol(name: str) -> Symbol:
+        return Symbol(
+            id=name,
+            name=name,
+            kind="function",
+            file_path="f.py",
+            start_line=1,
+            end_line=2,
+            signature=f"def {name}():",
+            body_hash="abc",
+        )
+
+    symbols = [_make_symbol(f"s{i}") for i in range(3)]
+    fake_provider = FakeProvider()
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(cache_dir=cache_dir)
+    cache = CacheManager(CacheConfig(cache_dir))
+    indexer = Indexer(
+        config=config,
+        cache=cache,
+        parser_registry=ParserRegistry(),
+        embedding_provider=fake_provider,
+    )
+
+    result = indexer._apply_embeddings(symbols, "def s0(): pass\ndef s1(): pass\ndef s2(): pass\n")
+    assert len(result) == 3
+    assert all(s.embedding_vector == [0.5, 0.5] for s in result)

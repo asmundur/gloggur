@@ -365,6 +365,28 @@ Execution rule:
 - Corrected Gemini probe skip guidance in `scripts/run_provider_probe.py` to list all supported API-key env vars (`GLOGGUR_GEMINI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`) with unit regression coverage in `tests/unit/test_run_provider_probe.py`.
 - Remaining closure gap: collect at least one live-key smoke run artifact (outside CI) to confirm real provider account/config behavior in a non-mocked environment.
 
+**Progress Update (2026-02-27) — Gemini rate-limit resilience, progress bar, and profile-isolation tests**
+- Extended Gemini scope to cover unknown RPM rate-limit resilience and active progress reporting:
+  - `src/gloggur/embeddings/gemini.py`: `GLOGGUR_GEMINI_API_KEY` now checked first in env-var chain (before `GEMINI_API_KEY`/`GOOGLE_API_KEY`). Added empty-batch guard (returns `[]` immediately). Added `_chunk_size` constructor arg (default 50). Redesigned `embed_batch` to chunk texts and wrap each chunk in an unlimited tenacity retry (`wait_exponential(min=2, max=60)`) on rate-limit/quota errors — batch indexing will always finish, even if slow.
+  - `src/gloggur/indexer/indexer.py`: `_apply_embeddings` now accepts optional `progress_callback: Callable[[int, int], None]` and calls it after each chunk with `(symbols_done, symbols_total)`. Wired via `Indexer._progress_callback` attribute set by the CLI.
+  - `src/gloggur/cli/main.py`: Non-JSON `index` command sets a `\r`-based progress callback printing `Embedding symbols: N/M` to stderr during batch embedding runs.
+- Added unit tests in `tests/unit/test_embeddings.py`:
+  - `test_gemini_embed_batch_empty_returns_empty` — empty list returns `[]` without API call.
+  - `test_gemini_embed_batch_single_item` — single-item batch returns 1-element list.
+  - `test_gemini_gloggur_api_key_env_var_used_first` — `GLOGGUR_GEMINI_API_KEY` takes precedence when all three keys set.
+  - `test_gemini_gloggur_api_key_only` — `GLOGGUR_GEMINI_API_KEY` alone is sufficient.
+  - `test_gemini_embed_batch_retries_on_rate_limit_and_succeeds` — first call raises 429, second succeeds; result returned.
+  - `test_gemini_embed_batch_rate_limit_multiple_retries_does_not_abort` — 3 consecutive failures all retried; final result returned.
+- Added unit tests in `tests/unit/test_indexer.py`:
+  - `test_apply_embeddings_calls_progress_callback` — callback fired per chunk with correct `(done, total)` values.
+  - `test_apply_embeddings_no_progress_callback_works` — no regression when callback is omitted.
+- Added integration test in `tests/integration/test_provider_cli_integration.py`:
+  - `test_gemini_profile_not_overwritten_by_different_provider` — Gemini cache dir is untouched after indexing with OpenAI into a separate cache dir.
+- All 37 target tests (F2 suite + new indexer tests) pass.
+- Remaining closure gaps:
+  - Live-key smoke probe artifact still not collected (deferred: no Gemini API key in CI/local environment).
+  - Add `scripts/run_provider_probe.py --format markdown` output as artifact when a key becomes available.
+
 ---
 
 ## F3 - Portable Index Artifact Publishing for CI/CD and Codex Cloud

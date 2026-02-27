@@ -168,6 +168,175 @@ def test_gemini_extract_vectors_variants() -> None:
     assert GeminiEmbeddingProvider._extract_vectors(response_embedding) == [[0.9, 1.0]]
 
 
+def _patch_genai(monkeypatch: pytest.MonkeyPatch, fake_client_cls: type) -> None:
+    """Patch google.genai with a fake client class for Gemini tests."""
+    genai_module = ModuleType("google.genai")
+    genai_module.Client = fake_client_cls
+    google_module = ModuleType("google")
+    google_module.genai = genai_module
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+
+def test_gemini_embed_batch_empty_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """embed_batch([]) must return [] without calling the API."""
+    call_count = 0
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            nonlocal call_count
+            call_count += 1
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2])])
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001")
+    result = provider.embed_batch([])
+
+    assert result == []
+    assert call_count == 0
+
+
+def test_gemini_embed_batch_single_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    """embed_batch with one item returns a 1-element list."""
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[0.1, 0.2, 0.3])]
+            )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001")
+    result = provider.embed_batch(["hello"])
+
+    assert len(result) == 1
+    assert result[0] == [0.1, 0.2, 0.3]
+    assert all(isinstance(v, float) for v in result[0])
+
+
+def test_gemini_gloggur_api_key_env_var_used_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GLOGGUR_GEMINI_API_KEY takes precedence over GEMINI_API_KEY and GOOGLE_API_KEY."""
+    captured_keys: list[str] = []
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1])])
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            captured_keys.append(api_key)
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GLOGGUR_GEMINI_API_KEY", "gloggur-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001")
+
+    assert provider.api_key == "gloggur-key"
+    assert captured_keys[-1] == "gloggur-key"
+
+
+def test_gemini_gloggur_api_key_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GLOGGUR_GEMINI_API_KEY works when it is the only key set."""
+    captured_keys: list[str] = []
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1])])
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            captured_keys.append(api_key)
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GLOGGUR_GEMINI_API_KEY", "only-key")
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001")
+
+    assert provider.api_key == "only-key"
+    assert captured_keys[-1] == "only-key"
+
+
+def test_gemini_embed_batch_retries_on_rate_limit_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """embed_batch retries when a rate-limit error occurs and returns result on success."""
+    call_count = 0
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("429 quota exceeded")
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[0.1, 0.2])] * len(list(contents))
+            )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001", _chunk_size=10)
+    result = provider.embed_batch(["hello", "world"])
+
+    assert len(result) == 2
+    assert call_count >= 2
+
+
+def test_gemini_embed_batch_rate_limit_multiple_retries_does_not_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """embed_batch retries through multiple rate-limit errors and must finish."""
+    fail_count = 0
+    max_fails = 3
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            nonlocal fail_count
+            if fail_count < max_fails:
+                fail_count += 1
+                raise RuntimeError("rate limit exceeded")
+            return SimpleNamespace(
+                embeddings=[SimpleNamespace(values=[1.0, 0.0])] * len(list(contents))
+            )
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001", _chunk_size=10)
+    result = provider.embed_batch(["a"])
+
+    assert len(result) == 1
+    assert fail_count == max_fails
+
+
 def test_local_embedding_fallback_vector_is_normalized(tmp_path: Path) -> None:
     """Fallback embeddings are normalized to unit length."""
     provider = LocalEmbeddingProvider("local", cache_dir=str(tmp_path))
