@@ -65,3 +65,6 @@ scripts/gloggur inspect . --json
 - Keep `TODOs.md` and `DONEs.md` for tasks the user mentions that need to be done later; move completed items to DONEs with verification evidence.
 
 For more detail, see `docs/AGENT_INTEGRATION.md`.
+
+
+When handing of work, always include a conventional commit message for the changes
