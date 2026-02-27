@@ -137,7 +137,8 @@ def test_concurrent_index_runs_keep_cache_consistent() -> None:
         for _name, returncode, stdout, stderr in results:
             payload = _parse_json_payload(stdout)
             if returncode == 0:
-                assert int(payload["indexed_files"]) > 0
+                assert int(payload["failed"]) == 0
+                assert int(payload["files_considered"]) > 0
                 successful_runs += 1
                 continue
             error = payload["error"]

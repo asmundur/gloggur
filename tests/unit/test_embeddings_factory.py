@@ -12,10 +12,16 @@ def test_create_embedding_provider_local(monkeypatch: pytest.MonkeyPatch) -> Non
 
     class DummyLocal:
         """Dummy local provider capturing constructor args."""
-        def __init__(self, model_name: str, cache_dir: str | None) -> None:
+        def __init__(
+            self,
+            model_name: str,
+            cache_dir: str | None,
+            fallback_cache_dir: str | None = None,
+        ) -> None:
             """Record constructor arguments."""
             created["model_name"] = model_name
             created["cache_dir"] = cache_dir
+            created["fallback_cache_dir"] = fallback_cache_dir
 
     monkeypatch.setattr(factory, "LocalEmbeddingProvider", DummyLocal)
 
@@ -26,7 +32,11 @@ def test_create_embedding_provider_local(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     provider = factory.create_embedding_provider(config)
     assert isinstance(provider, DummyLocal)
-    assert created == {"model_name": "local-model", "cache_dir": "model-cache"}
+    assert created == {
+        "model_name": "local-model",
+        "cache_dir": "model-cache",
+        "fallback_cache_dir": ".gloggur-cache",
+    }
 
 
 def test_create_embedding_provider_openai(monkeypatch: pytest.MonkeyPatch) -> None:
