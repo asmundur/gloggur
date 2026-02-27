@@ -1,3 +1,17 @@
+"""Preflight launcher that locates a healthy Python runtime before executing gloggur.
+
+When ``scripts/gloggur`` is invoked in a fresh environment, it runs this module
+to probe candidate interpreters (venv first, then system Python fallbacks) and
+exec into the first one that can successfully import the gloggur package.  If
+all probes fail, it emits a structured JSON or human-readable failure payload
+with an actionable error code and remediation steps, then exits non-zero.
+
+Exit codes (see ``EXIT_CODES``):
+  2  missing_venv       – repository virtualenv missing and no healthy fallback
+  3  missing_python     – no usable Python interpreter found on PATH
+  4  missing_package    – interpreter found but gloggur dependencies absent
+  5  broken_environment – other runtime/import failure
+"""
 from __future__ import annotations
 
 import json
@@ -25,6 +39,13 @@ EXIT_CODES = {
 
 @dataclass
 class CandidateProbe:
+    """Result of probing a single Python interpreter candidate.
+
+    ``exists`` indicates whether the interpreter binary was found on disk or
+    PATH.  ``healthy`` indicates the interpreter could successfully import the
+    required gloggur module.  ``reason`` and ``detail`` are populated on failure.
+    """
+
     candidate_type: str
     interpreter: str
     module: str
@@ -37,6 +58,14 @@ class CandidateProbe:
 
 @dataclass
 class LaunchPlan:
+    """Resolved execution plan produced by ``build_launch_plan``.
+
+    When ``ready`` is ``True``, ``args``, ``interpreter``, and ``module`` are
+    populated and the caller may safely exec into the interpreter.  When
+    ``ready`` is ``False``, ``error_code``, ``message``, and ``remediation``
+    describe the failure and no exec should be attempted.
+    """
+
     ready: bool
     args: List[str]
     interpreter: Optional[str]
@@ -51,16 +80,19 @@ class LaunchPlan:
 
 
 def _is_truthy(value: Optional[str]) -> bool:
+    """Return ``True`` for environment-variable strings that represent a truthy boolean."""
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_json_mode(args: Sequence[str]) -> bool:
+    """Return ``True`` when ``--json`` is present in the argument list."""
     return "--json" in args
 
 
 def _repo_root() -> str:
+    """Resolve the repository root from this module's on-disk location."""
     module_dir = Path(__file__).resolve().parent
     if module_dir.parent.name == "src":
         return str(module_dir.parent.parent)
@@ -68,6 +100,11 @@ def _repo_root() -> str:
 
 
 def _import_root(repo_root: str) -> str:
+    """Return the directory that should be prepended to ``PYTHONPATH`` for imports.
+
+    Returns ``<repo_root>/src`` when that directory exists (src-layout repos),
+    otherwise falls back to ``repo_root`` directly.
+    """
     src_root = os.path.join(repo_root, "src")
     if os.path.isdir(src_root):
         return src_root
@@ -75,6 +112,10 @@ def _import_root(repo_root: str) -> str:
 
 
 def _prepend_pythonpath(env: Dict[str, str], repo_root: str) -> Dict[str, str]:
+    """Return a copy of ``env`` with the import root prepended to ``PYTHONPATH``.
+
+    Deduplicates the import root so repeated calls are idempotent.
+    """
     result = dict(env)
     import_root = _import_root(repo_root)
     existing = result.get("PYTHONPATH", "")
@@ -85,12 +126,19 @@ def _prepend_pythonpath(env: Dict[str, str], repo_root: str) -> Dict[str, str]:
 
 
 def _collect_required_imports(env: Dict[str, str]) -> List[str]:
+    """Parse the ``GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS`` env var into a list of module names."""
     raw = env.get("GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS", "")
     values = [item.strip() for item in raw.split(",") if item.strip()]
     return values
 
 
 def _resolve_system_candidates(env: Dict[str, str]) -> List[str]:
+    """Return a deduplicated list of system Python interpreter paths to probe.
+
+    Reads ``GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS`` (colon-separated) when set;
+    defaults to ``["python3", "python"]``.  PATH resolution is applied to
+    bare names so the returned list contains absolute paths where available.
+    """
     raw = env.get("GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS")
     entries: List[str] = []
     if raw:
@@ -116,6 +164,7 @@ def _resolve_system_candidates(env: Dict[str, str]) -> List[str]:
 
 
 def _resolve_venv_python(repo_root: str, env: Dict[str, str]) -> str:
+    """Return the expected venv Python path, honouring ``GLOGGUR_PREFLIGHT_VENV_PYTHON`` overrides."""
     override = env.get("GLOGGUR_PREFLIGHT_VENV_PYTHON")
     if override:
         return override
@@ -123,6 +172,11 @@ def _resolve_venv_python(repo_root: str, env: Dict[str, str]) -> str:
 
 
 def _probe_script(module: str, required_imports: Sequence[str]) -> str:
+    """Build a Python one-liner that imports ``module`` and any ``required_imports``.
+
+    The resulting script is passed to the candidate interpreter via ``-c`` to
+    verify that the runtime can successfully import gloggur and its dependencies.
+    """
     commands = [
         "import importlib",
         f"importlib.import_module({module!r})",
@@ -133,6 +187,7 @@ def _probe_script(module: str, required_imports: Sequence[str]) -> str:
 
 
 def _probe_failure_reason(output: str) -> str:
+    """Classify probe stderr/stdout into a stable failure reason code."""
     if "ModuleNotFoundError" in output or "ImportError" in output:
         return "missing_package"
     return "broken_environment"
@@ -146,6 +201,12 @@ def _probe_candidate(
     env: Dict[str, str],
     required_imports: Sequence[str],
 ) -> CandidateProbe:
+    """Probe a single interpreter candidate and return a ``CandidateProbe`` result.
+
+    Runs ``interpreter -c <probe_script>`` with a 15-second timeout.  Returns a
+    healthy probe on exit code 0, or a failure probe with a classified reason
+    code on any error (not found, import failure, timeout, OS error).
+    """
     if not interpreter:
         return CandidateProbe(
             candidate_type=candidate_type,
@@ -250,6 +311,10 @@ def _probe_candidate(
 
 
 def _classify_failure(probes: Sequence[CandidateProbe], venv_exists: bool) -> str:
+    """Derive the top-level failure error code from a set of failed probes.
+
+    Priority order: missing_python > missing_package > missing_venv > broken_environment.
+    """
     any_existing = any(probe.exists for probe in probes)
     if not any_existing:
         return "missing_python"
@@ -266,6 +331,7 @@ def _classify_failure(probes: Sequence[CandidateProbe], venv_exists: bool) -> st
 
 
 def _failure_message(error_code: str, repo_root: str, venv_python: str) -> str:
+    """Return a human-readable one-sentence failure description for the given error code."""
     if error_code == "missing_python":
         return "No usable Python interpreter was found for gloggur preflight."
     if error_code == "missing_venv":
@@ -279,6 +345,7 @@ def _failure_message(error_code: str, repo_root: str, venv_python: str) -> str:
 
 
 def _remediation_steps(error_code: str, repo_root: str) -> List[str]:
+    """Return an ordered list of remediation steps for the given error code."""
     bootstrap = os.path.join(repo_root, "scripts", "bootstrap_gloggur_env.sh")
     common = [
         f"Run `{bootstrap}` to create/repair .venv and install dependencies.",
@@ -310,6 +377,13 @@ def build_launch_plan(
     env: Optional[Dict[str, str]] = None,
     repo_root: Optional[str] = None,
 ) -> LaunchPlan:
+    """Probe available Python interpreters and return a ready-or-failed ``LaunchPlan``.
+
+    Probes the venv interpreter first; falls back to system Python candidates
+    in order.  Returns a ``LaunchPlan`` with ``ready=True`` and a selected
+    interpreter as soon as a healthy candidate is found, or ``ready=False``
+    with a classified error code and remediation steps if all probes fail.
+    """
     runtime_env = dict(os.environ if env is None else env)
     root = repo_root or _repo_root()
     venv_python = _resolve_venv_python(root, runtime_env)
@@ -379,10 +453,16 @@ def build_launch_plan(
 
 
 def _serialize_probes(probes: Sequence[CandidateProbe]) -> List[Dict[str, object]]:
+    """Convert a sequence of ``CandidateProbe`` instances to plain dicts for JSON output."""
     return [asdict(probe) for probe in probes]
 
 
 def build_failure_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, object]:
+    """Build the structured JSON/human-readable failure payload for a failed ``LaunchPlan``.
+
+    Includes error code, message, remediation steps, detected environment details,
+    and the duration of the preflight check in milliseconds.
+    """
     assert not plan.ready
     venv_python = _resolve_venv_python(plan.repo_root, plan.env)
     system_candidates = _resolve_system_candidates(plan.env)
@@ -404,6 +484,11 @@ def build_failure_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, obje
 
 
 def build_ready_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, object]:
+    """Build the structured JSON/human-readable success payload for a ready ``LaunchPlan``.
+
+    Includes the selected candidate type, interpreter path, module, and
+    detected environment details for downstream diagnostics.
+    """
     assert plan.ready
     return {
         "operation": CHECK_OPERATION,
@@ -422,6 +507,7 @@ def build_ready_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, object
 
 
 def _emit(payload: Dict[str, object], as_json: bool) -> None:
+    """Print ``payload`` as JSON to stdout or as a human-readable summary to stderr."""
     if as_json:
         print(json.dumps(payload, indent=2))
         return
@@ -444,6 +530,10 @@ def _emit(payload: Dict[str, object], as_json: bool) -> None:
 
 
 def _execute(plan: LaunchPlan) -> None:
+    """Exec into the selected interpreter via ``os.execvpe``, replacing the current process.
+
+    This function does not return on success.
+    """
     assert plan.ready
     assert plan.interpreter is not None
     assert plan.module is not None
@@ -452,6 +542,13 @@ def _execute(plan: LaunchPlan) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Entry point for the gloggur preflight bootstrap launcher.
+
+    Builds a launch plan, emits a ready or failure payload, and either execs
+    into the selected interpreter or returns a non-zero exit code.  Dry-run
+    mode (``GLOGGUR_PREFLIGHT_DRY_RUN=1``) emits the ready payload without
+    execing, which is useful for testing and diagnostics.
+    """
     args = list(sys.argv[1:] if argv is None else argv)
     as_json = _is_json_mode(args)
     started = time.perf_counter()

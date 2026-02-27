@@ -863,7 +863,7 @@ Observed problem output (snapshot):
 
 ## F11 - Burn Down Source Missing-Docstring Hotspots
 
-**Status**: planned
+**Status**: in_progress
 **Priority**: P1
 **Owner**: codex
 
@@ -897,9 +897,32 @@ Observed problem output (snapshot):
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
 
+**Progress Update (2026-02-27)**
+- Side fix applied first: `gloggur` CLI was broken due to the editable install `.pth` file
+  (`__editable__.gloggur-0.1.0.pth`) pointing to a stale Codex worktree path
+  (`/Users/auzi/.codex/worktrees/ae2d/gloggur/src`) that no longer existed.
+  Fixed by running `.venv/bin/pip install -e '.[all,dev]'`, which updated the `.pth` to the
+  current `src/` path. `gloggur status --json` now succeeds directly from the `gloggur` wrapper.
+- Added all missing docstrings to the three hotspot files:
+  - `src/gloggur/embeddings/errors.py`: module docstring, `_provider_remediation`,
+    `EmbeddingProviderError.__str__`, `EmbeddingProviderError.to_payload`.
+  - `src/gloggur/io_failures.py`: module docstring, `StorageIOError.__post_init__`,
+    `StorageIOError.__str__`, `_classify_os_error`, `_classify_sqlite_operational_error`,
+    `_classify_sqlite_database_error`, `_classify_sqlite_error_detail`.
+  - `src/gloggur/bootstrap_launcher.py`: module docstring (including exit-code table) + all
+    23 remaining items: `CandidateProbe`, `LaunchPlan`, and every function/method in the module.
+- Verified acceptance criterion: `gloggur inspect src/gloggur --json --force --allow-partial`
+  reports `Missing docstring count in targets: 0` for all three files.
+- Verified no regressions: 30 unit tests across `test_bootstrap_launcher.py`,
+  `test_io_failures.py`, and `test_embeddings.py` all pass.
+- Remaining gap:
+  - Run a wider `gloggur inspect src/gloggur --json --force --allow-partial` pass to measure
+    overall remaining `Missing docstring` count across all of `src/` (other files not yet
+    covered by this task).
+
 ## F12 - Calibrate Semantic Warning Scoring for Source Code
 
-**Status**: planned
+**Status**: in_progress
 **Priority**: P1
 **Owner**: codex
 
@@ -931,3 +954,41 @@ Observed problem output (snapshot):
 
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
+
+**Progress Update (2026-02-27)**
+- Empirically calibrated the scoring policy against a live `gloggur inspect src/gloggur --json
+  --force --allow-partial` run. Key finding: with `microsoft/codebert-base`, the median
+  doc-code cosine similarity is `~0.135` and p25 is `~0.057`. The old default threshold of
+  `0.200` was above the median — flagging 66% of all scored symbols (204/308), which is noise,
+  not a useful quality signal.
+- Implemented the following calibrated policy in `src/gloggur/audit/docstring_audit.py` and
+  `src/gloggur/config.py`:
+  - **Global threshold lowered** from `0.200` to `0.100` (flags symbols below the 38th
+    percentile — the "clearly low" zone for codebert-base).
+  - **Kind-aware threshold overrides** added via new `kind_thresholds` parameter: `class=0.05`,
+    `interface=0.05` (abstract descriptions are deliberately high-level; half the global
+    threshold is appropriate).
+  - **`semantic_min_code_chars=30`**: new parameter that skips semantic scoring when the code
+    body (after stripping the docstring) is shorter than 30 chars; trivially short
+    implementations produce unreliable similarity signals.
+  - **`score_metadata` in `DocstringAuditReport`**: each scored symbol now emits
+    `symbol_kind`, `threshold_applied`, `scored` (bool), `score_value`, and optionally
+    `skip_reason` — satisfying the explainability acceptance criterion.
+- Measured results on current source (post-F11, current baseline = 204 uncalibrated warnings):
+  - `gloggur inspect src/gloggur --json --force --allow-partial` reports **120 total warnings**
+    (`116` Low semantic similarity + `4` Missing docstring).
+  - **41% reduction** from the uncalibrated baseline (204 → 120, target was <=122 / >=40%).
+  - 192 symbols scored cleanly with no warning; 3 skipped for short code body.
+- Added 16 new unit tests in `tests/unit/test_docstring_audit.py` covering:
+  - `score_metadata` presence and shape for scored / skipped / missing-docstring cases.
+  - Kind-threshold suppression and warning-message threshold reflection.
+  - `semantic_min_code_chars` filtering and skip-reason propagation.
+  - `_assess_symbol` and `_compute_semantic_scores` unit contracts.
+  - `GloggurConfig` default values and override path for new fields.
+- 209 unit tests pass (all existing tests remain green).
+- Remaining closure gaps:
+  - Add integration regression test asserting the warning-count floor on a stable fixture corpus
+    (so a future re-index with a different embedding profile does not silently regress the
+    calibrated behavior).
+  - Document threshold selection rationale in `README.md` or agent docs so future contributors
+    understand why `0.10` was chosen over `0.20`.

@@ -1,9 +1,21 @@
+"""Structured error types and helpers for embedding provider failures.
+
+Provides ``EmbeddingProviderError``, a stable dataclass exception used by all
+provider adapters, plus helpers for converting arbitrary exceptions into that
+form and formatting human-readable output for stderr.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 
 def _provider_remediation(provider: str) -> list[str]:
+    """Return actionable remediation steps for a given embedding provider.
+
+    Returns a provider-specific list of steps the user or agent should take to
+    resolve credential or configuration issues.  Falls back to generic guidance
+    for unrecognised provider names.
+    """
     if provider == "openai":
         return [
             "Set OPENAI_API_KEY in the environment.",
@@ -35,12 +47,14 @@ class EmbeddingProviderError(RuntimeError):
     remediation: list[str]
 
     def __str__(self) -> str:
+        """Return a single-line summary suitable for log output and exception chains."""
         return (
             f"Embedding provider failure [{self.provider}] during "
             f"'{self.operation}': {self.detail}"
         )
 
     def to_payload(self) -> dict[str, object]:
+        """Return a machine-readable error payload for JSON CLI outputs."""
         return {
             "error": {
                 "type": "embedding_provider_error",

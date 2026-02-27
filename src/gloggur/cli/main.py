@@ -1366,6 +1366,8 @@ def inspect(
         semantic_threshold=config.docstring_semantic_threshold,
         semantic_min_chars=config.docstring_semantic_min_chars,
         semantic_max_chars=config.docstring_semantic_max_chars,
+        semantic_min_code_chars=config.docstring_semantic_min_code_chars,
+        kind_thresholds=config.docstring_semantic_kind_thresholds,
     )
     for report in reports:
         cache.set_audit_warnings(report.symbol_id, report.warnings)

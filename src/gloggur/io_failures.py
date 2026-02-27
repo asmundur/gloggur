@@ -1,3 +1,11 @@
+"""Structured I/O failure classification and error types for cache operations.
+
+Provides ``StorageIOError``, a stable dataclass exception that wraps raw
+``OSError`` and ``sqlite3`` exceptions with a machine-readable category, a
+probable-cause description, and actionable remediation steps.  All cache write
+paths should raise ``StorageIOError`` so that CLI outputs can emit consistent
+JSON payloads regardless of the underlying OS or database error.
+"""
 from __future__ import annotations
 
 import errno
@@ -77,10 +85,12 @@ class StorageIOError(RuntimeError):
     detail: str
 
     def __post_init__(self) -> None:
+        """Validate that ``category`` is one of the known stable categories."""
         if self.category not in IO_ERROR_CATEGORIES:
             raise ValueError(f"unsupported io error category: {self.category}")
 
     def __str__(self) -> str:
+        """Return a single-line summary suitable for log output and exception chains."""
         return (
             f"IO failure [{self.category}] during '{self.operation}' at {self.path}: "
             f"{self.detail}"
@@ -130,6 +140,7 @@ def classify_io_error(exc: Exception) -> str:
 
 
 def _classify_os_error(exc: OSError) -> str:
+    """Map an ``OSError`` to a stable IO error category string."""
     if isinstance(exc, PermissionError) or exc.errno in _PERMISSION_ERRNOS:
         return "permission_denied"
     if exc.errno in _READ_ONLY_ERRNOS:
@@ -142,16 +153,19 @@ def _classify_os_error(exc: OSError) -> str:
 
 
 def _classify_sqlite_operational_error(exc: sqlite3.OperationalError) -> str:
+    """Map a ``sqlite3.OperationalError`` to a stable IO error category."""
     detail = str(exc).lower()
     return _classify_sqlite_error_detail(detail)
 
 
 def _classify_sqlite_database_error(exc: sqlite3.DatabaseError) -> str:
+    """Map a generic ``sqlite3.DatabaseError`` to a stable IO error category."""
     detail = str(exc).lower()
     return _classify_sqlite_error_detail(detail)
 
 
 def _classify_sqlite_error_detail(detail: str) -> str:
+    """Classify a lowercased sqlite error message into a stable IO error category."""
     if any(token in detail for token in ("readonly", "read-only")):
         return "read_only_filesystem"
     if "permission denied" in detail:

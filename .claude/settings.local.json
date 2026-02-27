@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(scripts/gloggur status --json)",
+      "Bash(gloggur --version)",
+      "Bash(.venv/bin/python -c \"import gloggur; print\\(gloggur.__file__\\)\")",
+      "Bash(.venv/bin/python -c \"import sys; print\\(sys.path\\)\")",
+      "Bash(gloggur status --json)",
+      "Bash(gloggur inspect src/gloggur/bootstrap_launcher.py src/gloggur/io_failures.py src/gloggur/embeddings/errors.py --json --force --allow-partial)",
+      "Bash(gloggur inspect src/gloggur --json --force --allow-partial)",
+      "Bash(python3 -c \":*)",
+      "Bash(.venv/bin/python -m pytest tests/unit/test_bootstrap_launcher.py tests/unit/test_io_failures.py tests/unit/test_embeddings.py -q)",
+      "Bash(.venv/bin/python -m gloggur inspect src/ --force --json)",
+      "Bash(.venv/bin/python -m gloggur status --json)",
+      "Bash(.venv/bin/python -m pytest tests/unit/test_docstring_audit.py -v)",
+      "Bash(.venv/bin/python -m pytest tests/unit/ -q)",
+      "Bash(scripts/gloggur inspect src/gloggur --json --force --allow-partial)"
+    ]
+  }
+}

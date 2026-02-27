@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -26,9 +26,24 @@ class GloggurConfig:
     watch_state_file: str = ".gloggur-cache/watch_state.json"
     watch_pid_file: str = ".gloggur-cache/watch.pid"
     watch_log_file: str = ".gloggur-cache/watch.log"
-    docstring_semantic_threshold: float = 0.2
+    # Calibrated for microsoft/codebert-base: median doc-code cosine similarity
+    # is ~0.135, so threshold=0.2 flags >50% of symbols (noise, not signal).
+    # Threshold=0.10 flags only symbols below the 38th percentile — a defensible
+    # "clearly low" signal for this model family.
+    docstring_semantic_threshold: float = 0.10
     docstring_semantic_min_chars: int = 0
     docstring_semantic_max_chars: int = 4000
+    # Minimum code-body character count (after stripping the docstring) required
+    # before semantic scoring is attempted.  Short bodies (<30 chars) produce
+    # unreliable cosine similarity signals and are skipped by default.
+    docstring_semantic_min_code_chars: int = 30
+    # Per-symbol-kind threshold overrides.  ``None`` means the global
+    # ``docstring_semantic_threshold`` is used for every kind.
+    # Classes and interfaces carry deliberately high-level docstrings; their
+    # calibrated threshold is half the global value.
+    docstring_semantic_kind_thresholds: Optional[Dict[str, float]] = field(
+        default_factory=lambda: {"class": 0.05, "interface": 0.05}
+    )
     supported_extensions: List[str] = field(
         default_factory=lambda: [".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java"]
     )
