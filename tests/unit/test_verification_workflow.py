@@ -268,10 +268,12 @@ def test_verification_workflow_includes_performance_regression_benchmark() -> No
     assert benchmark_step.get("if") == "${{ matrix.python-version == '3.13' }}"
     run_script = benchmark_step.get("run")
     assert isinstance(run_script, str)
+    assert "set -o pipefail" in run_script
     assert (
         "python scripts/run_edge_bench.py --benchmark-only "
         "--baseline-file benchmarks/performance_baseline.json --format json"
     ) in run_script
+    assert "tee performance-benchmark-${{ matrix.python-version }}.json" in run_script
 
     upload_step = next(
         (
