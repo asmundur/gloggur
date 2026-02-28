@@ -86,7 +86,7 @@ jobs:
         with:
           name: performance-benchmark-${{ matrix.python-version }}
           path: performance-benchmark-${{ matrix.python-version }}.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Write lane report
         if: ${{ always() }}

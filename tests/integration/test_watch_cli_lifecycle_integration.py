@@ -109,7 +109,9 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
             encoding="utf8",
         )
 
-        saw_indexed_event = False
+        saw_updated_search_result = False
+        last_status_again_payload: dict[str, object] | None = None
+        last_search_payload: dict[str, object] | None = None
         for _ in range(100):
             status_again = _run_cli(
                 ["watch", "status", "--config", str(config_path), "--json"],
@@ -118,18 +120,29 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
             )
             assert status_again.returncode == 0, f"{status_again.stderr}\n{status_again.stdout}"
             status_again_payload = _parse_json_payload(status_again.stdout)
+            last_status_again_payload = status_again_payload
             assert status_again_payload.get("running") is True
             assert int(status_again_payload.get("pid", 0)) == started_pid
-            indexed_files = int(status_again_payload.get("indexed_files", 0))
-            if indexed_files > 0:
-                saw_indexed_event = True
+            search = _run_cli(["search", updated_phrase, "--json", "--top-k", "5"], env, timeout=30)
+            assert search.returncode == 0, f"{search.stderr}\n{search.stdout}"
+            search_payload = _parse_json_payload(search.stdout)
+            last_search_payload = search_payload
+            results = search_payload.get("results", [])
+            assert isinstance(results, list)
+            if any(item.get("file") == str(target) for item in results):
+                saw_updated_search_result = True
                 break
             time.sleep(0.1)
-        assert saw_indexed_event, "watch daemon did not process file-save events in time"
+        log_content = log_file.read_text(encoding="utf8") if log_file.exists() else "<missing log file>"
+        assert saw_updated_search_result, (
+            "watch daemon did not surface the updated file in search results in time\n"
+            f"last_status={json.dumps(last_status_again_payload, indent=2, sort_keys=True) if last_status_again_payload is not None else '<missing>'}\n"
+            f"last_search={json.dumps(last_search_payload, indent=2, sort_keys=True) if last_search_payload is not None else '<missing>'}\n"
+            f"log_file={log_content}"
+        )
 
-        search = _run_cli(["search", updated_phrase, "--json", "--top-k", "5"], env, timeout=30)
-        assert search.returncode == 0, f"{search.stderr}\n{search.stdout}"
-        search_payload = _parse_json_payload(search.stdout)
+        assert last_search_payload is not None
+        search_payload = last_search_payload
         metadata = search_payload.get("metadata", {})
         assert isinstance(metadata, dict)
         assert metadata.get("needs_reindex") is not True

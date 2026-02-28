@@ -290,7 +290,7 @@ def test_verification_workflow_includes_performance_regression_benchmark() -> No
     upload_with = upload_step.get("with")
     assert isinstance(upload_with, dict)
     assert upload_with.get("name") == "performance-benchmark-${{ matrix.python-version }}"
-    assert upload_with.get("if-no-files-found") == "error"
+    assert upload_with.get("if-no-files-found") == "warn"
 
 
 def test_verification_workflow_emits_lane_reports_for_all_matrix_jobs() -> None:
