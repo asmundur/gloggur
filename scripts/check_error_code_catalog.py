@@ -16,12 +16,12 @@ from gloggur.watch.service import WATCH_FAILURE_REMEDIATION
 
 REQUIRED_HEADINGS = [
     "# Error Code Catalog",
-    "## CLI Preflight and Argument Validation",
+    "## CLI Contract Errors",
     "## Embedding Provider Failures",
-    "## Index and Watch Incremental Failures",
-    "## Inspect File Failures",
-    "## Watch Status Health Failures",
-    "## Resume and Continuity Signals",
+    "## Index Failure Codes",
+    "## Inspect Failure Codes",
+    "## Watch Status Failure Codes",
+    "## Resume Reason Codes",
 ]
 
 

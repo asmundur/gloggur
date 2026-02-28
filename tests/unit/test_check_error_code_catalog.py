@@ -17,17 +17,17 @@ def test_error_code_catalog_passes_when_required_headings_and_codes_exist(tmp_pa
         "\n".join(
             [
                 "# Error Code Catalog",
-                "## CLI Preflight and Argument Validation",
+                "## CLI Contract Errors",
                 "`cli_usage_error`",
                 "## Embedding Provider Failures",
                 "`embedding_provider_error`",
-                "## Index and Watch Incremental Failures",
+                "## Index Failure Codes",
                 "`vector_metadata_mismatch`",
-                "## Inspect File Failures",
+                "## Inspect Failure Codes",
                 "`parse_error`",
-                "## Watch Status Health Failures",
+                "## Watch Status Failure Codes",
                 "`watch_state_inconsistent`",
-                "## Resume and Continuity Signals",
+                "## Resume Reason Codes",
                 "`tool_version_changed`",
             ]
         ),
@@ -64,5 +64,5 @@ def test_error_code_catalog_fails_when_heading_and_code_are_missing(tmp_path: Pa
 
     assert payload["ok"] is False
     assert payload["failure"]["code"] == "error_code_catalog_violation"
-    assert "## CLI Preflight and Argument Validation" in payload["missing_headings"]
+    assert "## CLI Contract Errors" in payload["missing_headings"]
     assert payload["missing_codes_by_surface"]["cli_preflight"] == ["cli_usage_error"]

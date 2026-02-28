@@ -202,7 +202,10 @@ def test_verification_workflow_includes_static_quality_gate() -> None:
 
 
 def test_verification_workflow_includes_error_catalog_contract_check() -> None:
-    """Verification workflow should run the published error-catalog contract on the required lane."""
+    """Verification workflow should run the published error-catalog contract.
+
+    The check must remain on the required lane.
+    """
     tests_job = _verification_tests_job()
     steps = tests_job.get("steps")
     assert isinstance(steps, list)
