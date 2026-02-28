@@ -35,4 +35,53 @@ if ! command -v bd >/dev/null 2>&1; then
   exit 0
 fi
 
+STATUS_BEFORE="$(mktemp)"
+STATUS_AFTER="$(mktemp)"
+NEWLY_DIRTY="$(mktemp)"
+BEADS_DIRTY="$(mktemp)"
+
+cleanup_tmp() {
+  rm -f "${STATUS_BEFORE}" "${STATUS_AFTER}" "${NEWLY_DIRTY}" "${BEADS_DIRTY}"
+}
+
+trap cleanup_tmp EXIT HUP INT TERM
+
+git status --porcelain --untracked-files=all | sed 's/^.. //' | sort -u > "${STATUS_BEFORE}"
+
+echo "Syncing Beads tracker exports..."
+bd sync >/dev/null
+
+git status --porcelain --untracked-files=all | sed 's/^.. //' | sort -u > "${STATUS_AFTER}"
+comm -13 "${STATUS_BEFORE}" "${STATUS_AFTER}" > "${NEWLY_DIRTY}" || true
+git status --porcelain --untracked-files=all -- .beads | sed 's/^.. //' | sort -u > "${BEADS_DIRTY}"
+
+while IFS= read -r path; do
+  [ -n "${path}" ] || continue
+  case "${path}" in
+    .beads/issues.jsonl|.beads/interactions.jsonl|.beads/metadata.json)
+      git add "${path}"
+      echo "Auto-staged ${path}"
+      ;;
+  esac
+done < "${BEADS_DIRTY}"
+
+UNEXPECTED_NEW_DIRTY=""
+while IFS= read -r path; do
+  [ -n "${path}" ] || continue
+  case "${path}" in
+    .beads/issues.jsonl|.beads/interactions.jsonl|.beads/metadata.json)
+      ;;
+    *)
+      UNEXPECTED_NEW_DIRTY="${UNEXPECTED_NEW_DIRTY}
+  • ${path}"
+      ;;
+  esac
+done < "${NEWLY_DIRTY}"
+
+if [ -n "${UNEXPECTED_NEW_DIRTY}" ]; then
+  echo "Error: bd sync dirtied unexpected files:${UNEXPECTED_NEW_DIRTY}" >&2
+  echo "Commit the intended changes manually before retrying." >&2
+  exit 1
+fi
+
 exec bd hook pre-commit "$@"
