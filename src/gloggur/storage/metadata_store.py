@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator, List, Optional
 
 from gloggur.io_failures import wrap_io_error
 from gloggur.models import Symbol
@@ -16,6 +16,7 @@ SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 @dataclass
 class MetadataStoreConfig:
     """Configuration for the metadata store (SQLite db path)."""
+
     cache_dir: str
 
     @property
@@ -26,11 +27,12 @@ class MetadataStoreConfig:
 
 class MetadataStore:
     """Read-only access to indexed symbol metadata in SQLite."""
+
     def __init__(self, config: MetadataStoreConfig) -> None:
         """Initialize the metadata store."""
         self.config = config
 
-    def get_symbol(self, symbol_id: str) -> Optional[Symbol]:
+    def get_symbol(self, symbol_id: str) -> Symbol | None:
         """Fetch a symbol by its id from the symbols table."""
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM symbols WHERE id = ?", (symbol_id,)).fetchone()
@@ -40,13 +42,13 @@ class MetadataStore:
 
     def filter_symbols(
         self,
-        kinds: Optional[List[str]] = None,
-        file_path: Optional[str] = None,
-        language: Optional[str] = None,
-    ) -> List[Symbol]:
+        kinds: list[str] | None = None,
+        file_path: str | None = None,
+        language: str | None = None,
+    ) -> list[Symbol]:
         """Filter symbols by kind, file path, and/or language."""
         query = "SELECT * FROM symbols WHERE 1=1"
-        params: List[str] = []
+        params: list[str] = []
         if kinds:
             placeholders = ",".join("?" for _ in kinds)
             query += f" AND kind IN ({placeholders})"
@@ -62,7 +64,7 @@ class MetadataStore:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_symbol(row) for row in rows]
 
-    def list_symbols(self) -> List[Symbol]:
+    def list_symbols(self) -> list[Symbol]:
         """List all symbols ordered by file and start line."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM symbols ORDER BY file_path, start_line").fetchall()

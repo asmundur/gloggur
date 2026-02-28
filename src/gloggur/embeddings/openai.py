@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -13,13 +13,16 @@ def _normalize_vector(vector: object, *, model: str, context: str) -> list[float
     """Validate and normalize one embedding vector from the OpenAI client."""
     if not isinstance(vector, Sequence) or isinstance(vector, (str, bytes)):
         raise RuntimeError(
-            f"OpenAI embeddings returned invalid vector payload for model '{model}' during {context}"
+            f"OpenAI embeddings returned invalid vector "
+            f"payload for model '{model}' during {context}"
         )
     normalized: list[float] = []
     for value in vector:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise RuntimeError(
-                f"OpenAI embeddings returned non-numeric vector value for model '{model}' during {context}"
+                f"OpenAI embeddings returned non-numeric "
+                f"vector value for model '{model}' "
+                f"during {context}"
             )
         normalized.append(float(value))
     if not normalized:
@@ -31,6 +34,7 @@ def _normalize_vector(vector: object, *, model: str, context: str) -> list[float
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
     """Embedding provider that calls the OpenAI embeddings API."""
+
     def __init__(self, model: str) -> None:
         """Initialize the OpenAI client and model selection."""
         self.provider = "openai"
@@ -53,7 +57,9 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         data = getattr(response, "data", None)
         if not isinstance(data, list) or len(data) != 1:
             raise RuntimeError(
-                f"OpenAI embeddings returned invalid item count for model '{self.model}' during single-text embedding"
+                f"OpenAI embeddings returned invalid item "
+                f"count for model '{self.model}' during "
+                f"single-text embedding"
             )
         vector = _normalize_vector(
             getattr(data[0], "embedding", None),
@@ -78,7 +84,9 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         data = getattr(response, "data", None)
         if not isinstance(data, list):
             raise RuntimeError(
-                f"OpenAI embeddings returned invalid response payload for model '{self.model}' during batch embedding"
+                f"OpenAI embeddings returned invalid response "
+                f"payload for model '{self.model}' "
+                f"during batch embedding"
             )
         vectors = [
             _normalize_vector(
@@ -90,12 +98,16 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         ]
         if len(vectors) != len(payload):
             raise RuntimeError(
-                f"OpenAI embeddings returned {len(vectors)} vectors for {len(payload)} inputs with model '{self.model}'"
+                f"OpenAI embeddings returned "
+                f"{len(vectors)} vectors for "
+                f"{len(payload)} inputs with "
+                f"model '{self.model}'"
             )
         expected_dimension = len(vectors[0]) if vectors else 0
         if any(len(vector) != expected_dimension for vector in vectors):
             raise RuntimeError(
-                f"OpenAI embeddings returned inconsistent vector dimensions for model '{self.model}'"
+                f"OpenAI embeddings returned inconsistent "
+                f"vector dimensions for model '{self.model}'"
             )
         if vectors:
             self._dimension = len(vectors[0])

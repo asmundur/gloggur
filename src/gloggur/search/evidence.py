@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
-
-
 DEFAULT_EVIDENCE_VALIDATOR = "min_confident_evidence_v1"
 
 
-def build_evidence_trace(results: object) -> List[Dict[str, object]]:
+def build_evidence_trace(results: object) -> list[dict[str, object]]:
     """Build normalized evidence trace payload from search results."""
     if not isinstance(results, list):
         raise ValueError("search payload 'results' must be a list")
-    trace: List[Dict[str, object]] = []
+    trace: list[dict[str, object]] = []
     for rank, item in enumerate(results, start=1):
         if not isinstance(item, dict):
             raise ValueError(f"search result at index {rank - 1} is not an object")
@@ -41,7 +38,9 @@ def build_evidence_trace(results: object) -> List[Dict[str, object]]:
         try:
             score = float(score_raw)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"search result at index {rank - 1} has non-numeric similarity_score") from exc
+            raise ValueError(
+                f"search result at index {rank - 1} has non-numeric similarity_score"
+            ) from exc
         if score < 0.0:
             score = 0.0
         if score > 1.0:
@@ -64,7 +63,7 @@ def validate_evidence_trace(
     *,
     min_confidence: float,
     min_items: int,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Validate grounding quality over normalized evidence trace."""
     if min_confidence < 0.0 or min_confidence > 1.0:
         raise ValueError("min_confidence must be between 0.0 and 1.0")
@@ -73,7 +72,7 @@ def validate_evidence_trace(
     if not isinstance(evidence_trace, list):
         raise ValueError("evidence_trace must be a list")
 
-    matched_symbol_ids: List[str] = []
+    matched_symbol_ids: list[str] = []
     for idx, item in enumerate(evidence_trace):
         if not isinstance(item, dict):
             raise ValueError(f"evidence trace item at index {idx} is not an object")
@@ -94,7 +93,7 @@ def validate_evidence_trace(
     passed = matched_items >= min_items
     reason_code = "grounding_sufficient"
     reason = "Evidence meets grounding threshold."
-    suggested_repair_action: Optional[str] = None
+    suggested_repair_action: str | None = None
     if not passed:
         if len(evidence_trace) == 0:
             reason_code = "grounding_evidence_missing"

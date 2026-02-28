@@ -4,10 +4,10 @@ import errno
 import json
 import os
 import signal
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Event
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
@@ -21,9 +21,11 @@ from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 DEFAULT_WATCH_FAILURE_REMEDIATION = (
     "Inspect failed_samples and rerun watch/index after resolving the underlying error."
 )
-WATCH_FAILURE_REMEDIATION: Dict[str, List[str]] = {
+WATCH_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "watch_incremental_inconsistent": [
-        "Watch incremental failure reported without reason codes; restart watch and verify version compatibility.",
+        "Watch incremental failure reported without reason "
+        "codes; restart watch and verify version "
+        "compatibility.",
         "Run `gloggur index . --json` to restore deterministic cache/vector state.",
     ],
 }
@@ -35,7 +37,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def is_process_running(pid: Optional[int]) -> bool:
+def is_process_running(pid: int | None) -> bool:
     """Return True when a PID appears alive in the OS process table.
 
     `os.kill(pid, 0)` can raise `PermissionError` (`EPERM`) for live processes
@@ -60,13 +62,13 @@ def is_process_running(pid: Optional[int]) -> bool:
     return True
 
 
-def load_watch_state(path: str) -> Dict[str, object]:
+def load_watch_state(path: str) -> dict[str, object]:
     """Load watcher state JSON from disk."""
 
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf8") as handle:
+        with open(path, encoding="utf8") as handle:
             payload = json.load(handle)
         if isinstance(payload, dict):
             return payload
@@ -85,10 +87,10 @@ class BatchResult:
     skipped_files: int = 0
     error_count: int = 0
     indexed_symbols: int = 0
-    last_error: Optional[str] = None
+    last_error: str | None = None
     files_considered: int = 0
-    failed_reasons: Dict[str, int] = field(default_factory=dict)
-    failed_samples: List[str] = field(default_factory=list)
+    failed_reasons: dict[str, int] = field(default_factory=dict)
+    failed_samples: list[str] = field(default_factory=list)
 
     def record_failed(self, reason: str, sample: str) -> None:
         """Track a failed file outcome with a stable reason and sample."""
@@ -99,9 +101,9 @@ class BatchResult:
             self.failed_samples.append(sample)
         self.last_error = sample
 
-    def as_dict(self) -> Dict[str, object]:
+    def as_dict(self) -> dict[str, object]:
         """Convert to a JSON-friendly mapping."""
-        payload: Dict[str, object] = {
+        payload: dict[str, object] = {
             "changed_files": self.changed_files,
             "deleted_files": self.deleted_files,
             "files_considered": self.files_considered,
@@ -134,10 +136,10 @@ class WatchService:
     def __init__(
         self,
         config: GloggurConfig,
-        embedding_provider: Optional[EmbeddingProvider] = None,
-        cache: Optional[CacheManager] = None,
-        vector_store: Optional[VectorStore] = None,
-        parser_registry: Optional[ParserRegistry] = None,
+        embedding_provider: EmbeddingProvider | None = None,
+        cache: CacheManager | None = None,
+        vector_store: VectorStore | None = None,
+        parser_registry: ParserRegistry | None = None,
     ) -> None:
         """Initialize cache, vector store, and indexer dependencies."""
 
@@ -159,11 +161,11 @@ class WatchService:
         self._total_indexed_symbols = 0
         self._total_skipped_files = 0
         self._total_errors = 0
-        self._total_failed_reasons: Dict[str, int] = {}
-        self._total_failed_samples: List[str] = []
+        self._total_failed_reasons: dict[str, int] = {}
+        self._total_failed_samples: list[str] = []
 
     @staticmethod
-    def _failure_contract(failed_reasons: Dict[str, int]) -> Dict[str, object]:
+    def _failure_contract(failed_reasons: dict[str, int]) -> dict[str, object]:
         """Build stable failure-code/remediation payload fields."""
         if not failed_reasons:
             return {}
@@ -179,9 +181,9 @@ class WatchService:
         }
 
     @staticmethod
-    def _merge_failure_payload(result: BatchResult, payload: Dict[str, object]) -> None:
+    def _merge_failure_payload(result: BatchResult, payload: dict[str, object]) -> None:
         """Merge indexed cleanup/consistency failures into a batch result."""
-        normalized_reasons: Dict[str, int] = {}
+        normalized_reasons: dict[str, int] = {}
         failed_reasons = payload.get("failed_reasons", {})
         if isinstance(failed_reasons, dict):
             for raw_reason, raw_count in failed_reasons.items():
@@ -212,7 +214,7 @@ class WatchService:
                 result.failed_samples.append(sample_text)
                 result.last_error = sample_text
 
-    def run_forever(self, path: str) -> Dict[str, object]:
+    def run_forever(self, path: str) -> dict[str, object]:
         """Watch filesystem changes and process until stopped."""
 
         watch_root = os.path.abspath(path)
@@ -306,13 +308,13 @@ class WatchService:
 
     def process_batch(
         self,
-        changes: Iterable[Tuple[object, str]],
+        changes: Iterable[tuple[object, str]],
         watch_root: str,
-        watch_file: Optional[str] = None,
+        watch_file: str | None = None,
     ) -> BatchResult:
         """Process one batch of file-system events."""
 
-        operations: Dict[str, str] = {}
+        operations: dict[str, str] = {}
         for change, raw_path in changes:
             path = os.path.abspath(raw_path)
             if not self._in_scope(path, watch_root=watch_root, watch_file=watch_file):
@@ -439,7 +441,7 @@ class WatchService:
         result.indexed_files += 1
         result.indexed_symbols += outcome.symbols_indexed
 
-    def _in_scope(self, path: str, watch_root: str, watch_file: Optional[str]) -> bool:
+    def _in_scope(self, path: str, watch_root: str, watch_file: str | None) -> bool:
         """Return True if a changed path belongs to the active watch scope."""
 
         if watch_file:

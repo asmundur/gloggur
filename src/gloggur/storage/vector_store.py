@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
@@ -47,11 +47,11 @@ class VectorStore:
 
         self.config = config
         self._index = None
-        self._symbol_to_vector_id: Dict[str, int] = {}
-        self._vector_id_to_symbol: Dict[int, str] = {}
+        self._symbol_to_vector_id: dict[str, int] = {}
+        self._vector_id_to_symbol: dict[int, str] = {}
         self._next_vector_id = 1
-        self._fallback_vectors: Dict[str, List[float]] = {}
-        self._fallback_order: List[str] = []
+        self._fallback_vectors: dict[str, list[float]] = {}
+        self._fallback_order: list[str] = []
         self._fallback_path = os.path.join(self.config.cache_dir, "vectors.npy")
         self._faiss_available = self._check_faiss()
         try:
@@ -73,8 +73,8 @@ class VectorStore:
     def upsert_vectors(self, symbols: Iterable[Symbol]) -> None:
         """Insert or replace symbol vectors in the underlying index."""
 
-        updates: List[tuple[str, List[float]]] = []
-        remove_candidates: List[str] = []
+        updates: list[tuple[str, list[float]]] = []
+        remove_candidates: list[str] = []
         for symbol in symbols:
             if symbol.embedding_vector is None:
                 continue
@@ -117,11 +117,11 @@ class VectorStore:
                 self._vector_id_to_symbol.pop(vector_id, None)
         self._persist_id_map()
 
-    def list_symbol_ids(self) -> List[str]:
+    def list_symbol_ids(self) -> list[str]:
         """Return known vector symbol ids in deterministic order."""
         return sorted(self._symbol_to_vector_id.keys())
 
-    def search(self, query_vector: List[float], k: int) -> List[tuple[str, float]]:
+    def search(self, query_vector: list[float], k: int) -> list[tuple[str, float]]:
         """Return k nearest symbol ids for a query vector."""
 
         if k <= 0:
@@ -130,7 +130,7 @@ class VectorStore:
             vector = np.asarray([query_vector], dtype="float32")
             distances, indices = self._index.search(vector, k)
             results = []
-            for vector_id, distance in zip(indices[0], distances[0]):
+            for vector_id, distance in zip(indices[0], distances[0], strict=True):
                 if vector_id < 0:
                     continue
                 symbol_id = self._vector_id_to_symbol.get(int(vector_id))
@@ -220,7 +220,7 @@ class VectorStore:
         for path in (self.config.index_path, self.config.id_map_path, self._fallback_path):
             self._remove_file(path)
 
-    def _upsert_faiss_vectors(self, updates: Sequence[tuple[str, List[float]]]) -> None:
+    def _upsert_faiss_vectors(self, updates: Sequence[tuple[str, list[float]]]) -> None:
         """Insert vectors into an ID-mapped FAISS index."""
 
         if not updates:
@@ -287,7 +287,7 @@ class VectorStore:
         if not os.path.exists(self.config.id_map_path):
             return False
         try:
-            with open(self.config.id_map_path, "r", encoding="utf8") as handle:
+            with open(self.config.id_map_path, encoding="utf8") as handle:
                 payload = json.load(handle)
         except (OSError, json.JSONDecodeError) as exc:
             raise wrap_io_error(
@@ -362,7 +362,7 @@ class VectorStore:
                 )
             ]
             symbol_ids = symbol_ids[: len(matrix)]
-        for symbol_id, vector in zip(symbol_ids, matrix.tolist()):
+        for symbol_id, vector in zip(symbol_ids, matrix.tolist(), strict=True):
             self._fallback_vectors[symbol_id] = vector
 
     def _migrate_legacy_vectors(self) -> None:
@@ -383,7 +383,7 @@ class VectorStore:
                 self._fallback_vectors[symbol_id] = vector
         self.save()
 
-    def _load_vectors_from_db(self) -> List[tuple[str, List[float]]]:
+    def _load_vectors_from_db(self) -> list[tuple[str, list[float]]]:
         """Load (symbol_id, embedding_vector) tuples from index.db."""
 
         db_path = os.path.join(self.config.cache_dir, "index.db")
@@ -408,7 +408,7 @@ class VectorStore:
             return []
         finally:
             conn.close()
-        vectors: List[tuple[str, List[float]]] = []
+        vectors: list[tuple[str, list[float]]] = []
         for symbol_id, raw_vector in rows:
             if not raw_vector:
                 continue

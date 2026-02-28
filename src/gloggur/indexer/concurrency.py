@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import IO, Iterator, Optional
+from typing import IO
 
 from gloggur.io_failures import StorageIOError, wrap_io_error
 
@@ -42,7 +43,7 @@ class LockRetryPolicy:
             raise ValueError("multiplier must be >= 1.0")
 
     @classmethod
-    def from_env(cls) -> "LockRetryPolicy":
+    def from_env(cls) -> LockRetryPolicy:
         """Create retry policy from environment variables with safe fallbacks."""
 
         return cls(
@@ -83,7 +84,7 @@ def build_backoff_schedule(policy: LockRetryPolicy) -> list[float]:
 def cache_write_lock(
     cache_dir: str,
     *,
-    policy: Optional[LockRetryPolicy] = None,
+    policy: LockRetryPolicy | None = None,
 ) -> Iterator[None]:
     """Acquire a cross-process cache writer lock with bounded retry/timeout."""
 
@@ -169,10 +170,7 @@ def _lock_timeout_error(lock_path: str, waited_ms: int, attempts: int) -> Storag
             "Retry the command with default settings.",
             "Increase GLOGGUR_CACHE_LOCK_TIMEOUT_MS for longer waits if contention is expected.",
         ],
-        detail=(
-            "cache write lock timed out "
-            f"after {waited_ms}ms ({attempts} attempts)"
-        ),
+        detail=("cache write lock timed out " f"after {waited_ms}ms ({attempts} attempts)"),
     )
 
 

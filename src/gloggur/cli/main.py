@@ -1,23 +1,23 @@
 from __future__ import annotations
 
-import hashlib
 import gzip
+import hashlib
 import io
 import json
 import os
 import shlex
-import signal
-import socket
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import unquote, urlparse
@@ -42,8 +42,8 @@ from gloggur.indexer.cache import (
     CacheRecoveryError,
 )
 from gloggur.indexer.concurrency import cache_write_lock
-from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
 from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
+from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
 from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.evidence import (
@@ -69,7 +69,7 @@ def cli() -> None:
 
 INSPECT_PAYLOAD_SCHEMA_VERSION = "1"
 INSPECT_PAYLOAD_SCHEMA_POLICY_VERSION = "1"
-INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY: Dict[str, object] = {
+INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY: dict[str, object] = {
     "policy_version": INSPECT_PAYLOAD_SCHEMA_POLICY_VERSION,
     "bump_required_for": [
         "remove_or_rename_existing_field",
@@ -83,10 +83,13 @@ INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY: Dict[str, object] = {
     ],
 }
 DEFAULT_INSPECT_FAILURE_REMEDIATION = (
-    "Inspect failed_samples, then rerun `gloggur inspect <path> --json --force` after resolving the file-level failure."
+    "Inspect failed_samples, then rerun "
+    "`gloggur inspect <path> --json --force` "
+    "after resolving the file-level failure."
 )
 DEFAULT_CLI_FAILURE_REMEDIATION = (
-    "Resolve the CLI precondition failure and rerun the command with --json for machine-readable diagnostics."
+    "Resolve the CLI precondition failure and rerun the command "
+    "with --json for machine-readable diagnostics."
 )
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1"
 DEFAULT_RETRIEVAL_CONFIDENCE_THRESHOLD = 0.55
@@ -95,7 +98,7 @@ DEFAULT_EVIDENCE_MIN_CONFIDENCE = 0.6
 DEFAULT_EVIDENCE_MIN_ITEMS = 1
 MAX_REQUERY_TOP_K = 64
 REQUERY_STRATEGY_TOP_K_EXPANSION = "top_k_expansion"
-CLI_FAILURE_REMEDIATION: Dict[str, List[str]] = {
+CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "cli_usage_error": [
         "Fix command arguments/options and rerun with `--help` for usage details.",
     ],
@@ -113,7 +116,8 @@ CLI_FAILURE_REMEDIATION: Dict[str, List[str]] = {
         "Or unset GLOGGUR_ALLOW_TOOL_VERSION_DRIFT to rely on CLI flags only.",
     ],
     "artifact_source_missing": [
-        "Set --source to an existing cache directory or run `gloggur index . --json` to create one.",
+        "Set --source to an existing cache directory or run "
+        "`gloggur index . --json` to create one.",
     ],
     "artifact_source_not_directory": [
         "Set --source to a directory path containing cache artifacts.",
@@ -131,7 +135,8 @@ CLI_FAILURE_REMEDIATION: Dict[str, List[str]] = {
         "Publish to a path outside the source cache directory to avoid self-referential artifacts.",
     ],
     "artifact_path_missing": [
-        "Set --artifact to an existing .tar.gz artifact path created by `gloggur artifact publish`.",
+        "Set --artifact to an existing .tar.gz artifact path "
+        "created by `gloggur artifact publish`.",
     ],
     "artifact_path_not_file": [
         "Set --artifact to a regular file path (not a directory).",
@@ -143,37 +148,52 @@ CLI_FAILURE_REMEDIATION: Dict[str, List[str]] = {
         "Artifact is missing manifest.json; republish with `gloggur artifact publish --json`.",
     ],
     "artifact_manifest_invalid": [
-        "manifest.json is malformed or missing required fields; republish artifact from a healthy cache.",
+        "manifest.json is malformed or missing required fields; "
+        "republish artifact from a healthy cache.",
     ],
     "artifact_manifest_schema_unsupported": [
-        "Artifact manifest schema is unsupported by this CLI version; rebuild with a compatible gloggur version.",
+        "Artifact manifest schema is unsupported by this CLI "
+        "version; rebuild with a compatible gloggur version.",
     ],
     "artifact_manifest_file_mismatch": [
-        "Artifact file checksums/sizes do not match manifest entries; treat artifact as corrupted and republish.",
+        "Artifact file checksums/sizes do not match manifest "
+        "entries; treat artifact as corrupted and republish.",
     ],
     "artifact_manifest_totals_mismatch": [
-        "Manifest aggregate totals do not match file entries; republish artifact from source cache.",
+        "Manifest aggregate totals do not match file entries; "
+        "republish artifact from source cache.",
     ],
     "artifact_restore_destination_exists": [
-        "Choose a new restore destination or pass --overwrite to replace the existing cache directory.",
+        "Choose a new restore destination or pass --overwrite "
+        "to replace the existing cache directory.",
     ],
     "artifact_restore_destination_not_directory": [
         "Set --destination to a directory path (not an existing file).",
     ],
     "artifact_uploader_command_invalid": [
-        "Set --uploader-command to a valid argv-style template using supported placeholders such as {artifact_path} and {destination}.",
+        "Set --uploader-command to a valid argv-style template "
+        "using supported placeholders such as "
+        "{artifact_path} and {destination}.",
     ],
     "artifact_uploader_failed": [
-        "Inspect uploader stderr/stdout and exit code, then rerun after fixing the external uploader command or destination permissions.",
+        "Inspect uploader stderr/stdout and exit code, then "
+        "rerun after fixing the external uploader command "
+        "or destination permissions.",
     ],
     "artifact_uploader_timeout": [
-        "Increase --uploader-timeout-seconds or fix the remote uploader path so the command completes within the expected time.",
+        "Increase --uploader-timeout-seconds or fix the remote "
+        "uploader path so the command completes within "
+        "the expected time.",
     ],
     "artifact_http_upload_failed": [
-        "Inspect the HTTP status/body and destination URL, then rerun after fixing remote auth, permissions, or presigned URL configuration.",
+        "Inspect the HTTP status/body and destination URL, "
+        "then rerun after fixing remote auth, permissions, "
+        "or presigned URL configuration.",
     ],
     "artifact_http_upload_timeout": [
-        "Increase --uploader-timeout-seconds or fix the remote upload endpoint so the HTTP upload completes within the expected time.",
+        "Increase --uploader-timeout-seconds or fix the remote "
+        "upload endpoint so the HTTP upload completes "
+        "within the expected time.",
     ],
     "search_top_k_invalid": [
         "Set --top-k to a positive integer (>= 1).",
@@ -197,47 +217,59 @@ CLI_FAILURE_REMEDIATION: Dict[str, List[str]] = {
         "Search evidence trace payload was malformed; verify result schema and rerun.",
     ],
     "search_grounding_validation_failed": [
-        "Grounding validation failed; retry with broader query/top-k or adjust evidence thresholds explicitly.",
+        "Grounding validation failed; retry with broader "
+        "query/top-k or adjust evidence thresholds explicitly.",
     ],
     "search_stream_contract_conflict": [
         "Disable --stream when requesting evidence trace/grounding validation payloads.",
     ],
 }
-INSPECT_FAILURE_REMEDIATION: Dict[str, List[str]] = {
+INSPECT_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "decode_error": [
-        "File contents could not be decoded as UTF-8; convert the file encoding or exclude it from inspect scope.",
+        "File contents could not be decoded as UTF-8; convert "
+        "the file encoding or exclude it from inspect scope.",
         "Rerun `gloggur inspect <path> --json --force` after normalizing file encoding.",
     ],
     "read_error": [
-        "File could not be read from disk; verify file permissions/path availability and rerun inspect.",
+        "File could not be read from disk; verify file "
+        "permissions/path availability and rerun inspect.",
     ],
     "parser_unavailable": [
-        "No parser is registered for this file extension; inspect currently supports configured language extensions only.",
+        "No parser is registered for this file extension; "
+        "inspect currently supports configured language "
+        "extensions only.",
     ],
     "parse_error": [
-        "Parser failed on file contents; inspect syntax validity and parser compatibility, then rerun inspect.",
+        "Parser failed on file contents; inspect syntax "
+        "validity and parser compatibility, then rerun "
+        "inspect.",
     ],
 }
 DEFAULT_INDEX_FAILURE_REMEDIATION = (
     "Inspect failed_samples and rerun indexing after resolving the underlying error."
 )
 DEFAULT_WATCH_STATUS_FAILURE_REMEDIATION = (
-    "Inspect watch-state counters and rerun `gloggur watch stop --json` then `gloggur watch start --json`."
+    "Inspect watch-state counters and rerun "
+    "`gloggur watch stop --json` then "
+    "`gloggur watch start --json`."
 )
-WATCH_STATUS_FAILURE_REMEDIATION: Dict[str, List[str]] = {
+WATCH_STATUS_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "watch_state_inconsistent": [
-        "Watch state reports failures without reason codes; restart watch and verify state-file updates.",
+        "Watch state reports failures without reason codes; "
+        "restart watch and verify state-file updates.",
         "If this recurs, run `gloggur index . --json` to re-establish deterministic cache state.",
     ],
     "watch_last_batch_inconsistent": [
-        "Watch last_batch reports failures but reason codes are missing; restart watch and verify daemon state writes.",
+        "Watch last_batch reports failures but reason codes "
+        "are missing; restart watch and verify daemon "
+        "state writes.",
         "Run `gloggur index . --json` if inconsistent batch-state reporting persists.",
     ],
 }
 DEFAULT_RESUME_REMEDIATION = (
     "Inspect resume_reason_details and rerun `gloggur index . --json` after resolving the issue."
 )
-RESUME_REMEDIATION: Dict[str, List[str]] = {
+RESUME_REMEDIATION: dict[str, list[str]] = {
     "missing_index_metadata": [
         "Run `gloggur index . --json` to rebuild missing metadata.",
         "Avoid reusing cache state until the rebuild completes successfully.",
@@ -256,7 +288,9 @@ RESUME_REMEDIATION: Dict[str, List[str]] = {
         "Reindex with the current CLI/tool version before relying on cached retrieval.",
     ],
     "tool_version_changed_override": [
-        "Override is active: verify retrieval correctness in this runtime and schedule a full reindex when possible.",
+        "Override is active: verify retrieval correctness in "
+        "this runtime and schedule a full reindex "
+        "when possible.",
         "Disable override and rerun `gloggur index . --json` before normal operations.",
     ],
     "cache_corruption_recovered": [
@@ -276,14 +310,14 @@ class CLIContractError(click.ClickException):
         message: str,
         *,
         error_code: str,
-        remediation: Optional[List[str]] = None,
+        remediation: list[str] | None = None,
     ) -> None:
         """Capture a stable machine-readable code and optional remediation override."""
         super().__init__(message)
         self.error_code = error_code
         self.remediation = remediation
 
-    def to_payload(self) -> Dict[str, object]:
+    def to_payload(self) -> dict[str, object]:
         """Return deterministic JSON payload for CLI-contract failures."""
         guidance = self.remediation or CLI_FAILURE_REMEDIATION.get(
             self.error_code,
@@ -302,7 +336,7 @@ class CLIContractError(click.ClickException):
         }
 
 
-def _emit(payload: Dict[str, object], as_json: bool) -> None:
+def _emit(payload: dict[str, object], as_json: bool) -> None:
     """Print payload as JSON or raw text."""
     if as_json:
         click.echo(json.dumps(payload, indent=2))
@@ -380,7 +414,7 @@ def _with_io_failure_handling(
     return _wrapped
 
 
-def _load_config(config_path: Optional[str]) -> GloggurConfig:
+def _load_config(config_path: str | None) -> GloggurConfig:
     """Load configuration from file/env."""
     load_path = _normalize_config_path(config_path)
     error_path = "<auto-discovery>"
@@ -416,7 +450,7 @@ def _load_config(config_path: Optional[str]) -> GloggurConfig:
         ) from exc
 
 
-def _normalize_config_path(config_path: Optional[str]) -> Optional[str]:
+def _normalize_config_path(config_path: str | None) -> str | None:
     """Return an absolute config path when provided."""
     if not config_path:
         return None
@@ -431,7 +465,7 @@ def _resolve_relative_to(base_dir: str, value: str) -> str:
     return os.path.abspath(os.path.join(base_dir, expanded))
 
 
-def _normalize_watch_paths(config: GloggurConfig, config_path: Optional[str]) -> GloggurConfig:
+def _normalize_watch_paths(config: GloggurConfig, config_path: str | None) -> GloggurConfig:
     """Resolve watch path fields relative to config file directory."""
     if not config_path:
         return config
@@ -450,23 +484,20 @@ def _hash_content(source: str) -> str:
 
 def _profile_reindex_reason(
     metadata_present: bool,
-    cached_profile: Optional[str],
+    cached_profile: str | None,
     expected_profile: str,
-) -> Optional[str]:
+) -> str | None:
     """Return a reason why cached index data should be rebuilt."""
     if cached_profile is None:
         if metadata_present:
             return "cached embedding profile is unknown"
         return None
     if cached_profile != expected_profile:
-        return (
-            "embedding profile changed "
-            f"(cached={cached_profile}, current={expected_profile})"
-        )
+        return "embedding profile changed " f"(cached={cached_profile}, current={expected_profile})"
     return None
 
 
-def _metadata_reindex_reason(metadata_present: bool) -> Optional[str]:
+def _metadata_reindex_reason(metadata_present: bool) -> str | None:
     """Return reason when index metadata is missing/incomplete."""
     if metadata_present:
         return None
@@ -477,14 +508,16 @@ def _metadata_reindex_signal(
     *,
     metadata_present: bool,
     has_last_success_marker: bool,
-) -> Optional[Tuple[str, str]]:
+) -> tuple[str, str] | None:
     """Return machine-readable metadata reindex signal with interruption disambiguation."""
     if metadata_present:
         return None
     if has_last_success_marker:
         return (
             "index_interrupted",
-            "index metadata missing after a previous successful index (index run interrupted or failed before completion)",
+            "index metadata missing after a previous successful "
+            "index (index run interrupted or failed "
+            "before completion)",
         )
     reason = _metadata_reindex_reason(metadata_present=False)
     return ("missing_index_metadata", reason or "index metadata missing")
@@ -492,9 +525,9 @@ def _metadata_reindex_signal(
 
 def _tool_version_reindex_reason(
     *,
-    last_success_tool_version: Optional[str],
+    last_success_tool_version: str | None,
     current_tool_version: str,
-) -> Optional[str]:
+) -> str | None:
     """Return reason when tool-version drift invalidates previously successful cache state."""
     if last_success_tool_version is None:
         return None
@@ -506,17 +539,17 @@ def _tool_version_reindex_reason(
     )
 
 
-def _stable_fingerprint(payload: Dict[str, object]) -> str:
+def _stable_fingerprint(payload: dict[str, object]) -> str:
     """Return a stable SHA256 fingerprint for JSON-serializable payloads."""
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return _hash_content(serialized)
 
 
-def _index_metadata_digest(metadata: Optional[IndexMetadata]) -> Optional[str]:
+def _index_metadata_digest(metadata: IndexMetadata | None) -> str | None:
     """Return a deterministic digest of index metadata fields used for resume checks."""
     if metadata is None:
         return None
-    payload: Dict[str, object] = {
+    payload: dict[str, object] = {
         "version": metadata.version,
         "last_updated": metadata.last_updated.isoformat(),
         "total_symbols": metadata.total_symbols,
@@ -525,7 +558,7 @@ def _index_metadata_digest(metadata: Optional[IndexMetadata]) -> Optional[str]:
     return _stable_fingerprint(payload)
 
 
-def _reset_reindex_signal(reset_reason: Optional[str]) -> Optional[Tuple[str, str]]:
+def _reset_reindex_signal(reset_reason: str | None) -> tuple[str, str] | None:
     """Map cache reset reason text to a stable machine-readable code + detail."""
     if not reset_reason:
         return None
@@ -536,18 +569,18 @@ def _reset_reindex_signal(reset_reason: Optional[str]) -> Optional[Tuple[str, st
 
 def _build_resume_contract(
     *,
-    metadata: Optional[IndexMetadata],
-    schema_version: Optional[str],
+    metadata: IndexMetadata | None,
+    schema_version: str | None,
     expected_profile: str,
-    cached_profile: Optional[str],
-    reset_reason: Optional[str],
+    cached_profile: str | None,
+    reset_reason: str | None,
     needs_reindex: bool,
-    last_success_resume_fingerprint: Optional[str],
-    last_success_resume_at: Optional[str],
+    last_success_resume_fingerprint: str | None,
+    last_success_resume_at: str | None,
     tool_version: str = GLOGGUR_VERSION,
-    last_success_tool_version: Optional[str] = None,
+    last_success_tool_version: str | None = None,
     allow_tool_version_drift: bool = False,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Build deterministic resume/fingerprint metadata for status and search JSON payloads."""
     metadata_present = metadata is not None
     metadata_signal = _metadata_reindex_signal(
@@ -565,8 +598,8 @@ def _build_resume_contract(
     tool_version_override_applied = allow_tool_version_drift and tool_version_drift_detected
     reset_signal = _reset_reindex_signal(reset_reason)
 
-    reason_codes: List[str] = []
-    reason_details: List[str] = []
+    reason_codes: list[str] = []
+    reason_details: list[str] = []
     if metadata_signal is not None:
         reason_codes.append(metadata_signal[0])
         reason_details.append(metadata_signal[1])
@@ -617,8 +650,7 @@ def _build_resume_contract(
         }
     )
     resume_remediation = {
-        code: RESUME_REMEDIATION.get(code, [DEFAULT_RESUME_REMEDIATION])
-        for code in reason_codes
+        code: RESUME_REMEDIATION.get(code, [DEFAULT_RESUME_REMEDIATION]) for code in reason_codes
     }
 
     return {
@@ -676,7 +708,7 @@ def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManage
     cache.set_last_success_tool_version(GLOGGUR_VERSION)
 
 
-def _resolve_config_file_path(config_path: Optional[str]) -> str:
+def _resolve_config_file_path(config_path: str | None) -> str:
     """Resolve config file path for watch init updates."""
     if config_path:
         return config_path
@@ -686,12 +718,12 @@ def _resolve_config_file_path(config_path: Optional[str]) -> str:
     return ".gloggur.yaml"
 
 
-def _read_config_payload(path: str) -> Dict[str, object]:
+def _read_config_payload(path: str) -> dict[str, object]:
     """Load config file payload (yaml/json), returning empty dict if missing."""
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf8") as handle:
+        with open(path, encoding="utf8") as handle:
             if path.endswith(".json"):
                 payload = json.load(handle)
             else:
@@ -711,7 +743,7 @@ def _read_config_payload(path: str) -> Dict[str, object]:
     )
 
 
-def _write_config_payload(path: str, payload: Dict[str, object]) -> None:
+def _write_config_payload(path: str, payload: dict[str, object]) -> None:
     """Persist config payload using yaml/json by file extension."""
     directory = os.path.dirname(path)
     try:
@@ -731,12 +763,12 @@ def _write_config_payload(path: str, payload: Dict[str, object]) -> None:
         ) from exc
 
 
-def _read_pid_file(path: str) -> Optional[int]:
+def _read_pid_file(path: str) -> int | None:
     """Read PID from pid file."""
     if not os.path.exists(path):
         return None
     try:
-        with open(path, "r", encoding="utf8") as handle:
+        with open(path, encoding="utf8") as handle:
             value = handle.read().strip()
     except OSError as exc:
         raise wrap_io_error(
@@ -785,7 +817,7 @@ def _remove_file(path: str) -> None:
         ) from exc
 
 
-def _write_watch_state(path: str, updates: Dict[str, object]) -> None:
+def _write_watch_state(path: str, updates: dict[str, object]) -> None:
     """Merge watcher state updates and persist JSON."""
     directory = os.path.dirname(path)
     try:
@@ -842,12 +874,12 @@ def _terminate_watch_process(process: object) -> None:
         return
 
 
-def _read_watch_state_for_status(path: str) -> Dict[str, object]:
+def _read_watch_state_for_status(path: str) -> dict[str, object]:
     """Read watch status state file with deterministic failure semantics."""
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf8") as handle:
+        with open(path, encoding="utf8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
         raise wrap_io_error(
@@ -864,9 +896,9 @@ def _read_watch_state_for_status(path: str) -> Dict[str, object]:
     )
 
 
-def _normalize_reason_counts(payload: object) -> Dict[str, int]:
+def _normalize_reason_counts(payload: object) -> dict[str, int]:
     """Normalize reason-count payloads into a stable positive-int mapping."""
-    normalized: Dict[str, int] = {}
+    normalized: dict[str, int] = {}
     if not isinstance(payload, dict):
         return normalized
     for raw_reason, raw_count in payload.items():
@@ -881,7 +913,7 @@ def _normalize_reason_counts(payload: object) -> Dict[str, int]:
     return normalized
 
 
-def _read_failed_count(payload: Dict[str, object]) -> int:
+def _read_failed_count(payload: dict[str, object]) -> int:
     """Read failed/error_count from a watch payload with safe int coercion."""
     raw_failed = payload.get("failed", payload.get("error_count", 0))
     try:
@@ -890,7 +922,7 @@ def _read_failed_count(payload: Dict[str, object]) -> int:
         return 0
 
 
-def _collect_watch_failure_signals(state: Dict[str, object]) -> tuple[int, Dict[str, int]]:
+def _collect_watch_failure_signals(state: dict[str, object]) -> tuple[int, dict[str, int]]:
     """Collect fail-closed failure counters/reasons from watch state + last_batch."""
     normalized_reasons = _normalize_reason_counts(state.get("failed_reasons"))
     failed_count = _read_failed_count(state)
@@ -914,7 +946,7 @@ def _collect_watch_failure_signals(state: Dict[str, object]) -> tuple[int, Dict[
     return failed_count, normalized_reasons
 
 
-def _normalize_watch_status(running: bool, state: Dict[str, object]) -> str:
+def _normalize_watch_status(running: bool, state: dict[str, object]) -> str:
     """Return a status label consistent with observed liveness."""
 
     raw_status = state.get("status")
@@ -934,7 +966,7 @@ def _normalize_watch_status(running: bool, state: Dict[str, object]) -> str:
     return "stopped"
 
 
-def _build_watch_failure_contract(state: Dict[str, object]) -> Dict[str, object]:
+def _build_watch_failure_contract(state: dict[str, object]) -> dict[str, object]:
     """Build deterministic watch failure codes/guidance from state counters."""
     _failed_count, normalized_reasons = _collect_watch_failure_signals(state)
     if not normalized_reasons:
@@ -956,7 +988,7 @@ def _build_watch_failure_contract(state: Dict[str, object]) -> Dict[str, object]
     }
 
 
-def _watch_starting_state_payload(*, watch_path: str, pid: int) -> Dict[str, object]:
+def _watch_starting_state_payload(*, watch_path: str, pid: int) -> dict[str, object]:
     """Return fail-closed state reset payload for daemon startup transitions."""
     return {
         "running": True,
@@ -984,8 +1016,8 @@ def _watch_starting_state_payload(*, watch_path: str, pid: int) -> Dict[str, obj
 
 
 def _create_runtime(
-    config_path: Optional[str],
-    embedding_provider: Optional[str] = None,
+    config_path: str | None,
+    embedding_provider: str | None = None,
     rebuild_on_profile_change: bool = False,
     write_locked: bool = False,
 ) -> tuple[GloggurConfig, CacheManager, VectorStore]:
@@ -1045,8 +1077,7 @@ def _is_transient_status_race_error(error: StorageIOError) -> bool:
     """Return True when status hit a transient table-missing race during concurrent recovery."""
     detail = error.detail.lower()
     if error.operation == "execute cache database transaction" and (
-        "no such table" in detail
-        or "database schema has changed" in detail
+        "no such table" in detail or "database schema has changed" in detail
     ):
         return True
     if error.operation == "configure cache database pragmas":
@@ -1071,7 +1102,7 @@ def _build_status_payload(
     cache: CacheManager,
     *,
     allow_tool_version_drift: bool = False,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Build status payload from cache metadata/profile state."""
     expected_profile = config.embedding_profile()
     metadata = cache.get_index_metadata()
@@ -1096,10 +1127,7 @@ def _build_status_payload(
         reset_label = "cache schema rebuilt"
         if "cache corruption detected" in cache.last_reset_reason:
             reset_label = "cache corruption recovered"
-        reindex_reason = (
-            f"{reset_label} "
-            f"({cache.last_reset_reason})"
-        )
+        reindex_reason = f"{reset_label} " f"({cache.last_reset_reason})"
     needs_reindex = metadata is None or reindex_reason is not None
     resume_contract = _build_resume_contract(
         metadata=metadata,
@@ -1131,7 +1159,7 @@ def _create_status_payload(
     config: GloggurConfig,
     *,
     allow_tool_version_drift: bool = False,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Create cache manager and build status payload."""
     cache = _create_cache_manager(config.cache_dir)
     return _build_status_payload(
@@ -1145,7 +1173,7 @@ def _create_embedding_provider_for_command(
     config: GloggurConfig,
     *,
     require_provider: bool = False,
-) -> Optional[EmbeddingProvider]:
+) -> EmbeddingProvider | None:
     """Create embedding provider with deterministic error mapping."""
     if not config.embedding_provider:
         if require_provider:
@@ -1165,7 +1193,7 @@ def _create_embedding_provider_for_command(
         ) from exc
 
 
-def _profile_matches_filter(cached_profile: Optional[str], profile_filter: str) -> bool:
+def _profile_matches_filter(cached_profile: str | None, profile_filter: str) -> bool:
     """Return whether a cached profile matches a user-provided clear-cache filter."""
     if not cached_profile:
         return False
@@ -1208,9 +1236,9 @@ def _artifact_rel_path(source_dir: str, file_path: str) -> str:
     return relative.replace(os.sep, "/")
 
 
-def _collect_artifact_file_entries(source_dir: str) -> List[Dict[str, object]]:
+def _collect_artifact_file_entries(source_dir: str) -> list[dict[str, object]]:
     """Collect deterministic file metadata for artifact manifest generation."""
-    entries: List[Dict[str, object]] = []
+    entries: list[dict[str, object]] = []
     for root, dirs, files in os.walk(source_dir):
         dirs.sort()
         files.sort()
@@ -1239,8 +1267,8 @@ def _build_artifact_manifest(
     cache: CacheManager,
     *,
     source_dir: str,
-    file_entries: List[Dict[str, object]],
-) -> Dict[str, object]:
+    file_entries: list[dict[str, object]],
+) -> dict[str, object]:
     """Build artifact manifest with deterministic cache compatibility metadata."""
     metadata = cache.get_index_metadata()
     if metadata is None:
@@ -1302,7 +1330,7 @@ def _render_artifact_uploader_command(
     archive_sha256: str,
     archive_bytes: int,
     manifest_sha256: str,
-) -> List[str]:
+) -> list[str]:
     """Render uploader command template into argv without invoking a shell."""
     if not uploader_command.strip():
         raise CLIContractError(
@@ -1331,7 +1359,7 @@ def _render_artifact_uploader_command(
         "archive_bytes": str(archive_bytes),
         "manifest_sha256": manifest_sha256,
     }
-    argv: List[str] = []
+    argv: list[str] = []
     try:
         for token in argv_template:
             argv.append(token.format(**format_values))
@@ -1354,7 +1382,7 @@ def _run_artifact_uploader_command(
     archive_bytes: int,
     manifest_sha256: str,
     timeout_seconds: float,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Execute external uploader command and return structured success metadata."""
     argv = _render_artifact_uploader_command(
         uploader_command,
@@ -1400,7 +1428,7 @@ def _run_artifact_uploader_command(
             "; ".join(detail_parts),
             error_code="artifact_uploader_failed",
         )
-    payload: Dict[str, object] = {
+    payload: dict[str, object] = {
         "mode": "uploader_command",
         "command": argv,
         "destination": destination,
@@ -1421,7 +1449,7 @@ def _upload_artifact_http(
     archive_bytes: int,
     manifest_sha256: str,
     timeout_seconds: float,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Upload artifact archive via direct HTTP PUT and return structured success metadata."""
     try:
         with open(artifact_path, "rb") as handle:
@@ -1452,9 +1480,7 @@ def _upload_artifact_http(
             status_code = int(getattr(response, "status", response.getcode()))
     except urllib_error.HTTPError as exc:
         response_body = exc.read()
-        detail = (
-            f"HTTP upload failed with status {exc.code} for destination {destination}"
-        )
+        detail = f"HTTP upload failed with status {exc.code} for destination {destination}"
         if response_body:
             body_text = response_body.decode("utf8", errors="replace").strip()
             if body_text:
@@ -1463,7 +1489,7 @@ def _upload_artifact_http(
             detail,
             error_code="artifact_http_upload_failed",
         ) from exc
-    except (urllib_error.URLError, socket.timeout, TimeoutError) as exc:
+    except (urllib_error.URLError, TimeoutError) as exc:
         raise CLIContractError(
             (
                 "HTTP upload timed out or could not connect after "
@@ -1472,7 +1498,7 @@ def _upload_artifact_http(
             error_code="artifact_http_upload_timeout",
         ) from exc
 
-    payload: Dict[str, object] = {
+    payload: dict[str, object] = {
         "mode": "http_put",
         "destination": destination,
         "status_code": status_code,
@@ -1489,7 +1515,7 @@ def _create_artifact_archive(
     *,
     artifact_path: str,
     manifest_bytes: bytes,
-    file_entries: List[Dict[str, object]],
+    file_entries: list[dict[str, object]],
 ) -> None:
     """Create a deterministic tar.gz artifact containing cache files and manifest."""
     try:
@@ -1544,7 +1570,7 @@ def _validate_artifact_archive(
     artifact_path: str,
     *,
     verify_file_hashes: bool = True,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Validate a published artifact archive and return deterministic metadata."""
     normalized_artifact_path = os.path.abspath(os.path.expanduser(artifact_path))
     if not os.path.exists(normalized_artifact_path):
@@ -1670,7 +1696,9 @@ def _validate_artifact_archive(
 
             manifest_files_total = manifest_payload.get("files_total")
             manifest_bytes_total = manifest_payload.get("bytes_total")
-            if not isinstance(manifest_files_total, int) or not isinstance(manifest_bytes_total, int):
+            if not isinstance(manifest_files_total, int) or not isinstance(
+                manifest_bytes_total, int
+            ):
                 raise CLIContractError(
                     "Artifact manifest totals (files_total/bytes_total) must be integers",
                     error_code="artifact_manifest_invalid",
@@ -1756,7 +1784,7 @@ def _restore_artifact_archive(
     destination_dir: str,
     overwrite: bool = False,
     verify_file_hashes: bool = True,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Restore a validated cache artifact into a destination directory."""
     validation_payload = _validate_artifact_archive(
         artifact_path,
@@ -1906,11 +1934,11 @@ def _restore_artifact_archive(
 
 
 def _build_failure_contract(
-    failed_reasons: Dict[str, int],
+    failed_reasons: dict[str, int],
     *,
-    remediation_by_reason: Dict[str, List[str]],
+    remediation_by_reason: dict[str, list[str]],
     default_remediation: str,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Build deterministic machine-readable failure codes and remediation payloads."""
     normalized_reasons = _normalize_reason_counts(failed_reasons)
     if not normalized_reasons:
@@ -1925,7 +1953,7 @@ def _build_failure_contract(
 
 
 def _attach_primary_error_from_failure_contract(
-    payload: Dict[str, object],
+    payload: dict[str, object],
     *,
     error_type: str,
     detail: str,
@@ -1960,7 +1988,7 @@ def _attach_primary_error_from_failure_contract(
     }
 
 
-def _build_index_failure_contract(failed_reasons: Dict[str, int]) -> Dict[str, object]:
+def _build_index_failure_contract(failed_reasons: dict[str, int]) -> dict[str, object]:
     """Build deterministic machine-readable failure codes and remediation for index payloads."""
     return _build_failure_contract(
         failed_reasons,
@@ -1969,7 +1997,7 @@ def _build_index_failure_contract(failed_reasons: Dict[str, int]) -> Dict[str, o
     )
 
 
-def _build_inspect_failure_contract(failed_reasons: Dict[str, int]) -> Dict[str, object]:
+def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str, object]:
     """Build deterministic machine-readable failure codes and remediation for inspect payloads."""
     return _build_failure_contract(
         failed_reasons,
@@ -1992,9 +2020,9 @@ def _build_inspect_failure_contract(failed_reasons: Dict[str, int]) -> Dict[str,
 @_with_io_failure_handling
 def index(
     path: str,
-    config_path: Optional[str],
+    config_path: str | None,
     as_json: bool,
-    embedding_provider: Optional[str],
+    embedding_provider: str | None,
     allow_partial: bool,
 ) -> None:
     """Load config/runtime, index path, and emit summary counts."""
@@ -2020,6 +2048,7 @@ def index(
             vector_store=vector_store,
         )
         if not as_json:
+
             def _scan(done: int, total: int, status: str) -> None:
                 """Render one in-place scan progress update for interactive index runs."""
                 _ = status
@@ -2028,6 +2057,7 @@ def index(
             indexer._scan_callback = _scan
 
             if embedding is not None:
+
                 def _progress(done: int, total: int) -> None:
                     """Render one in-place embedding progress update for interactive runs."""
                     click.echo(
@@ -2035,6 +2065,7 @@ def index(
                         nl=False,
                         err=True,
                     )
+
                 indexer._progress_callback = _progress
 
         if os.path.isdir(path):
@@ -2088,8 +2119,8 @@ def index(
             if files_considered
             else {"failed": 0, "failed_reasons": {}, "failed_samples": []}
         )
-        failed_reasons: Dict[str, int] = {}
-        failed_samples: List[str] = []
+        failed_reasons: dict[str, int] = {}
+        failed_samples: list[str] = []
         indexed = 0
         unchanged = 0
         failed = 0
@@ -2244,11 +2275,11 @@ def _resolve_allow_tool_version_drift(
     return cli_flag_enabled or env_enabled
 
 
-def _extract_similarity_scores(results: object) -> List[float]:
+def _extract_similarity_scores(results: object) -> list[float]:
     """Extract bounded similarity scores or fail loudly on malformed payloads."""
     if not isinstance(results, list):
         raise ValueError("search payload 'results' must be a list")
-    scores: List[float] = []
+    scores: list[float] = []
     for idx, item in enumerate(results):
         if not isinstance(item, dict):
             raise ValueError(f"search result at index {idx} is not an object")
@@ -2256,7 +2287,9 @@ def _extract_similarity_scores(results: object) -> List[float]:
         try:
             score = float(raw_score)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"search result at index {idx} has non-numeric similarity_score") from exc
+            raise ValueError(
+                f"search result at index {idx} has non-numeric similarity_score"
+            ) from exc
         if score < 0.0:
             score = 0.0
         if score > 1.0:
@@ -2294,7 +2327,7 @@ def _next_retry_top_k(current_top_k: int, *, max_top_k: int = MAX_REQUERY_TOP_K)
     return expanded
 
 
-def _validate_search_payload(payload: object) -> Dict[str, object]:
+def _validate_search_payload(payload: object) -> dict[str, object]:
     """Validate search payload shape and fail loudly on schema drift."""
     if not isinstance(payload, dict):
         raise ValueError("search payload must be an object")
@@ -2311,12 +2344,12 @@ def _search_with_bounded_retry(
     *,
     searcher: HybridSearch,
     query: str,
-    filters: Dict[str, str],
+    filters: dict[str, str],
     initial_top_k: int,
     confidence_threshold: float,
     max_requery_attempts: int,
     disable_bounded_requery: bool,
-) -> Tuple[Dict[str, object], Dict[str, object]]:
+) -> tuple[dict[str, object], dict[str, object]]:
     """Run search with optional bounded retry and deterministic confidence telemetry."""
     result = _validate_search_payload(searcher.search(query, filters=filters, top_k=initial_top_k))
     initial_confidence = _compute_retrieval_confidence(result.get("results"))
@@ -2324,7 +2357,7 @@ def _search_with_bounded_retry(
     final_top_k = initial_top_k
     retry_performed = False
     retry_attempts = 0
-    retry_strategy: Optional[str] = None
+    retry_strategy: str | None = None
 
     retry_enabled = (not disable_bounded_requery) and max_requery_attempts > 0
     while (
@@ -2339,10 +2372,12 @@ def _search_with_bounded_retry(
         retry_attempts += 1
         retry_strategy = REQUERY_STRATEGY_TOP_K_EXPANSION
         final_top_k = next_top_k
-        result = _validate_search_payload(searcher.search(query, filters=filters, top_k=final_top_k))
+        result = _validate_search_payload(
+            searcher.search(query, filters=filters, top_k=final_top_k)
+        )
         final_confidence = _compute_retrieval_confidence(result.get("results"))
 
-    confidence_payload: Dict[str, object] = {
+    confidence_payload: dict[str, object] = {
         "confidence_threshold": confidence_threshold,
         "initial_confidence": initial_confidence,
         "final_confidence": final_confidence,
@@ -2427,10 +2462,10 @@ def _search_with_bounded_retry(
 @_with_io_failure_handling
 def search(
     query: str,
-    config_path: Optional[str],
+    config_path: str | None,
     as_json: bool,
-    kind: Optional[str],
-    file_path: Optional[str],
+    kind: str | None,
+    file_path: str | None,
     top_k: int,
     confidence_threshold: float,
     max_requery_attempts: int,
@@ -2557,8 +2592,8 @@ def search(
             "search response contract invalid: metadata must be an object",
             error_code="search_result_payload_invalid",
         )
-    evidence_trace_payload: Optional[List[Dict[str, object]]] = None
-    validation_payload: Optional[Dict[str, object]] = None
+    evidence_trace_payload: list[dict[str, object]] | None = None
+    validation_payload: dict[str, object] | None = None
     if with_evidence_trace or validate_grounding:
         try:
             evidence_trace_payload = build_evidence_trace(result.get("results"))
@@ -2592,7 +2627,11 @@ def search(
         result["evidence_trace"] = evidence_trace_payload
     if validation_payload is not None:
         result["validation"] = validation_payload
-    if validation_payload is not None and not bool(validation_payload.get("passed")) and fail_on_ungrounded:
+    if (
+        validation_payload is not None
+        and not bool(validation_payload.get("passed"))
+        and fail_on_ungrounded
+    ):
         error_code = "search_grounding_validation_failed"
         guidance = CLI_FAILURE_REMEDIATION.get(error_code, [DEFAULT_CLI_FAILURE_REMEDIATION])
         result["error"] = {
@@ -2652,7 +2691,7 @@ def _warning_type(warning: str) -> str:
     return warning.split(" (", 1)[0]
 
 
-def _symbol_id_file_path(symbol_id: str) -> Optional[str]:
+def _symbol_id_file_path(symbol_id: str) -> str | None:
     """Best-effort extraction of file path from symbol id format path:start:name."""
     parts = symbol_id.rsplit(":", 2)
     if len(parts) != 3:
@@ -2661,25 +2700,25 @@ def _symbol_id_file_path(symbol_id: str) -> Optional[str]:
 
 
 def _build_inspect_warning_summary(
-    warning_reports: List[Dict[str, object]],
+    warning_reports: list[dict[str, object]],
     *,
-    symbol_file_paths: Dict[str, str],
-) -> Dict[str, object]:
+    symbol_file_paths: dict[str, str],
+) -> dict[str, object]:
     """Build deterministic warning summaries for inspect JSON payloads."""
-    warning_counts_by_type: Dict[str, int] = {}
-    warning_counts_by_path_class: Dict[str, int] = {
+    warning_counts_by_type: dict[str, int] = {}
+    warning_counts_by_path_class: dict[str, int] = {
         "src": 0,
         "tests": 0,
         "scripts": 0,
         "other": 0,
     }
-    report_counts_by_path_class: Dict[str, int] = {
+    report_counts_by_path_class: dict[str, int] = {
         "src": 0,
         "tests": 0,
         "scripts": 0,
         "other": 0,
     }
-    warning_counts_by_file: Dict[str, int] = {}
+    warning_counts_by_file: dict[str, int] = {}
     total_warnings = 0
 
     for report in warning_reports:
@@ -2729,7 +2768,7 @@ def _load_cached_inspect_reports(
     file_path: str,
     *,
     symbol_ids: tuple[str, ...],
-) -> List[DocstringAuditReport]:
+) -> list[DocstringAuditReport]:
     """Rehydrate cached audit reports for unchanged files."""
     cached_rows = cache.list_audit_reports_for_file(file_path)
     selected_rows = (
@@ -2741,7 +2780,7 @@ def _load_cached_inspect_reports(
         if symbol_ids
         else cached_rows
     )
-    reports: List[DocstringAuditReport] = []
+    reports: list[DocstringAuditReport] = []
     for symbol_id, warnings, semantic_score, score_metadata in selected_rows:
         cached_score_metadata = dict(score_metadata) if isinstance(score_metadata, dict) else {}
         cached_score_metadata["cached_report_reuse"] = True
@@ -2795,7 +2834,7 @@ def _load_cached_inspect_reports(
 @_with_io_failure_handling
 def inspect(
     path: str,
-    config_path: Optional[str],
+    config_path: str | None,
     as_json: bool,
     force: bool,
     symbol_ids: tuple[str, ...],
@@ -2809,19 +2848,19 @@ def inspect(
     parser_registry = ParserRegistry()
     embedding = _create_embedding_provider_for_command(config)
     symbols = []
-    code_texts: Dict[str, str] = {}
-    processed_files: List[Tuple[str, str]] = []
+    code_texts: dict[str, str] = {}
+    processed_files: list[tuple[str, str]] = []
     files_considered = 0
     inspected_files = 0
     failed_files = 0
-    failed_reasons: Dict[str, int] = {}
-    failed_samples: List[str] = []
+    failed_reasons: dict[str, int] = {}
+    failed_samples: list[str] = []
     skipped_files = 0
     cached_files_reused = 0
     cached_reports_reused = 0
     cached_warning_reports_reused = 0
-    symbol_file_paths: Dict[str, str] = {}
-    reports: List[DocstringAuditReport] = []
+    symbol_file_paths: dict[str, str] = {}
+    reports: list[DocstringAuditReport] = []
     include_tests_effective = include_tests
     include_scripts_effective = include_scripts
     paths = [path]
@@ -2854,7 +2893,7 @@ def inspect(
     for file_path in paths:
         files_considered += 1
         try:
-            with open(file_path, "r", encoding="utf8") as handle:
+            with open(file_path, encoding="utf8") as handle:
                 source = handle.read()
         except UnicodeDecodeError as exc:
             failed_files += 1
@@ -2881,7 +2920,9 @@ def inspect(
                 reports.extend(cached_reports)
                 cached_files_reused += 1
                 cached_reports_reused += len(cached_reports)
-                cached_warning_reports_reused += sum(1 for report in cached_reports if report.warnings)
+                cached_warning_reports_reused += sum(
+                    1 for report in cached_reports if report.warnings
+                )
                 continue
         parser_entry = parser_registry.get_parser_for_path(file_path)
         if not parser_entry:
@@ -3041,13 +3082,13 @@ def artifact() -> None:
 )
 @_with_io_failure_handling
 def artifact_publish(
-    config_path: Optional[str],
+    config_path: str | None,
     as_json: bool,
-    source_path: Optional[str],
+    source_path: str | None,
     destination: str,
-    artifact_name: Optional[str],
+    artifact_name: str | None,
     overwrite: bool,
-    uploader_command: Optional[str],
+    uploader_command: str | None,
     uploader_timeout_seconds: float,
 ) -> None:
     """Publish a deterministic index artifact to local/file, HTTP, or uploader transports."""
@@ -3074,7 +3115,7 @@ def artifact_publish(
     default_filename = artifact_name or f"gloggur-index-{timestamp}.tar.gz"
     destination_scheme = urlparse(destination).scheme.lower()
     use_http_upload = uploader_command is None and destination_scheme in {"http", "https"}
-    destination_path: Optional[str] = None
+    destination_path: str | None = None
     artifact_uri = destination
     if uploader_command is not None:
         publish_transport = "uploader_command"
@@ -3139,8 +3180,8 @@ def artifact_publish(
                 operation="read published artifact metadata",
                 path=temp_archive,
             ) from exc
-        uploader_payload: Optional[Dict[str, object]] = None
-        http_upload_payload: Optional[Dict[str, object]] = None
+        uploader_payload: dict[str, object] | None = None
+        http_upload_payload: dict[str, object] | None = None
         if destination_path is not None:
             try:
                 shutil.copyfile(temp_archive, destination_path)
@@ -3159,7 +3200,7 @@ def artifact_publish(
                     operation="read published artifact metadata",
                     path=destination_path,
                 ) from exc
-            archive_path_for_payload: Optional[str] = destination_path
+            archive_path_for_payload: str | None = destination_path
             artifact_uri = Path(destination_path).resolve().as_uri()
         elif use_http_upload:
             http_upload_payload = _upload_artifact_http(
@@ -3265,10 +3306,10 @@ def artifact_validate(as_json: bool, artifact_path: str, skip_file_hash_check: b
 )
 @_with_io_failure_handling
 def artifact_restore(
-    config_path: Optional[str],
+    config_path: str | None,
     as_json: bool,
     artifact_path: str,
-    destination_dir: Optional[str],
+    destination_dir: str | None,
     overwrite: bool,
     skip_file_hash_check: bool,
 ) -> None:
@@ -3293,7 +3334,7 @@ def watch() -> None:
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @_with_io_failure_handling
-def watch_init(path: str, config_path: Optional[str], as_json: bool) -> None:
+def watch_init(path: str, config_path: str | None, as_json: bool) -> None:
     """Enable watch mode defaults in config for a repository path."""
 
     config_file = _normalize_config_path(_resolve_config_file_path(config_path))
@@ -3330,7 +3371,7 @@ def watch_init(path: str, config_path: Optional[str], as_json: bool) -> None:
 )
 @_with_io_failure_handling
 def watch_start(
-    config_path: Optional[str],
+    config_path: str | None,
     as_json: bool,
     force_foreground: bool,
     force_daemon: bool,
@@ -3442,9 +3483,7 @@ def watch_start(
                         "pid": process.pid,
                         "watch_path": watch_path,
                         "stopped_at": utc_now_iso(),
-                        "last_error": (
-                            f"watch daemon exited early with code {daemon_exit_code}"
-                        ),
+                        "last_error": (f"watch daemon exited early with code {daemon_exit_code}"),
                     },
                 )
             except StorageIOError:
@@ -3456,7 +3495,9 @@ def watch_start(
                 probable_cause="Watch daemon exited before reporting a running state.",
                 remediation=[
                     "Inspect the watch log file for startup errors and traceback details.",
-                    "Fix configuration/dependency issues and rerun `gloggur watch start --daemon --json`.",
+                    "Fix configuration/dependency issues and "
+                    "rerun `gloggur watch start --daemon "
+                    "--json`.",
                 ],
                 detail=f"RuntimeError: watch daemon exited early with code {daemon_exit_code}",
             )
@@ -3488,9 +3529,7 @@ def watch_start(
                         "pid": process.pid,
                         "watch_path": watch_path,
                         "stopped_at": utc_now_iso(),
-                        "last_error": (
-                            f"watch daemon exited early with code {daemon_exit_code}"
-                        ),
+                        "last_error": (f"watch daemon exited early with code {daemon_exit_code}"),
                     },
                 )
             except StorageIOError:
@@ -3502,7 +3541,9 @@ def watch_start(
                 probable_cause="Watch daemon exited before reporting a stable running state.",
                 remediation=[
                     "Inspect the watch log file for startup errors and traceback details.",
-                    "Fix configuration/dependency issues and rerun `gloggur watch start --daemon --json`.",
+                    "Fix configuration/dependency issues and "
+                    "rerun `gloggur watch start --daemon "
+                    "--json`.",
                 ],
                 detail=f"RuntimeError: watch daemon exited early with code {daemon_exit_code}",
             )
@@ -3550,7 +3591,7 @@ def watch_start(
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @_with_io_failure_handling
-def watch_stop(config_path: Optional[str], as_json: bool) -> None:
+def watch_stop(config_path: str | None, as_json: bool) -> None:
     """Stop watcher process identified by pid file."""
 
     resolved_config_path = _normalize_config_path(config_path)
@@ -3602,7 +3643,7 @@ def watch_stop(config_path: Optional[str], as_json: bool) -> None:
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @_with_io_failure_handling
-def watch_status(config_path: Optional[str], as_json: bool) -> None:
+def watch_status(config_path: str | None, as_json: bool) -> None:
     """Show watcher process and heartbeat status."""
 
     resolved_config_path = _normalize_config_path(config_path)
@@ -3610,7 +3651,7 @@ def watch_status(config_path: Optional[str], as_json: bool) -> None:
     pid = _read_pid_file(config.watch_pid_file)
     running = is_process_running(pid)
     state = _read_watch_state_for_status(config.watch_state_file)
-    payload: Dict[str, object] = {
+    payload: dict[str, object] = {
         "watch_enabled": config.watch_enabled,
         "watch_path": os.path.abspath(config.watch_path),
         "mode": config.watch_mode,
@@ -3636,7 +3677,7 @@ def watch_status(config_path: Optional[str], as_json: bool) -> None:
     help="Allow status resume_ok when only tool-version drift is detected.",
 )
 @_with_io_failure_handling
-def status(config_path: Optional[str], as_json: bool, allow_tool_version_drift: bool) -> None:
+def status(config_path: str | None, as_json: bool, allow_tool_version_drift: bool) -> None:
     """Show index statistics and metadata."""
     allow_tool_version_drift = _resolve_allow_tool_version_drift(
         cli_flag_enabled=allow_tool_version_drift
@@ -3675,7 +3716,7 @@ def status(config_path: Optional[str], as_json: bool, allow_tool_version_drift: 
     ),
 )
 @_with_io_failure_handling
-def clear_cache(config_path: Optional[str], as_json: bool, profile_filter: Optional[str]) -> None:
+def clear_cache(config_path: str | None, as_json: bool, profile_filter: str | None) -> None:
     """Clear the index cache."""
     resolved_config_path = _normalize_config_path(config_path)
     config = _load_config(resolved_config_path)

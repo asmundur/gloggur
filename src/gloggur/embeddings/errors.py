@@ -4,6 +4,7 @@ Provides ``EmbeddingProviderError``, a stable dataclass exception used by all
 provider adapters, plus helpers for converting arbitrary exceptions into that
 form and formatting human-readable output for stderr.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

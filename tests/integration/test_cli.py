@@ -1820,3 +1820,97 @@ def test_cli_inspect_calibrated_threshold_reduces_low_semantic_warning_count(
         assert legacy_low == 3
         assert calibrated_low == 1
         assert calibrated_low <= int(legacy_low * 0.6)
+
+
+def test_cli_index_unchanged_run_skips_all_files_and_is_faster() -> None:
+    """F6 performance regression: unchanged-workspace re-index must skip all files.
+
+    Validates two guarantees:
+    1. Behavioral contract: every file is hash-matched and skipped (files_changed == 0,
+       skipped_files == total files from the full build). This is the mechanism that
+       produces the speedup -- no re-parsing, no re-embedding.
+    2. Timing contract: the unchanged run's ``duration_ms`` is strictly less than the
+       full-build run. We use a generous upper-bound ratio (80 %) so the assertion
+       survives slow CI runners while still catching regressions where unchanged files
+       are accidentally re-indexed.
+    """
+    runner = CliRunner()
+
+    def _make_module(name: str) -> str:
+        return (
+            f'"""Module {name} for performance regression fixture."""\n'
+            "\n"
+            f"class {name.capitalize()}Service:\n"
+            f'    """Service class for {name}."""\n'
+            "\n"
+            "    def __init__(self, value: int) -> None:\n"
+            "        self.value = value\n"
+            "\n"
+            "    def process(self) -> int:\n"
+            '        """Return processed value."""\n'
+            "        return self.value * 2\n"
+            "\n"
+            "\n"
+            f"def compute_{name}(x: int, y: int) -> int:\n"
+            f'    """Compute result for {name}."""\n'
+            "    return x + y\n"
+        )
+
+    # Build a multi-file repo large enough to make the skip contrast visible.
+    module_names = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"]
+    files = {f"{name}.py": _make_module(name) for name in module_names}
+
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(files)
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-perf-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        # --- Full build ---
+        full_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert full_result.exit_code == 0, full_result.output
+        full_payload = _parse_json_output(full_result.output)
+
+        full_scanned: int = int(full_payload["files_scanned"])
+        full_changed: int = int(full_payload["files_changed"])
+        full_duration_ms: int = int(full_payload["duration_ms"])
+
+        # All files should have been processed in the first run.
+        assert full_scanned == len(module_names), (
+            f"expected {len(module_names)} files scanned, got {full_scanned}"
+        )
+        assert full_changed == len(module_names), (
+            f"expected all {len(module_names)} files changed on first run, got {full_changed}"
+        )
+
+        # --- Unchanged re-index ---
+        unchanged_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert unchanged_result.exit_code == 0, unchanged_result.output
+        unchanged_payload = _parse_json_output(unchanged_result.output)
+
+        unchanged_scanned: int = int(unchanged_payload["files_scanned"])
+        unchanged_changed: int = int(unchanged_payload["files_changed"])
+        unchanged_skipped: int = int(unchanged_payload["skipped_files"])
+        unchanged_duration_ms: int = int(unchanged_payload["duration_ms"])
+
+        # Behavioral contract: every file must be hash-matched and skipped.
+        assert unchanged_scanned == full_scanned, (
+            f"unchanged run scanned {unchanged_scanned} files, expected {full_scanned}"
+        )
+        assert unchanged_changed == 0, (
+            f"unchanged run should have files_changed=0, got {unchanged_changed}"
+        )
+        assert unchanged_skipped == full_scanned, (
+            f"unchanged run should skip all {full_scanned} files, got {unchanged_skipped}"
+        )
+
+        # Timing contract: unchanged run must be faster than the full build.
+        # The 80 % ceiling is generous enough to survive slow CI but catches
+        # regressions where unchanged files are accidentally re-processed.
+        if full_duration_ms > 0:
+            ratio = unchanged_duration_ms / full_duration_ms
+            assert ratio < 0.80, (
+                f"unchanged re-index took {unchanged_duration_ms} ms "
+                f"({ratio:.0%} of full-build {full_duration_ms} ms); "
+                "expected < 80 % -- files may be re-indexed instead of skipped"
+            )

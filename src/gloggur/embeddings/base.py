@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterable
+from collections.abc import Iterable
 
 
 class EmbeddingProvider(ABC):
     """Abstract interface for embedding providers."""
+
     @abstractmethod
     def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""

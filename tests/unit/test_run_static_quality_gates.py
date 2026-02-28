@@ -62,3 +62,29 @@ def test_run_static_quality_gates_fails_loud_when_targets_are_missing(
     assert stages[0]["status"] == "failed"
     assert stages[1]["status"] == "not_run"
     assert stages[2]["status"] == "not_run"
+
+
+def test_static_gate_target_scope_keeps_runtime_package_in_ruff_and_black_only() -> None:
+    """Runtime package should stay in lint/format scope until mypy debt is cleared."""
+    assert static_gates.RUNTIME_PACKAGE_DIR == "src/gloggur"
+    assert static_gates.GATE_TARGETS == [
+        *static_gates.CONTROL_PLANE_TARGETS,
+        static_gates.RUNTIME_PACKAGE_DIR,
+    ]
+    assert static_gates.MYPY_TARGETS == [
+        "scripts/audit_verification_lanes.py",
+        "scripts/check_error_catalog_contract.py",
+        "scripts/run_static_quality_gates.py",
+    ]
+
+    ruff_stage, mypy_stage, black_stage = static_gates.STAGE_SPECS
+
+    assert ruff_stage.name == "ruff"
+    assert ruff_stage.command[-1] == static_gates.RUNTIME_PACKAGE_DIR
+
+    assert mypy_stage.name == "mypy"
+    assert static_gates.RUNTIME_PACKAGE_DIR not in mypy_stage.command
+    assert mypy_stage.command[-3:] == static_gates.MYPY_TARGETS
+
+    assert black_stage.name == "black"
+    assert black_stage.command[-1] == static_gates.RUNTIME_PACKAGE_DIR

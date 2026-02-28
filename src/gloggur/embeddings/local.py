@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-from pathlib import Path
 import re
-from typing import Iterable, List, Optional
+from collections.abc import Iterable
+from pathlib import Path
 
 from gloggur.embeddings.base import EmbeddingProvider
 
@@ -16,8 +16,8 @@ class LocalEmbeddingProvider(EmbeddingProvider):
     def __init__(
         self,
         model_name: str,
-        cache_dir: Optional[str] = None,
-        fallback_cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
+        fallback_cache_dir: str | None = None,
     ) -> None:
         """Configure model artifact cache and fallback marker locations."""
         self.provider = "local"
@@ -43,7 +43,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             return self._model
         try:
             from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
+        except ImportError:
             self._enable_fallback()
             self._model = None
             return None
@@ -64,7 +64,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         except OSError:
             pass
 
-    def embed_text(self, text: str) -> List[float]:
+    def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""
         model = self._load_model()
         if model is None:
@@ -72,7 +72,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         vector = model.encode([text], normalize_embeddings=True)[0]
         return vector.tolist()
 
-    def embed_batch(self, texts: Iterable[str]) -> List[List[float]]:
+    def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
         """Embed a batch of text strings."""
         model = self._load_model()
         text_list = list(texts)
@@ -88,7 +88,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             return self._fallback_dimension
         return model.get_sentence_embedding_dimension()
 
-    def _tokenized_embedding(self, text: str) -> List[float]:
+    def _tokenized_embedding(self, text: str) -> list[float]:
         """Create a deterministic embedding from token hashes."""
         tokens = self._token_pattern.findall(text.lower())
         if not tokens:
@@ -101,9 +101,9 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         norm = math.sqrt(sum(v * v for v in values)) or 1.0
         return [v / norm for v in values]
 
-    def _vector_from_seed(self, seed: bytes) -> List[float]:
+    def _vector_from_seed(self, seed: bytes) -> list[float]:
         """Generate a pseudo-random vector from a seed."""
-        values: List[float] = []
+        values: list[float] = []
         counter = 0
         while len(values) < self._fallback_dimension:
             digest = hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()

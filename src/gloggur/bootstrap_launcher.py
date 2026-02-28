@@ -12,6 +12,7 @@ Exit codes (see ``EXIT_CODES``):
   4  missing_package    – interpreter found but gloggur dependencies absent
   5  broken_environment – other runtime/import failure
 """
+
 from __future__ import annotations
 
 import json
@@ -20,9 +21,9 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
 
 PROBE_MODULE_DEFAULT = "gloggur.cli.main"
 VENV_EXEC_MODULE = "gloggur.cli.main"
@@ -51,9 +52,9 @@ class CandidateProbe:
     module: str
     exists: bool
     healthy: bool
-    reason: Optional[str] = None
-    detail: Optional[str] = None
-    returncode: Optional[int] = None
+    reason: str | None = None
+    detail: str | None = None
+    returncode: int | None = None
 
 
 @dataclass
@@ -67,19 +68,19 @@ class LaunchPlan:
     """
 
     ready: bool
-    args: List[str]
-    interpreter: Optional[str]
-    module: Optional[str]
-    candidate_type: Optional[str]
-    env: Dict[str, str]
+    args: list[str]
+    interpreter: str | None
+    module: str | None
+    candidate_type: str | None
+    env: dict[str, str]
     repo_root: str
-    probes: List[CandidateProbe]
-    error_code: Optional[str] = None
-    message: Optional[str] = None
-    remediation: Optional[List[str]] = None
+    probes: list[CandidateProbe]
+    error_code: str | None = None
+    message: str | None = None
+    remediation: list[str] | None = None
 
 
-def _is_truthy(value: Optional[str]) -> bool:
+def _is_truthy(value: str | None) -> bool:
     """Return ``True`` for environment-variable strings that represent a truthy boolean."""
     if value is None:
         return False
@@ -111,7 +112,7 @@ def _import_root(repo_root: str) -> str:
     return repo_root
 
 
-def _prepend_pythonpath(env: Dict[str, str], repo_root: str) -> Dict[str, str]:
+def _prepend_pythonpath(env: dict[str, str], repo_root: str) -> dict[str, str]:
     """Return a copy of ``env`` with the import root prepended to ``PYTHONPATH``.
 
     Deduplicates the import root so repeated calls are idempotent.
@@ -125,14 +126,14 @@ def _prepend_pythonpath(env: Dict[str, str], repo_root: str) -> Dict[str, str]:
     return result
 
 
-def _collect_required_imports(env: Dict[str, str]) -> List[str]:
+def _collect_required_imports(env: dict[str, str]) -> list[str]:
     """Parse the ``GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS`` env var into a list of module names."""
     raw = env.get("GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS", "")
     values = [item.strip() for item in raw.split(",") if item.strip()]
     return values
 
 
-def _resolve_system_candidates(env: Dict[str, str]) -> List[str]:
+def _resolve_system_candidates(env: dict[str, str]) -> list[str]:
     """Return a deduplicated list of system Python interpreter paths to probe.
 
     Reads ``GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS`` (colon-separated) when set;
@@ -140,13 +141,13 @@ def _resolve_system_candidates(env: Dict[str, str]) -> List[str]:
     bare names so the returned list contains absolute paths where available.
     """
     raw = env.get("GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS")
-    entries: List[str] = []
+    entries: list[str] = []
     if raw:
         entries = [item.strip() for item in raw.split(os.pathsep) if item.strip()]
     else:
         entries = ["python3", "python"]
 
-    resolved: List[str] = []
+    resolved: list[str] = []
     seen: set[str] = set()
     for entry in entries:
         candidate = entry
@@ -163,8 +164,11 @@ def _resolve_system_candidates(env: Dict[str, str]) -> List[str]:
     return resolved
 
 
-def _resolve_venv_python(repo_root: str, env: Dict[str, str]) -> str:
-    """Return the expected venv Python path, honouring ``GLOGGUR_PREFLIGHT_VENV_PYTHON`` overrides."""
+def _resolve_venv_python(repo_root: str, env: dict[str, str]) -> str:
+    (
+        "Return the expected venv Python path, honouring"
+        " ``GLOGGUR_PREFLIGHT_VENV_PYTHON`` overrides."
+    )
     override = env.get("GLOGGUR_PREFLIGHT_VENV_PYTHON")
     if override:
         return override
@@ -198,7 +202,7 @@ def _probe_candidate(
     interpreter: str,
     module: str,
     repo_root: str,
-    env: Dict[str, str],
+    env: dict[str, str],
     required_imports: Sequence[str],
 ) -> CandidateProbe:
     """Probe a single interpreter candidate and return a ``CandidateProbe`` result.
@@ -294,9 +298,7 @@ def _probe_candidate(
     )
     reason = _probe_failure_reason(output)
     detail_line = (
-        output.splitlines()[-1]
-        if output
-        else f"probe failed with exit code {completed.returncode}"
+        output.splitlines()[-1] if output else f"probe failed with exit code {completed.returncode}"
     )
     return CandidateProbe(
         candidate_type=candidate_type,
@@ -344,7 +346,7 @@ def _failure_message(error_code: str, repo_root: str, venv_python: str) -> str:
     return f"Detected a broken Python environment while preparing gloggur in {repo_root}."
 
 
-def _remediation_steps(error_code: str, repo_root: str) -> List[str]:
+def _remediation_steps(error_code: str, repo_root: str) -> list[str]:
     """Return an ordered list of remediation steps for the given error code."""
     bootstrap = os.path.join(repo_root, "scripts", "bootstrap_gloggur_env.sh")
     common = [
@@ -374,8 +376,8 @@ def _remediation_steps(error_code: str, repo_root: str) -> List[str]:
 
 def build_launch_plan(
     args: Sequence[str],
-    env: Optional[Dict[str, str]] = None,
-    repo_root: Optional[str] = None,
+    env: dict[str, str] | None = None,
+    repo_root: str | None = None,
 ) -> LaunchPlan:
     """Probe available Python interpreters and return a ready-or-failed ``LaunchPlan``.
 
@@ -390,7 +392,7 @@ def build_launch_plan(
     venv_exists = os.path.exists(venv_python)
     required_imports = _collect_required_imports(runtime_env)
     probe_module = runtime_env.get("GLOGGUR_PREFLIGHT_PROBE_MODULE", PROBE_MODULE_DEFAULT)
-    probes: List[CandidateProbe] = []
+    probes: list[CandidateProbe] = []
 
     venv_probe = _probe_candidate(
         candidate_type="venv",
@@ -452,12 +454,12 @@ def build_launch_plan(
     )
 
 
-def _serialize_probes(probes: Sequence[CandidateProbe]) -> List[Dict[str, object]]:
+def _serialize_probes(probes: Sequence[CandidateProbe]) -> list[dict[str, object]]:
     """Convert a sequence of ``CandidateProbe`` instances to plain dicts for JSON output."""
     return [asdict(probe) for probe in probes]
 
 
-def build_failure_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, object]:
+def build_failure_payload(plan: LaunchPlan, preflight_ms: int) -> dict[str, object]:
     """Build the structured JSON/human-readable failure payload for a failed ``LaunchPlan``.
 
     Includes error code, message, remediation steps, detected environment details,
@@ -483,7 +485,7 @@ def build_failure_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, obje
     }
 
 
-def build_ready_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, object]:
+def build_ready_payload(plan: LaunchPlan, preflight_ms: int) -> dict[str, object]:
     """Build the structured JSON/human-readable success payload for a ready ``LaunchPlan``.
 
     Includes the selected candidate type, interpreter path, module, and
@@ -506,7 +508,7 @@ def build_ready_payload(plan: LaunchPlan, preflight_ms: int) -> Dict[str, object
     }
 
 
-def _emit(payload: Dict[str, object], as_json: bool) -> None:
+def _emit(payload: dict[str, object], as_json: bool) -> None:
     """Print ``payload`` as JSON to stdout or as a human-readable summary to stderr."""
     if as_json:
         print(json.dumps(payload, indent=2))
@@ -541,7 +543,7 @@ def _execute(plan: LaunchPlan) -> None:
     os.execvpe(plan.interpreter, command, plan.env)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the gloggur preflight bootstrap launcher.
 
     Builds a launch plan, emits a ready or failure payload, and either execs

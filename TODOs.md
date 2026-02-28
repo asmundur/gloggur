@@ -419,6 +419,19 @@ Execution rule:
 - Remaining closure gap:
   - audit whether any remaining non-zero JSON paths still omit a top-level `error` block despite already carrying stable `failure_codes`.
 
+**Progress Update (2026-02-28, exhaustive audit of non-zero JSON exit paths — gaps closed)**
+- Performed an exhaustive audit of every non-zero JSON exit path in `src/gloggur/cli/main.py`:
+  - Global exception handler paths: `CLIContractError` (line ~341), `click.ClickException` (line ~367), `StorageIOError` (line ~373), `EmbeddingProviderError` (line ~378) — all emit top-level `error` block + `failure_codes`.
+  - `index` repo failure path (line ~2060): `_attach_primary_error_from_failure_contract()` adds `error.type=index_failure` — compliant.
+  - `index` single-file failure path (line ~2178): same helper — compliant.
+  - `search` grounding-validation failure path (line ~2609): explicit `error` block with `type=cli_contract_error` — compliant.
+  - `inspect` failure path (line ~2988): `_attach_primary_error_from_failure_contract()` adds `error.type=inspect_failure` — compliant.
+  - `watch start` foreground failure path (line ~3546): same helper, `error.type=watch_failure` — compliant.
+  - `status`, `clear-cache`, `watch stop`, `watch status`, `watch init`, `artifact publish/validate/restore` — all exit via code 0 on normal completion or raise exceptions caught by the global handler; no direct non-zero JSON exits outside the handler.
+- Conclusion: **all 9 non-zero JSON exit paths are R8-compliant**. The two previously-stated remaining gaps (top-level `error` audit; normalization propagation to non-watch-start paths) are now verified closed.
+- Remaining closure gap:
+  - none from the R8 error-block audit; the CI evidence link for a hosted verification run remains the only uncollected item.
+
 ---
 
 ## R9 - Packaging and Distribution Hardening
@@ -702,6 +715,27 @@ Execution rule:
 - Remaining closure gaps:
   - expand the static gate beyond the verification control plane to the wider runtime package after the existing repo-wide `ruff`/`mypy`/`black` debt is intentionally reduced.
   - full `mypy src` and broader repo formatting/lint closure are still outstanding; this slice establishes the first truthful required-lane gate rather than masking the wider debt.
+
+**Progress Update (2026-02-28, widened required-lane static gate to runtime lint/format scope)**
+- Expanded `scripts/run_static_quality_gates.py` so the required CI lane now gates:
+  - `ruff check` on the verification control-plane files **plus** `src/gloggur`.
+  - `black --check` on the verification control-plane files **plus** `src/gloggur`.
+  - `mypy` remains intentionally narrow on the three verification scripts because runtime-package type debt is still open.
+- Added regression guards so this scope cannot silently drift:
+  - `tests/unit/test_run_static_quality_gates.py`
+    - `test_static_gate_target_scope_keeps_runtime_package_in_ruff_and_black_only` asserts:
+      - `src/gloggur` remains in `GATE_TARGETS`,
+      - `src/gloggur` stays excluded from `MYPY_TARGETS` until the type debt is intentionally retired,
+      - `ruff` and `black` stage commands continue to include the runtime package.
+  - `tests/integration/test_run_static_quality_gates_harness.py`
+    - now asserts the emitted JSON `target_scope` includes `src/gloggur`,
+    - and verifies the live runner command payload includes `src/gloggur` for `ruff`/`black` but not `mypy`.
+- Local verification evidence:
+  - `source ./.venv/bin/activate && ./.venv/bin/python scripts/run_static_quality_gates.py --format json` (`ok: true`; `ruff`, `mypy`, and `black` all passed with `target_scope` including `src/gloggur`)
+  - `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_run_static_quality_gates.py tests/unit/test_verification_workflow.py tests/integration/test_run_static_quality_gates_harness.py -q` (`16 passed`)
+- Remaining closure gaps:
+  - add hosted CI evidence for the widened required-lane gate.
+  - intentionally reduce runtime-package `mypy` debt so the required lane can eventually enforce `mypy src/gloggur` instead of the current script-only subset.
 
 ---
 
@@ -1642,6 +1676,19 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 - Verified:
   - `.venv/bin/python -m pytest -n 0 tests/unit/test_cli_watch.py -q` (24 passed)
   - `.venv/bin/python -m pytest -n 0 tests/integration/test_watch_cli_lifecycle_integration.py -q` (2 passed)
+
+**Progress Update (2026-02-28, performance regression test — unchanged-run speedup)**
+- Closed the final Tests Required gap for F6: added `test_cli_index_unchanged_run_skips_all_files_and_is_faster` in `tests/integration/test_cli.py`.
+- Test structure:
+  - Creates a 7-file Python fixture repo (each file has a class + function with docstrings).
+  - Runs a full cold index; asserts `files_changed == 7` and `files_scanned == 7`.
+  - Re-runs index with no file changes.
+  - **Behavioral contract**: asserts `files_changed == 0` and `skipped_files == 7` — proving the hash-match skip mechanism is engaged.
+  - **Timing contract**: asserts `unchanged_duration_ms / full_duration_ms < 0.80` — the unchanged run must complete in less than 80 % of the full-build wall time, catching regressions where unchanged files are accidentally re-indexed.
+- Verification evidence:
+  - `source ./.venv/bin/activate && ./.venv/bin/python -m pytest tests/integration/test_cli.py::test_cli_index_unchanged_run_skips_all_files_and_is_faster -q -n 0` (`1 passed` in 1.50 s)
+- Remaining gap:
+  - none for F6 — all Tests Required items are now covered; all acceptance criteria were already met.
 
 ---
 

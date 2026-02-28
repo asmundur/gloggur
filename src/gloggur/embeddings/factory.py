@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional, Type
-
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.local import LocalEmbeddingProvider
@@ -27,7 +25,7 @@ def create_embedding_provider(config: GloggurConfig) -> EmbeddingProvider:
             fallback_cache_dir=config.cache_dir,
         )
     if provider == "openai":
-        provider_cls: Optional[Type[EmbeddingProvider]] = OpenAIEmbeddingProvider
+        provider_cls: type[EmbeddingProvider] | None = OpenAIEmbeddingProvider
         if provider_cls is None:
             try:
                 from gloggur.embeddings.openai import OpenAIEmbeddingProvider as provider_cls

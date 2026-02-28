@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-import re
-from dataclasses import dataclass, field
 import math
-from typing import Dict, Iterable, List, Optional, Tuple
+import re
+from collections.abc import Iterable
+from dataclasses import dataclass
 
-from gloggur.models import Symbol
 from gloggur.embeddings.base import EmbeddingProvider
+from gloggur.models import Symbol
 
 logger = logging.getLogger(__name__)
 
@@ -15,23 +15,24 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DocstringAuditReport:
     """Audit report for a single symbol (warnings and score)."""
+
     symbol_id: str
-    warnings: List[str]
-    semantic_score: Optional[float] = None
-    score_metadata: Optional[Dict[str, object]] = None
+    warnings: list[str]
+    semantic_score: float | None = None
+    score_metadata: dict[str, object] | None = None
 
 
 def audit_docstrings(
-    symbols: List[Symbol],
+    symbols: list[Symbol],
     *,
-    code_texts: Optional[Dict[str, str]] = None,
-    embedding_provider: Optional[EmbeddingProvider] = None,
-    semantic_threshold: Optional[float] = 0.2,
+    code_texts: dict[str, str] | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
+    semantic_threshold: float | None = 0.2,
     semantic_min_chars: int = 0,
     semantic_max_chars: int = 4000,
     semantic_min_code_chars: int = 0,
-    kind_thresholds: Optional[Dict[str, float]] = None,
-) -> List[DocstringAuditReport]:
+    kind_thresholds: dict[str, float] | None = None,
+) -> list[DocstringAuditReport]:
     """Audit docstrings and compute semantic similarity scores.
 
     Args:
@@ -60,7 +61,7 @@ def audit_docstrings(
         max_chars=semantic_max_chars,
         min_code_chars=semantic_min_code_chars,
     )
-    reports: List[DocstringAuditReport] = []
+    reports: list[DocstringAuditReport] = []
     for symbol in symbols:
         score = semantic_scores.get(symbol.id)
         skip_reason = skip_reasons.get(symbol.id)
@@ -83,19 +84,17 @@ def audit_docstrings(
             if warnings:
                 logger.debug("Docstring warnings for %s: %s", symbol.id, warnings)
     warning_count = sum(1 for report in reports if report.warnings)
-    logger.info(
-        "Docstring audit completed (symbols=%d, warnings=%d)", len(symbols), warning_count
-    )
+    logger.info("Docstring audit completed (symbols=%d, warnings=%d)", len(symbols), warning_count)
     return reports
 
 
 def _assess_symbol(
     symbol: Symbol,
-    semantic_score: Optional[float],
-    semantic_threshold: Optional[float],
-    kind_thresholds: Optional[Dict[str, float]] = None,
-    skip_reason: Optional[str] = None,
-) -> Tuple[List[str], Optional[Dict[str, object]]]:
+    semantic_score: float | None,
+    semantic_threshold: float | None,
+    kind_thresholds: dict[str, float] | None = None,
+    skip_reason: str | None = None,
+) -> tuple[list[str], dict[str, object] | None]:
     """Return (warnings, score_metadata) for a symbol based on docstring content.
 
     ``score_metadata`` is ``None`` for symbol kinds that are not inspected.
@@ -107,7 +106,7 @@ def _assess_symbol(
     * ``score_value`` — the raw cosine similarity (``None`` when not scored).
     * ``skip_reason`` — why scoring was skipped, if applicable.
     """
-    warnings: List[str] = []
+    warnings: list[str] = []
     if symbol.kind not in {"function", "class", "interface"}:
         return warnings, None
     if not symbol.docstring:
@@ -119,7 +118,7 @@ def _assess_symbol(
     if kind_thresholds and symbol.kind in kind_thresholds:
         effective_threshold = kind_thresholds[symbol.kind]
 
-    score_metadata: Dict[str, object] = {
+    score_metadata: dict[str, object] = {
         "symbol_kind": symbol.kind,
         "threshold_applied": effective_threshold,
         "scored": semantic_score is not None,
@@ -138,14 +137,14 @@ def _assess_symbol(
 
 
 def _compute_semantic_scores(
-    symbols: List[Symbol],
+    symbols: list[Symbol],
     *,
-    code_texts: Optional[Dict[str, str]],
-    embedding_provider: Optional[EmbeddingProvider],
+    code_texts: dict[str, str] | None,
+    embedding_provider: EmbeddingProvider | None,
     min_chars: int,
     max_chars: int,
     min_code_chars: int = 0,
-) -> Tuple[Dict[str, float], Dict[str, str]]:
+) -> tuple[dict[str, float], dict[str, str]]:
     """Compute docstring-to-code semantic similarity scores via embeddings.
 
     Returns a tuple of:
@@ -155,16 +154,14 @@ def _compute_semantic_scores(
     """
     if not embedding_provider or not code_texts:
         return {}, {}
-    pairs: List[Tuple[str, str, str, Optional[str]]] = []
-    skip_reasons: Dict[str, str] = {}
+    pairs: list[tuple[str, str, str, str | None]] = []
+    skip_reasons: dict[str, str] = {}
     for symbol in symbols:
         if not symbol.docstring:
             continue
         docstring_len = len(symbol.docstring.strip())
         if min_chars > 0 and docstring_len < min_chars:
-            skip_reasons[symbol.id] = (
-                f"docstring_too_short (len={docstring_len} < min={min_chars})"
-            )
+            skip_reasons[symbol.id] = f"docstring_too_short (len={docstring_len} < min={min_chars})"
             continue
         code_text = code_texts.get(symbol.id)
         if not code_text:
@@ -174,9 +171,7 @@ def _compute_semantic_scores(
             continue
         cleaned_len = len(cleaned.strip())
         if min_chars > 0 and cleaned_len < min_chars:
-            skip_reasons[symbol.id] = (
-                f"code_body_too_short (len={cleaned_len} < min={min_chars})"
-            )
+            skip_reasons[symbol.id] = f"code_body_too_short (len={cleaned_len} < min={min_chars})"
             continue
         if min_code_chars > 0 and cleaned_len < min_code_chars:
             skip_reasons[symbol.id] = (
@@ -186,12 +181,12 @@ def _compute_semantic_scores(
         pairs.append((symbol.id, symbol.docstring, cleaned, symbol.language))
     if not pairs:
         return {}, skip_reasons
-    texts: List[str] = []
+    texts: list[str] = []
     for _, docstring, code_text, _ in pairs:
         texts.append(docstring)
         texts.append(code_text)
     vectors = embedding_provider.embed_batch(texts)
-    scores: Dict[str, float] = {}
+    scores: dict[str, float] = {}
     for idx, (symbol_id, _, _, _) in enumerate(pairs):
         doc_vector = vectors[2 * idx]
         code_vector = vectors[2 * idx + 1]
@@ -201,8 +196,8 @@ def _compute_semantic_scores(
 
 def _prepare_code_text(
     code_text: str,
-    language: Optional[str],
-    docstring: Optional[str],
+    language: str | None,
+    docstring: str | None,
     max_chars: int,
 ) -> str:
     """Prepare code text for similarity scoring (strip docstring, trim)."""
@@ -233,7 +228,7 @@ def _cosine_similarity(vector_a: Iterable[float], vector_b: Iterable[float]) -> 
     dot = 0.0
     norm_a = 0.0
     norm_b = 0.0
-    for a, b in zip(vector_a, vector_b):
+    for a, b in zip(vector_a, vector_b, strict=True):
         dot += a * b
         norm_a += a * a
         norm_b += b * b

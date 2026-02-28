@@ -4,13 +4,13 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
-from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
 from gloggur.io_failures import wrap_io_error
+from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
 
 SCHEMA_VERSION_KEY = "schema_version"
 INDEX_PROFILE_KEY = "index_profile"
@@ -58,6 +58,7 @@ class _ResetPlan:
 @dataclass
 class CacheConfig:
     """Configuration for the on-disk cache (cache dir and db path)."""
+
     cache_dir: str
 
     @property
@@ -72,7 +73,7 @@ class CacheManager:
     def __init__(self, config: CacheConfig) -> None:
         """Initialize the cache and ensure the database exists."""
         self.config = config
-        self.last_reset_reason: Optional[str] = None
+        self.last_reset_reason: str | None = None
         try:
             os.makedirs(self.config.cache_dir, exist_ok=True)
         except OSError as exc:
@@ -147,8 +148,7 @@ class CacheManager:
         if reset_plan:
             self._reset_database(reset_plan)
         with self._connect() as conn:
-            conn.executescript(
-                """
+            conn.executescript("""
                 CREATE TABLE IF NOT EXISTS files (
                     path TEXT PRIMARY KEY,
                     language TEXT,
@@ -185,8 +185,7 @@ class CacheManager:
                     content_hash TEXT NOT NULL,
                     last_audited TEXT NOT NULL
                 );
-                """
-            )
+                """)
             conn.execute(
                 """
                 INSERT INTO meta (key, value) VALUES (?, ?)
@@ -195,7 +194,7 @@ class CacheManager:
                 (SCHEMA_VERSION_KEY, CACHE_SCHEMA_VERSION),
             )
 
-    def get_file_metadata(self, path: str) -> Optional[FileMetadata]:
+    def get_file_metadata(self, path: str) -> FileMetadata | None:
         """Return cached metadata for a file."""
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM files WHERE path = ?", (path,)).fetchone()
@@ -272,14 +271,16 @@ class CacheManager:
                         symbol.signature,
                         symbol.docstring,
                         symbol.body_hash,
-                        json.dumps(symbol.embedding_vector)
-                        if symbol.embedding_vector is not None
-                        else None,
+                        (
+                            json.dumps(symbol.embedding_vector)
+                            if symbol.embedding_vector is not None
+                            else None
+                        ),
                         symbol.language,
                     ),
                 )
 
-    def list_symbols(self) -> List[Symbol]:
+    def list_symbols(self) -> list[Symbol]:
         """Return all cached symbols."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM symbols").fetchall()
@@ -291,13 +292,13 @@ class CacheManager:
             row = conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()
             return int(row["count"] if row else 0)
 
-    def list_file_paths(self) -> List[str]:
+    def list_file_paths(self) -> list[str]:
         """Return all indexed file paths in deterministic order."""
         with self._connect() as conn:
             rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
             return [str(row["path"]) for row in rows]
 
-    def list_symbols_for_file(self, path: str) -> List[Symbol]:
+    def list_symbols_for_file(self, path: str) -> list[Symbol]:
         """Return cached symbols for a file path."""
         with self._connect() as conn:
             rows = conn.execute(
@@ -305,7 +306,7 @@ class CacheManager:
             ).fetchall()
             return [self._row_to_symbol(row) for row in rows]
 
-    def get_index_metadata(self) -> Optional[IndexMetadata]:
+    def get_index_metadata(self) -> IndexMetadata | None:
         """Return index-level metadata, if present."""
         with self._connect() as conn:
             row = conn.execute("SELECT value FROM metadata WHERE key = ?", ("index",)).fetchone()
@@ -330,12 +331,12 @@ class CacheManager:
         with self._connect() as conn:
             conn.execute("DELETE FROM metadata WHERE key = ?", ("index",))
 
-    def get_schema_version(self) -> Optional[str]:
+    def get_schema_version(self) -> str | None:
         """Return the cache schema version marker."""
         with self._connect() as conn:
             return self._read_meta_value(conn, SCHEMA_VERSION_KEY)
 
-    def get_index_profile(self) -> Optional[str]:
+    def get_index_profile(self) -> str | None:
         """Return the cached index profile marker."""
         with self._connect() as conn:
             return self._read_meta_value(conn, INDEX_PROFILE_KEY)
@@ -351,7 +352,7 @@ class CacheManager:
                 (INDEX_PROFILE_KEY, profile),
             )
 
-    def get_last_success_resume_fingerprint(self) -> Optional[str]:
+    def get_last_success_resume_fingerprint(self) -> str | None:
         """Return the cached last-success resume fingerprint marker."""
         with self._connect() as conn:
             return self._read_meta_value(conn, LAST_SUCCESS_RESUME_FINGERPRINT_KEY)
@@ -367,7 +368,7 @@ class CacheManager:
                 (LAST_SUCCESS_RESUME_FINGERPRINT_KEY, fingerprint),
             )
 
-    def get_last_success_resume_at(self) -> Optional[str]:
+    def get_last_success_resume_at(self) -> str | None:
         """Return the last-success resume timestamp marker."""
         with self._connect() as conn:
             return self._read_meta_value(conn, LAST_SUCCESS_RESUME_AT_KEY)
@@ -383,7 +384,7 @@ class CacheManager:
                 (LAST_SUCCESS_RESUME_AT_KEY, timestamp),
             )
 
-    def get_last_success_tool_version(self) -> Optional[str]:
+    def get_last_success_tool_version(self) -> str | None:
         """Return the last-success tool-version marker."""
         with self._connect() as conn:
             return self._read_meta_value(conn, LAST_SUCCESS_TOOL_VERSION_KEY)
@@ -399,7 +400,7 @@ class CacheManager:
                 (LAST_SUCCESS_TOOL_VERSION_KEY, version),
             )
 
-    def set_audit_warnings(self, symbol_id: str, warnings: List[str]) -> None:
+    def set_audit_warnings(self, symbol_id: str, warnings: list[str]) -> None:
         """Store audit warnings for a symbol."""
         payload = self._serialize_audit_payload(warnings)
         with self._connect() as conn:
@@ -415,9 +416,9 @@ class CacheManager:
         self,
         symbol_id: str,
         *,
-        warnings: List[str],
-        semantic_score: Optional[float] = None,
-        score_metadata: Optional[Dict[str, object]] = None,
+        warnings: list[str],
+        semantic_score: float | None = None,
+        score_metadata: dict[str, object] | None = None,
     ) -> None:
         """Store a structured audit report for a symbol."""
         payload = self._serialize_audit_payload(
@@ -434,7 +435,7 @@ class CacheManager:
                 (symbol_id, payload),
             )
 
-    def get_audit_warnings(self, symbol_id: str) -> List[str]:
+    def get_audit_warnings(self, symbol_id: str) -> list[str]:
         """Fetch audit warnings for a symbol."""
         with self._connect() as conn:
             row = conn.execute(
@@ -448,14 +449,14 @@ class CacheManager:
     def list_audit_reports_for_file(
         self,
         path: str,
-    ) -> List[Tuple[str, List[str], Optional[float], Optional[Dict[str, object]]]]:
+    ) -> list[tuple[str, list[str], float | None, dict[str, object] | None]]:
         """Fetch cached audit report payloads for one file path."""
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT symbol_id, warnings FROM audits WHERE symbol_id LIKE ? ORDER BY symbol_id",
                 (f"{path}:%",),
             ).fetchall()
-            reports: List[Tuple[str, List[str], Optional[float], Optional[Dict[str, object]]]] = []
+            reports: list[tuple[str, list[str], float | None, dict[str, object] | None]] = []
             for row in rows:
                 warnings, semantic_score, score_metadata = self._deserialize_audit_payload(
                     row["warnings"]
@@ -463,7 +464,7 @@ class CacheManager:
                 reports.append((row["symbol_id"], warnings, semantic_score, score_metadata))
             return reports
 
-    def list_audit_warnings_for_file(self, path: str) -> List[tuple[str, List[str]]]:
+    def list_audit_warnings_for_file(self, path: str) -> list[tuple[str, list[str]]]:
         """Fetch cached audit warnings for all symbols belonging to one file path."""
         return [
             (symbol_id, warnings)
@@ -475,12 +476,10 @@ class CacheManager:
         with self._connect() as conn:
             conn.execute("DELETE FROM audits WHERE symbol_id LIKE ?", (f"{path}:%",))
 
-    def get_audit_file_metadata(self, path: str) -> Optional[AuditFileMetadata]:
+    def get_audit_file_metadata(self, path: str) -> AuditFileMetadata | None:
         """Return cached audit metadata for a file."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM audit_files WHERE path = ?", (path,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM audit_files WHERE path = ?", (path,)).fetchone()
             if not row:
                 return None
             return AuditFileMetadata(
@@ -510,15 +509,13 @@ class CacheManager:
     def clear(self) -> None:
         """Clear all cached data."""
         with self._connect() as conn:
-            conn.executescript(
-                """
+            conn.executescript("""
                 DELETE FROM audits;
                 DELETE FROM audit_files;
                 DELETE FROM symbols;
                 DELETE FROM files;
                 DELETE FROM metadata;
-                """
-            )
+                """)
             conn.execute(
                 """
                 INSERT INTO meta (key, value) VALUES (?, ?)
@@ -540,7 +537,7 @@ class CacheManager:
                 (LAST_SUCCESS_TOOL_VERSION_KEY,),
             )
 
-    def _schema_reset_plan(self) -> Optional[_ResetPlan]:
+    def _schema_reset_plan(self) -> _ResetPlan | None:
         """Return a reset plan if schema is incompatible or DB corruption is detected."""
         if not os.path.exists(self.config.db_path):
             return None
@@ -562,9 +559,7 @@ class CacheManager:
                 existing_tables = self._list_tables(conn)
                 legacy_tables = sorted(existing_tables & LEGACY_TABLES)
                 if legacy_tables:
-                    return _ResetPlan(
-                        reason=f"legacy tables present ({', '.join(legacy_tables)})"
-                    )
+                    return _ResetPlan(reason=f"legacy tables present ({', '.join(legacy_tables)})")
 
                 missing_tables = sorted(REQUIRED_TABLES - existing_tables)
                 if missing_tables:
@@ -619,11 +614,9 @@ class CacheManager:
             "Cache schema changed; rebuilding cache at "
             f"{self.config.db_path} ({reset_plan.reason}).\n"
         )
-        sys.stderr.write(
-            rebuild_notice
-        )
+        sys.stderr.write(rebuild_notice)
 
-    def _integrity_issue(self, conn: sqlite3.Connection) -> Optional[str]:
+    def _integrity_issue(self, conn: sqlite3.Connection) -> str | None:
         """Return an integrity issue detail if `PRAGMA integrity_check` reports corruption."""
         rows = conn.execute("PRAGMA integrity_check(1)").fetchall()
         messages = [str(row[0]) for row in rows if row and row[0] is not None]
@@ -665,7 +658,7 @@ class CacheManager:
                         path=path,
                     ) from exc
 
-    def _quarantine_or_remove(self, path: str, timestamp: str) -> Optional[str]:
+    def _quarantine_or_remove(self, path: str, timestamp: str) -> str | None:
         """Move an artifact aside with a .corrupt suffix; fall back to deletion if rename fails."""
         if not os.path.exists(path):
             return None
@@ -693,13 +686,11 @@ class CacheManager:
 
     def _list_tables(self, conn: sqlite3.Connection) -> set[str]:
         """Return all non-internal table names in the SQLite database."""
-        rows = conn.execute(
-            """
+        rows = conn.execute("""
             SELECT name
             FROM sqlite_master
             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-            """
-        ).fetchall()
+            """).fetchall()
         return {str(row[0]) for row in rows}
 
     def _list_columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
@@ -707,11 +698,11 @@ class CacheManager:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return {str(row[1]) for row in rows}
 
-    def _read_schema_version(self, conn: sqlite3.Connection) -> Optional[str]:
+    def _read_schema_version(self, conn: sqlite3.Connection) -> str | None:
         """Read the schema version from the meta table."""
         return self._read_meta_value(conn, SCHEMA_VERSION_KEY)
 
-    def _read_meta_value(self, conn: sqlite3.Connection, key: str) -> Optional[str]:
+    def _read_meta_value(self, conn: sqlite3.Connection, key: str) -> str | None:
         """Read a metadata value from the meta table."""
         row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         if not row:
@@ -720,10 +711,10 @@ class CacheManager:
 
     @staticmethod
     def _serialize_audit_payload(
-        warnings: List[str],
+        warnings: list[str],
         *,
-        semantic_score: Optional[float] = None,
-        score_metadata: Optional[Dict[str, object]] = None,
+        semantic_score: float | None = None,
+        score_metadata: dict[str, object] | None = None,
     ) -> str:
         """Serialize legacy warning-only or structured audit report payloads."""
         if semantic_score is None and score_metadata is None:
@@ -739,14 +730,16 @@ class CacheManager:
     @staticmethod
     def _deserialize_audit_payload(
         raw_payload: str,
-    ) -> Tuple[List[str], Optional[float], Optional[Dict[str, object]]]:
+    ) -> tuple[list[str], float | None, dict[str, object] | None]:
         """Deserialize audit payload rows with backward compatibility for legacy lists."""
         payload = json.loads(raw_payload)
         if isinstance(payload, list):
             return [str(item) for item in payload], None, None
         if isinstance(payload, dict):
             raw_warnings = payload.get("warnings", [])
-            warnings = [str(item) for item in raw_warnings] if isinstance(raw_warnings, list) else []
+            warnings = (
+                [str(item) for item in raw_warnings] if isinstance(raw_warnings, list) else []
+            )
             raw_score = payload.get("semantic_score")
             semantic_score = float(raw_score) if isinstance(raw_score, (int, float)) else None
             raw_metadata = payload.get("score_metadata")
@@ -754,7 +747,7 @@ class CacheManager:
             return warnings, semantic_score, score_metadata
         raise ValueError("audit payload must be a list or object")
 
-    def _list_symbol_ids(self, conn: sqlite3.Connection, path: str) -> List[str]:
+    def _list_symbol_ids(self, conn: sqlite3.Connection, path: str) -> list[str]:
         """Return symbol ids for a file (internal helper)."""
         rows = conn.execute("SELECT id FROM symbols WHERE file_path = ?", (path,)).fetchall()
         return [row["id"] for row in rows]

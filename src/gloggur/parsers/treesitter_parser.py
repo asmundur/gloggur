@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional
 
 from tree_sitter import Node, Tree
 from tree_sitter_language_pack import get_parser
@@ -14,13 +14,14 @@ from gloggur.parsers.base import ParsedFile, Parser
 @dataclass(frozen=True)
 class LanguageSpec:
     """Tree-sitter node type configuration for functions/classes/interfaces."""
+
     name: str
-    function_nodes: List[str]
-    class_nodes: List[str]
-    interface_nodes: List[str]
+    function_nodes: list[str]
+    class_nodes: list[str]
+    interface_nodes: list[str]
 
 
-_LANGUAGE_SPECS: Dict[str, LanguageSpec] = {
+_LANGUAGE_SPECS: dict[str, LanguageSpec] = {
     "python": LanguageSpec("python", ["function_definition"], ["class_definition"], []),
     "javascript": LanguageSpec(
         "javascript",
@@ -63,6 +64,7 @@ _LANGUAGE_SPECS: Dict[str, LanguageSpec] = {
 
 class TreeSitterParser(Parser):
     """Tree-sitter parser that extracts Symbol objects from source code."""
+
     def __init__(self, language: str) -> None:
         """Initialize a tree-sitter parser for the given language."""
         if language not in _LANGUAGE_SPECS:
@@ -76,14 +78,14 @@ class TreeSitterParser(Parser):
         symbols = self.extract_symbols(path, source)
         return ParsedFile(path=path, language=self.language, source=source, symbols=symbols)
 
-    def parse_with_edit(self, old_tree: Optional[Tree], new_source: str) -> Tree:
+    def parse_with_edit(self, old_tree: Tree | None, new_source: str) -> Tree:
         """Parse source with optional incremental edit support."""
         return self.parser.parse(bytes(new_source, "utf8"), old_tree)
 
-    def extract_symbols(self, path: str, source: str) -> List[Symbol]:
+    def extract_symbols(self, path: str, source: str) -> list[Symbol]:
         """Extract function/class/interface symbols from the AST."""
         tree = self.parser.parse(bytes(source, "utf8"))
-        symbols: List[Symbol] = []
+        symbols: list[Symbol] = []
         for node in self._walk(tree.root_node):
             if not node.is_named:
                 continue
@@ -96,7 +98,7 @@ class TreeSitterParser(Parser):
         """Return the single language supported by this parser."""
         return [self.language]
 
-    def _symbol_from_node(self, node: Node, path: str, source: str) -> Optional[Symbol]:
+    def _symbol_from_node(self, node: Node, path: str, source: str) -> Symbol | None:
         """Convert a matching AST node into a Symbol with metadata."""
         kind = self._symbol_kind(node)
         if not kind:
@@ -122,7 +124,7 @@ class TreeSitterParser(Parser):
             language=self.language,
         )
 
-    def _symbol_kind(self, node: Node) -> Optional[str]:
+    def _symbol_kind(self, node: Node) -> str | None:
         """Classify a node as function, class, or interface."""
         if node.type in self.spec.function_nodes:
             return "function"
@@ -132,20 +134,20 @@ class TreeSitterParser(Parser):
             return "interface"
         return None
 
-    def _extract_name(self, node: Node, source: str) -> Optional[str]:
+    def _extract_name(self, node: Node, source: str) -> str | None:
         """Extract the symbol name from a node."""
         for child in node.children:
             if child.type in {"identifier", "type_identifier", "name", "property_identifier"}:
                 return source[child.start_byte : child.end_byte]
         return None
 
-    def _extract_signature(self, node: Node, source: str) -> Optional[str]:
+    def _extract_signature(self, node: Node, source: str) -> str | None:
         """Extract the first-line signature for a symbol."""
         text = source[node.start_byte : node.end_byte]
         first_line = text.splitlines()[0] if text else ""
         return first_line.strip() or None
 
-    def _extract_docstring(self, node: Node, source: str) -> Optional[str]:
+    def _extract_docstring(self, node: Node, source: str) -> str | None:
         """Extract a docstring or nearby comment for a symbol."""
         if self.language == "python":
             body = None

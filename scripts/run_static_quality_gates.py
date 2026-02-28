@@ -9,13 +9,28 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GATE_TARGETS = [
+
+# Verification control-plane files — all three gates (ruff, mypy, black) apply.
+CONTROL_PLANE_TARGETS = [
     "scripts/audit_verification_lanes.py",
     "scripts/check_error_catalog_contract.py",
     "scripts/run_static_quality_gates.py",
     "tests/unit/test_audit_verification_lanes.py",
     "tests/unit/test_verification_workflow.py",
     "tests/unit/test_run_static_quality_gates.py",
+]
+
+# Runtime package — ruff and black are clean; mypy has outstanding debt.
+RUNTIME_PACKAGE_DIR = "src/gloggur"
+
+# Combined targets used for ruff and black (control-plane + runtime package).
+GATE_TARGETS = [*CONTROL_PLANE_TARGETS, RUNTIME_PACKAGE_DIR]
+
+# Mypy targets remain narrower until runtime mypy debt is cleared.
+MYPY_TARGETS = [
+    "scripts/audit_verification_lanes.py",
+    "scripts/check_error_catalog_contract.py",
+    "scripts/run_static_quality_gates.py",
 ]
 
 
@@ -73,14 +88,7 @@ STAGE_SPECS = [
         remediation=(
             "Run the emitted mypy command locally and fix typing issues in the gated files."
         ),
-        command=[
-            sys.executable,
-            "-m",
-            "mypy",
-            "scripts/audit_verification_lanes.py",
-            "scripts/check_error_catalog_contract.py",
-            "scripts/run_static_quality_gates.py",
-        ],
+        command=[sys.executable, "-m", "mypy", *MYPY_TARGETS],
     ),
     StageSpec(
         name="black",
@@ -164,7 +172,7 @@ def _execute_stage_plan(specs: list[StageSpec]) -> tuple[list[StageResult], Stag
 
 
 def run_static_quality_gates() -> dict[str, object]:
-    """Run the verification control-plane static gates and return structured results."""
+    """Run the required-lane static gates and return structured results."""
     missing_targets = _missing_targets()
     if missing_targets:
         return {
@@ -239,7 +247,7 @@ def run_static_quality_gates() -> dict[str, object]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments for the static-quality gate runner."""
     parser = argparse.ArgumentParser(
-        description="Run fail-closed static quality gates for verification control-plane files."
+        description=("Run fail-closed static quality gates for the required verification lane.")
     )
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     return parser.parse_args(argv)

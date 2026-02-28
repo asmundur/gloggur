@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -16,9 +15,9 @@ class GloggurConfig:
     local_embedding_model: str = "microsoft/codebert-base"
     openai_embedding_model: str = "text-embedding-3-large"
     gemini_embedding_model: str = "gemini-embedding-001"
-    gemini_api_key: Optional[str] = None
+    gemini_api_key: str | None = None
     cache_dir: str = ".gloggur-cache"
-    model_cache_dir: Optional[str] = None
+    model_cache_dir: str | None = None
     watch_enabled: bool = False
     watch_path: str = "."
     watch_debounce_ms: int = 300
@@ -41,13 +40,13 @@ class GloggurConfig:
     # ``docstring_semantic_threshold`` is used for every kind.
     # Classes and interfaces carry deliberately high-level docstrings; their
     # calibrated threshold is half the global value.
-    docstring_semantic_kind_thresholds: Optional[Dict[str, float]] = field(
+    docstring_semantic_kind_thresholds: dict[str, float] | None = field(
         default_factory=lambda: {"class": 0.05, "interface": 0.05}
     )
-    supported_extensions: List[str] = field(
+    supported_extensions: list[str] = field(
         default_factory=lambda: [".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java"]
     )
-    excluded_dirs: List[str] = field(
+    excluded_dirs: list[str] = field(
         default_factory=lambda: [
             ".git",
             "node_modules",
@@ -77,11 +76,11 @@ class GloggurConfig:
     @classmethod
     def load(
         cls,
-        path: Optional[str] = None,
-        overrides: Optional[Dict[str, object]] = None,
-    ) -> "GloggurConfig":
+        path: str | None = None,
+        overrides: dict[str, object] | None = None,
+    ) -> GloggurConfig:
         """Load config from file/env (yaml/json) and apply overrides."""
-        data: Dict[str, object] = {}
+        data: dict[str, object] = {}
         if path:
             data.update(cls._load_file(path))
         else:
@@ -95,20 +94,20 @@ class GloggurConfig:
         return cls(**data)
 
     @staticmethod
-    def _load_file(path: str) -> Dict[str, object]:
+    def _load_file(path: str) -> dict[str, object]:
         """Load config values from a JSON or YAML file path."""
-        with open(path, "r", encoding="utf8") as handle:
+        with open(path, encoding="utf8") as handle:
             if path.endswith((".yaml", ".yml")):
                 return yaml.safe_load(handle) or {}
             return json.load(handle)
 
     @staticmethod
-    def _load_dotenv(path: str = ".env") -> Dict[str, str]:
+    def _load_dotenv(path: str = ".env") -> dict[str, str]:
         """Load dotenv-style key/value pairs from ``path`` when present."""
         if not os.path.exists(path):
             return {}
-        data: Dict[str, str] = {}
-        with open(path, "r", encoding="utf8") as handle:
+        data: dict[str, str] = {}
+        with open(path, encoding="utf8") as handle:
             for raw_line in handle:
                 line = raw_line.strip()
                 if not line or line.startswith("#"):
@@ -122,30 +121,26 @@ class GloggurConfig:
                 value = value.strip()
                 if not key or any(char.isspace() for char in key):
                     continue
-                if (
-                    len(value) >= 2
-                    and value[0] in {"'", '"'}
-                    and value[-1] == value[0]
-                ):
+                if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
                     value = value[1:-1]
                 data[key] = value
         return data
 
     @staticmethod
-    def _load_env() -> Dict[str, object]:
+    def _load_env() -> dict[str, object]:
         """Load config values from GLOGGUR_* environment variables."""
-        data: Dict[str, object] = {}
-        env_values: Dict[str, str] = GloggurConfig._load_dotenv()
+        data: dict[str, object] = {}
+        env_values: dict[str, str] = GloggurConfig._load_dotenv()
         env_values.update(os.environ)
 
-        def _env_value(name: str) -> Optional[str]:
+        def _env_value(name: str) -> str | None:
             """Return a non-empty environment value or None when unset/blank."""
             value = env_values.get(name)
             if value is None or value == "":
                 return None
             return value
 
-        def _env_bool(name: str) -> Optional[bool]:
+        def _env_bool(name: str) -> bool | None:
             """Parse common truthy/falsey strings from the merged environment map."""
             value = _env_value(name)
             if value is None:
@@ -176,9 +171,7 @@ class GloggurConfig:
             data["watch_mode"] = _env_value("GLOGGUR_WATCH_MODE")
         if _env_value("GLOGGUR_WATCH_DEBOUNCE_MS"):
             try:
-                data["watch_debounce_ms"] = int(
-                    _env_value("GLOGGUR_WATCH_DEBOUNCE_MS") or "300"
-                )
+                data["watch_debounce_ms"] = int(_env_value("GLOGGUR_WATCH_DEBOUNCE_MS") or "300")
             except ValueError:
                 pass
         if _env_value("GLOGGUR_WATCH_STATE_FILE"):

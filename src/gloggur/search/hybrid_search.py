@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import wrap_embedding_error
@@ -14,12 +13,14 @@ from gloggur.storage.vector_store import VectorStore
 @dataclass
 class SearchResult:
     """Dataclass for search hits: symbol_id and similarity_score."""
+
     symbol_id: str
     similarity_score: float
 
 
 class HybridSearch:
     """Hybrid search using embeddings, vector store, and metadata store."""
+
     def __init__(
         self,
         embedding_provider: EmbeddingProvider,
@@ -34,9 +35,9 @@ class HybridSearch:
     def search(
         self,
         query: str,
-        filters: Optional[Dict[str, str]] = None,
+        filters: dict[str, str] | None = None,
         top_k: int = 10,
-    ) -> Dict[str, object]:
+    ) -> dict[str, object]:
         """Search for symbols matching the query and filters."""
         start = time.time()
         filters = filters or {}
@@ -59,7 +60,7 @@ class HybridSearch:
             "metadata": {"total_results": len(results), "search_time_ms": duration_ms},
         }
 
-    def _search_unfiltered(self, query_vector: List[float], top_k: int) -> List[Dict[str, object]]:
+    def _search_unfiltered(self, query_vector: list[float], top_k: int) -> list[dict[str, object]]:
         """Search via vector index without any filters."""
         hits = self.vector_store.search(query_vector, k=top_k * 2)
         results = []
@@ -75,15 +76,15 @@ class HybridSearch:
 
     def _search_filtered(
         self,
-        query_vector: List[float],
-        filters: Dict[str, str],
+        query_vector: list[float],
+        filters: dict[str, str],
         top_k: int,
-    ) -> List[Dict[str, object]]:
+    ) -> list[dict[str, object]]:
         """Search within metadata-filtered symbols and rank by similarity."""
         candidates = self._filter_symbols(filters)
         if not candidates:
             return []
-        scored: List[Tuple[float, int, object]] = []
+        scored: list[tuple[float, int, object]] = []
         for symbol in candidates:
             score = self._score_symbol(query_vector, symbol)
             if score is None:
@@ -95,7 +96,7 @@ class HybridSearch:
             results.append(self._serialize_result(symbol, score))
         return results
 
-    def _filter_symbols(self, filters: Dict[str, str]):
+    def _filter_symbols(self, filters: dict[str, str]):
         """Return symbols matching metadata filters with path normalization."""
         kinds = [filters["kind"]] if filters.get("kind") else None
         language = filters.get("language")
@@ -113,9 +114,9 @@ class HybridSearch:
         return []
 
     @staticmethod
-    def _file_path_candidates(file_path: str) -> List[str]:
+    def _file_path_candidates(file_path: str) -> list[str]:
         """Return candidate file paths to match against stored symbols."""
-        candidates: List[str] = []
+        candidates: list[str] = []
         for candidate in (file_path, os.path.normpath(file_path)):
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
@@ -129,7 +130,7 @@ class HybridSearch:
             candidates.append(abs_candidate)
         return candidates
 
-    def _score_symbol(self, query_vector: List[float], symbol) -> Optional[float]:
+    def _score_symbol(self, query_vector: list[float], symbol) -> float | None:
         """Return similarity score for a symbol or None if scoring fails."""
         if not symbol.embedding_vector:
             return None
@@ -139,9 +140,9 @@ class HybridSearch:
         return self._score_from_distance(distance)
 
     @staticmethod
-    def _l2_distance(a: List[float], b: List[float]) -> float:
+    def _l2_distance(a: list[float], b: list[float]) -> float:
         """Return squared L2 distance between vectors."""
-        return sum((left - right) ** 2 for left, right in zip(a, b))
+        return sum((left - right) ** 2 for left, right in zip(a, b, strict=True))
 
     @staticmethod
     def _score_from_distance(distance: float) -> float:
@@ -153,7 +154,7 @@ class HybridSearch:
             return 1.0
         return score
 
-    def _serialize_result(self, symbol, score: float) -> Dict[str, object]:
+    def _serialize_result(self, symbol, score: float) -> dict[str, object]:
         """Build the JSON-friendly result payload for a symbol."""
         return {
             "symbol_id": symbol.id,
@@ -172,7 +173,7 @@ class HybridSearch:
     def _load_context(path: str, line: int, radius: int = 3) -> str:
         """Load a small context window around a symbol."""
         try:
-            with open(path, "r", encoding="utf8") as handle:
+            with open(path, encoding="utf8") as handle:
                 lines = handle.readlines()
         except OSError:
             return ""

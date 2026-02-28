@@ -6,12 +6,12 @@ probable-cause description, and actionable remediation steps.  All cache write
 paths should raise ``StorageIOError`` so that CLI outputs can emit consistent
 JSON payloads regardless of the underlying OS or database error.
 """
+
 from __future__ import annotations
 
 import errno
 import sqlite3
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
 
 IO_ERROR_CATEGORIES = {
     "permission_denied",
@@ -21,7 +21,7 @@ IO_ERROR_CATEGORIES = {
     "unknown_io_error",
 }
 
-_CATEGORY_DETAILS: Dict[str, Tuple[str, List[str]]] = {
+_CATEGORY_DETAILS: dict[str, tuple[str, list[str]]] = {
     "permission_denied": (
         "The process does not have permission for this filesystem operation.",
         [
@@ -81,7 +81,7 @@ class StorageIOError(RuntimeError):
     operation: str
     path: str
     probable_cause: str
-    remediation: List[str]
+    remediation: list[str]
     detail: str
 
     def __post_init__(self) -> None:

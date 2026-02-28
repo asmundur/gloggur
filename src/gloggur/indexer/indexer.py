@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
@@ -14,8 +14,7 @@ from gloggur.models import FileMetadata, IndexMetadata, Symbol
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.storage.vector_store import VectorStore
 
-
-FAILURE_REMEDIATION: Dict[str, List[str]] = {
+FAILURE_REMEDIATION: dict[str, list[str]] = {
     "decode_error": [
         "Re-save the file in UTF-8 encoding.",
         "Exclude non-source/binary files from the indexing path.",
@@ -37,7 +36,8 @@ FAILURE_REMEDIATION: Dict[str, List[str]] = {
         "Retry `gloggur index . --json` after resolving storage issues.",
     ],
     "embedding_provider_error": [
-        "Inspect provider credentials, model configuration, and provider failure details in failed_samples.",
+        "Inspect provider credentials, model configuration, "
+        "and provider failure details in failed_samples.",
         "Retry `gloggur index . --json` after fixing the embedding provider error.",
     ],
     "stale_cleanup_error": [
@@ -70,8 +70,8 @@ class IndexResult:
     symbols_added: int = 0
     symbols_updated: int = 0
     symbols_removed: int = 0
-    failed_reasons: Dict[str, int] = field(default_factory=dict)
-    failed_samples: List[str] = field(default_factory=list)
+    failed_reasons: dict[str, int] = field(default_factory=dict)
+    failed_samples: list[str] = field(default_factory=list)
 
     @property
     def indexed_files(self) -> int:
@@ -85,9 +85,9 @@ class IndexResult:
 
         return self.unchanged
 
-    def as_payload(self) -> Dict[str, object]:
+    def as_payload(self) -> dict[str, object]:
         """Build a CLI payload with explicit outcomes and legacy aliases."""
-        payload: Dict[str, object] = {
+        payload: dict[str, object] = {
             "files_considered": self.files_considered,
             "files_scanned": self.files_considered,
             "indexed": self.indexed,
@@ -110,7 +110,11 @@ class IndexResult:
             payload["failure_guidance"] = {
                 reason: FAILURE_REMEDIATION.get(
                     reason,
-                    ["Inspect failed_samples and rerun indexing after resolving the underlying error."],
+                    [
+                        "Inspect failed_samples and rerun "
+                        "indexing after resolving the "
+                        "underlying error."
+                    ],
                 )
                 for reason in sorted(self.failed_reasons)
             }
@@ -126,8 +130,8 @@ class FileIndexOutcome:
     symbols_added: int = 0
     symbols_updated: int = 0
     symbols_removed: int = 0
-    reason: Optional[str] = None
-    detail: Optional[str] = None
+    reason: str | None = None
+    detail: str | None = None
 
 
 @dataclass
@@ -138,8 +142,8 @@ class PreparedFileIndex:
     language: str
     content_hash: str
     source: str
-    symbols: List[Symbol]
-    previous_symbol_ids: List[str]
+    symbols: list[Symbol]
+    previous_symbol_ids: list[str]
     symbols_added: int
     symbols_updated: int
     symbols_removed: int
@@ -151,10 +155,10 @@ class Indexer:
     def __init__(
         self,
         config: GloggurConfig,
-        cache: Optional[CacheManager] = None,
-        parser_registry: Optional[ParserRegistry] = None,
-        embedding_provider: Optional[EmbeddingProvider] = None,
-        vector_store: Optional[VectorStore] = None,
+        cache: CacheManager | None = None,
+        parser_registry: ParserRegistry | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
+        vector_store: VectorStore | None = None,
     ) -> None:
         """Initialize the indexer with cache, parsers, and embeddings."""
 
@@ -163,8 +167,8 @@ class Indexer:
         self.parser_registry = parser_registry or ParserRegistry()
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
-        self._progress_callback: Optional[Callable[[int, int], None]] = None
-        self._scan_callback: Optional[Callable[[int, int, str], None]] = None
+        self._progress_callback: Callable[[int, int], None] | None = None
+        self._scan_callback: Callable[[int, int, str], None] | None = None
 
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
@@ -185,10 +189,10 @@ class Indexer:
         symbols_updated = 0
         symbols_removed = 0
         files_removed = 0
-        failed_reasons: Dict[str, int] = {}
-        failed_samples: List[str] = []
+        failed_reasons: dict[str, int] = {}
+        failed_samples: list[str] = []
         seen_paths: set[str] = set()
-        prepared_files: List[PreparedFileIndex] = []
+        prepared_files: list[PreparedFileIndex] = []
 
         for file_path in source_files:
             seen_paths.add(file_path)
@@ -358,11 +362,13 @@ class Indexer:
             symbols_removed=prepared.symbols_removed,
         )
 
-    def _prepare_file_for_index(self, path: str) -> tuple[Optional[PreparedFileIndex], FileIndexOutcome]:
+    def _prepare_file_for_index(
+        self, path: str
+    ) -> tuple[PreparedFileIndex | None, FileIndexOutcome]:
         """Read/parse a file and compute symbol diff metadata for later persistence."""
 
         try:
-            with open(path, "r", encoding="utf8") as handle:
+            with open(path, encoding="utf8") as handle:
                 source = handle.read()
         except UnicodeDecodeError as exc:
             return None, FileIndexOutcome(
@@ -379,7 +385,7 @@ class Indexer:
 
         content_hash = self._hash_content(source)
         existing = self.cache.get_file_metadata(path)
-        existing_symbols_by_id: Dict[str, Symbol] = {}
+        existing_symbols_by_id: dict[str, Symbol] = {}
         if existing:
             existing_symbols_by_id = {
                 symbol.id: symbol for symbol in self.cache.list_symbols_for_file(path)
@@ -449,7 +455,7 @@ class Indexer:
         if self.vector_store and prepared.symbols:
             self.vector_store.upsert_vectors(prepared.symbols)
 
-    def index_file(self, path: str) -> Optional[int]:
+    def index_file(self, path: str) -> int | None:
         """Index a file and return symbol count when indexed, else None."""
 
         outcome = self.index_file_with_outcome(path)
@@ -476,13 +482,13 @@ class Indexer:
                 return True
         return False
 
-    def _prune_stale_files(self, seen_paths: set[str]) -> Dict[str, object]:
+    def _prune_stale_files(self, seen_paths: set[str]) -> dict[str, object]:
         """Remove cached file/symbol rows for files no longer present in the index walk."""
         files_removed = 0
         symbols_removed = 0
         failed = 0
-        failed_reasons: Dict[str, int] = {}
-        failed_samples: List[str] = []
+        failed_reasons: dict[str, int] = {}
+        failed_samples: list[str] = []
         cached_paths = set(self.cache.list_file_paths())
         stale_paths = sorted(cached_paths - seen_paths)
         for stale_path in stale_paths:
@@ -509,13 +515,13 @@ class Indexer:
             "failed_samples": failed_samples,
         }
 
-    def prune_missing_file_entries(self) -> Dict[str, object]:
+    def prune_missing_file_entries(self) -> dict[str, object]:
         """Remove cached entries whose files no longer exist on disk."""
         cached_paths = set(self.cache.list_file_paths())
         existing_paths = {path for path in cached_paths if os.path.exists(path)}
         return self._prune_stale_files(existing_paths)
 
-    def _validate_vector_metadata_consistency(self) -> Dict[str, object]:
+    def _validate_vector_metadata_consistency(self) -> dict[str, object]:
         """Detect vector/cache symbol-id divergence and return stable failure metadata."""
         if self.embedding_provider is None or self.vector_store is None:
             return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
@@ -525,7 +531,9 @@ class Indexer:
                 "failed": 1,
                 "failed_reasons": {"vector_consistency_unverifiable": 1},
                 "failed_samples": [
-                    "vector consistency check unavailable: vector store does not expose list_symbol_ids()"
+                    "vector consistency check unavailable: "
+                    "vector store does not expose "
+                    "list_symbol_ids()"
                 ],
             }
         try:
@@ -556,16 +564,16 @@ class Indexer:
             "failed_samples": [sample],
         }
 
-    def validate_vector_metadata_consistency(self) -> Dict[str, object]:
+    def validate_vector_metadata_consistency(self) -> dict[str, object]:
         """Public post-index consistency check used by both repo and single-file index flows."""
         return self._validate_vector_metadata_consistency()
 
     def _apply_embeddings(
         self,
-        symbols: List[Symbol],
+        symbols: list[Symbol],
         source: str,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-    ) -> List[Symbol]:
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[Symbol]:
         """Attach embedding vectors to symbols when a provider is available."""
 
         if not self.embedding_provider:
@@ -595,7 +603,7 @@ class Indexer:
                     provider=self.config.embedding_provider,
                     operation="embed symbol batch for indexing",
                 ) from exc
-            for symbol, vector in zip(chunk_symbols, vectors):
+            for symbol, vector in zip(chunk_symbols, vectors, strict=True):
                 symbol.embedding_vector = vector
             done = min(i + chunk_size, total)
             if progress_callback is not None:
@@ -609,7 +617,7 @@ class Indexer:
         return hashlib.sha256(source.encode("utf8")).hexdigest()
 
     @staticmethod
-    def _symbol_text(symbol: Symbol, lines: List[str]) -> str:
+    def _symbol_text(symbol: Symbol, lines: list[str]) -> str:
         """Build embedding text by slicing lines and joining signature/docstring/snippet."""
 
         snippet_start = max(0, symbol.start_line - 1)
