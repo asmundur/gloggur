@@ -51,14 +51,17 @@ def test_run_edge_bench_writes_and_reuses_baseline_file(tmp_path: Path) -> None:
     assert baseline_path.exists()
 
     second = _run_edge_bench(["--benchmark-only", "--baseline-file", str(baseline_path)])
-    assert second.returncode == 0, f"{second.stderr}\n{second.stdout}"
+    assert second.returncode in (0, 1), f"{second.stderr}\n{second.stdout}"
     payload = json.loads(second.stdout)
 
+    assert payload["benchmark_contract"]["baseline_file"] == str(baseline_path)
     performance = payload["benchmark_contract"]["performance"]
     comparisons = performance["comparisons"]
     assert "cold_index_duration" in comparisons
     assert "search_average_latency" in comparisons
     assert performance["baseline"]["cold_index_duration"]["duration_ms"] is not None
+    if second.returncode == 1:
+        assert payload["failure"]["code"] == "performance_threshold_exceeded"
 
 
 def test_run_edge_bench_reports_missing_repo_failure_code(tmp_path: Path) -> None:

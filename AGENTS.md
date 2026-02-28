@@ -1,5 +1,4 @@
 ## Required workflow
-start each session by running ./.venv/bin/activate 
 
 # Beads Issue Tracking
 
