@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import tomllib
 import yaml
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10 lanes.
+    import tomli as tomllib
 
 
 def _load_verification_workflow() -> dict[str, object]:

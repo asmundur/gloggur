@@ -328,6 +328,13 @@ class Indexer:
             return
         if pause_ms <= 0:
             return
+        ready_path = os.getenv("GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_READY_FILE")
+        if ready_path:
+            ready_dir = os.path.dirname(ready_path)
+            if ready_dir:
+                os.makedirs(ready_dir, exist_ok=True)
+            with open(ready_path, "w", encoding="utf8") as handle:
+                handle.write("1")
         time.sleep(pause_ms / 1000.0)
 
     def index_file_with_outcome(self, path: str) -> FileIndexOutcome:

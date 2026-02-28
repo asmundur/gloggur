@@ -17,6 +17,15 @@ def _write_fallback_marker(cache_dir: str) -> None:
     marker.touch(exist_ok=True)
 
 
+def _wait_for_path(path: Path, *, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"Timed out waiting for {path}")
+
+
 def _parse_json_payload(output: str) -> dict[str, object]:
     start = output.find("{")
     if start == -1:
@@ -74,11 +83,7 @@ def _start_lock_holder(
         text=True,
         env=holder_env,
     )
-    for _ in range(200):
-        if ready_path.exists():
-            break
-        time.sleep(0.01)
-    assert ready_path.exists()
+    _wait_for_path(ready_path, timeout=2.0)
     return holder, release_path
 
 
@@ -238,11 +243,13 @@ def test_clear_cache_during_index_run_fails_fast_and_index_completes_cleanly() -
         )
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
+        ready_path = Path(cache_dir) / ".metadata-delete-ready"
         index_env = {
             **os.environ,
             "GLOGGUR_CACHE_DIR": cache_dir,
             "GLOGGUR_LOCAL_MODEL": "local",
             "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_MS": "1500",
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_READY_FILE": str(ready_path),
         }
         index_proc = subprocess.Popen(
             [sys.executable, "-m", "gloggur.cli.main", "index", str(repo), "--json"],
@@ -252,7 +259,7 @@ def test_clear_cache_during_index_run_fails_fast_and_index_completes_cleanly() -
             env=index_env,
         )
         try:
-            time.sleep(0.1)
+            _wait_for_path(ready_path, timeout=2.0)
             blocked_env = {
                 **os.environ,
                 "GLOGGUR_CACHE_DIR": cache_dir,
