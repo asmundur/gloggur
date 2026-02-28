@@ -246,6 +246,47 @@ def test_verification_workflow_includes_artifact_smoke_harness() -> None:
     assert "python scripts/run_artifact_smoke.py --format json" in run_script
 
 
+def test_verification_workflow_includes_performance_regression_benchmark() -> None:
+    """Verification workflow should run the baseline-backed benchmark on the required lane."""
+    tests_job = _verification_tests_job()
+    steps = tests_job.get("steps")
+    assert isinstance(steps, list)
+
+    benchmark_step = next(
+        (
+            step
+            for step in steps
+            if isinstance(step, dict) and step.get("name") == "Run performance regression benchmark"
+        ),
+        None,
+    )
+    assert isinstance(benchmark_step, dict)
+    assert benchmark_step.get("if") == "${{ matrix.python-version == '3.13' }}"
+    run_script = benchmark_step.get("run")
+    assert isinstance(run_script, str)
+    assert (
+        "python scripts/run_edge_bench.py --benchmark-only "
+        "--baseline-file benchmarks/performance_baseline.json --format json"
+    ) in run_script
+
+    upload_step = next(
+        (
+            step
+            for step in steps
+            if isinstance(step, dict)
+            and step.get("name") == "Upload performance benchmark artifact"
+        ),
+        None,
+    )
+    assert isinstance(upload_step, dict)
+    assert upload_step.get("if") == "${{ always() && matrix.python-version == '3.13' }}"
+    assert upload_step.get("uses") == "actions/upload-artifact@v4"
+    upload_with = upload_step.get("with")
+    assert isinstance(upload_with, dict)
+    assert upload_with.get("name") == "performance-benchmark-${{ matrix.python-version }}"
+    assert upload_with.get("if-no-files-found") == "error"
+
+
 def test_verification_workflow_emits_lane_reports_for_all_matrix_jobs() -> None:
     """Matrix lanes should always write and upload per-lane JSON evidence artifacts."""
     tests_job = _verification_tests_job()

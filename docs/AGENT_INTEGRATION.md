@@ -11,7 +11,16 @@ scripts/bootstrap_gloggur_env.sh
 ```
 
 Bootstrap now verifies index freshness automatically when `scripts/gloggur` is
-present (status -> optional index -> status verification).
+present (status -> optional index -> status verification), then runs the
+canonical startup readiness probe:
+
+```bash
+python scripts/check_startup_readiness.py --format json
+```
+
+This probe validates both `scripts/gloggur status --json` and
+`scripts/gloggur watch status --json`, and fails non-zero with deterministic
+startup codes when the worktree is not actually ready.
 
 Optional cache hydration for faster first run:
 
@@ -68,6 +77,10 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    Watcher runtime health:
    ```bash
    scripts/gloggur watch status --json
+   ```
+   One-command startup-readiness verification:
+   ```bash
+   python scripts/check_startup_readiness.py --format json
    ```
 4. **Inspect docstrings (optional but recommended for documentation changes)**:
    ```bash

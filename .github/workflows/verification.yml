@@ -74,6 +74,18 @@ jobs:
         if: ${{ matrix.python-version == '3.13' }}
         run: python scripts/run_artifact_smoke.py --format json
 
+      - name: Run performance regression benchmark
+        if: ${{ matrix.python-version == '3.13' }}
+        run: python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json > performance-benchmark-${{ matrix.python-version }}.json
+
+      - name: Upload performance benchmark artifact
+        if: ${{ always() && matrix.python-version == '3.13' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-benchmark-${{ matrix.python-version }}
+          path: performance-benchmark-${{ matrix.python-version }}.json
+          if-no-files-found: error
+
       - name: Write lane report
         if: ${{ always() }}
         env:

@@ -42,7 +42,21 @@ scripts/gloggur status --json
 
 `scripts/bootstrap_gloggur_env.sh` now runs index freshness checks automatically
 when `scripts/gloggur` is available (`status --json`, optional `index . --json`,
-then a final `status --json` verification).
+then a final `status --json` verification), then runs the canonical startup
+readiness probe:
+
+```bash
+python scripts/check_startup_readiness.py --format json
+```
+
+The readiness probe verifies, in order:
+- `scripts/gloggur status --json`
+- `scripts/gloggur watch status --json`
+
+It fails non-zero with deterministic startup codes when either probe fails or
+the watch runtime state is contradictory (`startup_status_probe_failed`,
+`startup_watch_status_probe_failed`, `startup_watch_payload_invalid`,
+`startup_watch_state_contradictory`).
 
 `scripts/gloggur` now runs a preflight check before launching the CLI:
 - prefers `.venv/bin/python` when healthy
@@ -384,6 +398,9 @@ python scripts/run_artifact_smoke.py --format json
 # Verify the published error-code catalog matches live source contracts
 python scripts/check_error_catalog_contract.py --format json
 
+# Run deterministic benchmark regression checks against the checked-in baseline
+python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json
+
 # Run non-test verification phases (providers, edge cases, performance)
 python scripts/run_suite.py
 
@@ -404,6 +421,27 @@ python scripts/run_edge_bench.py  # Edge cases & performance
 `artifact_smoke_index_failed`, `artifact_smoke_publish_failed`,
 `artifact_smoke_validate_failed`, `artifact_smoke_restore_failed`,
 `artifact_smoke_status_failed`, and `artifact_smoke_search_failed`.
+
+`scripts/run_edge_bench.py` now benchmarks a deterministic generated fixture by
+default instead of the mutable repo checkout. The checked-in benchmark baseline
+lives at `benchmarks/performance_baseline.json`.
+
+To refresh the baseline intentionally:
+
+```bash
+python scripts/run_edge_bench.py \
+  --benchmark-only \
+  --baseline-file benchmarks/performance_baseline.json \
+  --write-baseline \
+  --format json
+```
+
+The performance regression policy fails with `performance_threshold_exceeded`
+when any metric drifts beyond the allowed threshold:
+- cold index duration: more than 20% slower than baseline
+- unchanged incremental duration: more than 25% slower than baseline
+- search average latency: more than 20% slower than baseline
+- index throughput: more than 15% below baseline
 
 Provider verification checklist (OpenAI + Gemini):
 

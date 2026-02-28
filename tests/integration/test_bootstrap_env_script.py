@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -18,8 +20,14 @@ def _prepare_temp_repo(tmp_path: Path) -> tuple[Path, Path]:
     scripts_dir = repo_root / "scripts"
     scripts_dir.mkdir(parents=True)
     script_path = scripts_dir / "bootstrap_gloggur_env.sh"
+    readiness_path = scripts_dir / "check_startup_readiness.py"
     script_path.write_text(_source_script().read_text(encoding="utf8"), encoding="utf8")
     script_path.chmod(0o755)
+    readiness_path.write_text(
+        (_repo_root() / "scripts" / "check_startup_readiness.py").read_text(encoding="utf8"),
+        encoding="utf8",
+    )
+    readiness_path.chmod(0o755)
     return repo_root, script_path
 
 
@@ -53,7 +61,7 @@ def _prepare_seed_venv_workspace(tmp_path: Path) -> Path:
     workspace_root = tmp_path / "venv-workspace"
     venv_python = workspace_root / ".venv" / "bin" / "python"
     venv_python.parent.mkdir(parents=True)
-    venv_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf8")
+    venv_python.write_text(f"#!/usr/bin/env bash\nexec {sys.executable!r} \"$@\"\n", encoding="utf8")
     venv_python.chmod(0o755)
     return workspace_root
 
@@ -77,11 +85,42 @@ shift || true
 
 case "$command_name" in
   status)
-    if [[ -f "$state_file" ]]; then
-      printf '{"needs_reindex": false}\\n'
-    else
-      printf '{"needs_reindex": true}\\n'
+    status_call_file="${BOOTSTRAP_GLOGGUR_STATUS_CALL_FILE:-}"
+    if [[ -n "$status_call_file" ]]; then
+      count=0
+      if [[ -f "$status_call_file" ]]; then
+        count="$(cat "$status_call_file")"
+      fi
+      count=$((count + 1))
+      printf '%s' "$count" > "$status_call_file"
+      fail_on_call="${BOOTSTRAP_GLOGGUR_STATUS_FAIL_ON_CALL:-}"
+      if [[ -n "$fail_on_call" && "$count" == "$fail_on_call" ]]; then
+        printf '%s\\n' "${BOOTSTRAP_GLOGGUR_STATUS_FAIL_MESSAGE:-forced status failure}" >&2
+        exit 1
+      fi
     fi
+    if [[ -f "$state_file" ]]; then
+      printf '{"needs_reindex": false, "resume_decision": "resume_ok"}\\n'
+    else
+      printf '{"needs_reindex": true, "resume_decision": "reindex_required"}\\n'
+    fi
+    ;;
+  watch)
+    subcommand="${1:-}"
+    shift || true
+    if [[ "$subcommand" != "status" ]]; then
+      printf '{"error": "unexpected watch command"}\\n'
+      exit 1
+    fi
+    if [[ "${BOOTSTRAP_GLOGGUR_WATCH_FAIL:-0}" == "1" ]]; then
+      printf '%s\\n' "${BOOTSTRAP_GLOGGUR_WATCH_FAIL_MESSAGE:-forced watch failure}" >&2
+      exit 1
+    fi
+    watch_payload="${BOOTSTRAP_GLOGGUR_WATCH_PAYLOAD:-}"
+    if [[ -z "$watch_payload" ]]; then
+      watch_payload='{"status":"stopped","running":false,"pid":null}'
+    fi
+    printf '%s\\n' "$watch_payload"
     ;;
   index)
     touch "$state_file"
@@ -231,6 +270,7 @@ def test_bootstrap_ensures_index_is_current_during_environment_setup(tmp_path: P
     env = os.environ.copy()
     env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
     env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+    env["BOOTSTRAP_GLOGGUR_STATUS_CALL_FILE"] = str(repo_root / "status-call-count.txt")
 
     completed = _run_bootstrap(
         script_path=script_path,
@@ -252,4 +292,62 @@ def test_bootstrap_ensures_index_is_current_during_environment_setup(tmp_path: P
         "status --json",
         "index . --json",
         "status --json",
+        "status --json",
+        "watch status --json",
     ]
+
+
+def test_bootstrap_fails_when_startup_status_probe_fails(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    log_file, state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    state_file.write_text("ready", encoding="utf8")
+    env = os.environ.copy()
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+    env["BOOTSTRAP_GLOGGUR_STATUS_CALL_FILE"] = str(repo_root / "status-call-count.txt")
+    env["BOOTSTRAP_GLOGGUR_STATUS_FAIL_ON_CALL"] = "2"
+    env["BOOTSTRAP_GLOGGUR_STATUS_FAIL_MESSAGE"] = "status probe exploded"
+
+    completed = _run_bootstrap(script_path=script_path, args=["--skip-install"], env=env, cwd=repo_root)
+
+    assert completed.returncode == 1
+    assert "startup_status_probe_failed" in completed.stderr
+    invocations = log_file.read_text(encoding="utf8").splitlines()
+    assert invocations == ["status --json", "status --json"]
+
+
+def test_bootstrap_fails_when_startup_watch_status_probe_fails(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    log_file, state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    state_file.write_text("ready", encoding="utf8")
+    env = os.environ.copy()
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+    env["BOOTSTRAP_GLOGGUR_WATCH_FAIL"] = "1"
+    env["BOOTSTRAP_GLOGGUR_WATCH_FAIL_MESSAGE"] = "watch probe exploded"
+
+    completed = _run_bootstrap(script_path=script_path, args=["--skip-install"], env=env, cwd=repo_root)
+
+    assert completed.returncode == 1
+    assert "startup_watch_status_probe_failed" in completed.stderr
+    invocations = log_file.read_text(encoding="utf8").splitlines()
+    assert invocations == ["status --json", "status --json", "watch status --json"]
+
+
+def test_bootstrap_fails_when_startup_watch_payload_is_contradictory(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    log_file, state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    state_file.write_text("ready", encoding="utf8")
+    env = os.environ.copy()
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+    env["BOOTSTRAP_GLOGGUR_WATCH_PAYLOAD"] = json.dumps(
+        {"status": "running", "running": False, "pid": 4321}
+    )
+
+    completed = _run_bootstrap(script_path=script_path, args=["--skip-install"], env=env, cwd=repo_root)
+
+    assert completed.returncode == 1
+    assert "startup_watch_state_contradictory" in completed.stderr or "startup_watch_payload_invalid" in completed.stderr
+    invocations = log_file.read_text(encoding="utf8").splitlines()
+    assert invocations == ["status --json", "status --json", "watch status --json"]

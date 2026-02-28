@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-02-28 11:20:00",
+  "fixture": {
+    "kind": "generated",
+    "file_count": 32,
+    "queries": [
+      "normalize",
+      "summarize",
+      "benchmark",
+      "record",
+      "worker"
+    ]
+  },
+  "performance": {
+    "metrics": {
+      "cold_index_duration": {
+        "name": "cold_index_duration",
+        "duration_ms": 750.0,
+        "throughput": null,
+        "throughput_unit": null
+      },
+      "unchanged_incremental_duration": {
+        "name": "unchanged_incremental_duration",
+        "duration_ms": 100.0,
+        "throughput": null,
+        "throughput_unit": null
+      },
+      "search_average_latency": {
+        "name": "search_average_latency",
+        "duration_ms": 7.0,
+        "throughput": null,
+        "throughput_unit": null
+      },
+      "index_throughput": {
+        "name": "index_throughput",
+        "duration_ms": null,
+        "throughput": 300.0,
+        "throughput_unit": "symbols/s"
+      }
+    }
+  }
+}

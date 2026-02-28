@@ -208,6 +208,25 @@ ensure_index_is_current() {
   INDEX_FRESHNESS_RESULT="refreshed"
 }
 
+ensure_startup_readiness() {
+  local readiness_script="${REPO_ROOT}/scripts/check_startup_readiness.py"
+  local wrapper="${REPO_ROOT}/scripts/gloggur"
+  if [[ ! -x "$wrapper" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$readiness_script" ]]; then
+    >&2 echo "Startup readiness verification failed: missing ${readiness_script}"
+    exit 1
+  fi
+
+  local readiness_output=""
+  if ! readiness_output="$("${VENV_DIR}/bin/python" "$readiness_script" --format json 2>&1)"; then
+    >&2 echo "Startup readiness verification failed while running: python scripts/check_startup_readiness.py --format json"
+    >&2 echo "$readiness_output"
+    exit 1
+  fi
+}
+
 detect_python() {
   if [[ -n "$PYTHON_BIN" ]]; then
     return 0
@@ -330,6 +349,7 @@ fi
 
 seed_cache_if_requested
 ensure_index_is_current
+ensure_startup_readiness
 
 cat <<EOF
 Bootstrap complete.
@@ -340,6 +360,6 @@ Bootstrap complete.
 - Index freshness: ${INDEX_FRESHNESS_RESULT}
 
 Next steps:
-1. scripts/gloggur status --json
-2. scripts/gloggur index . --json
+1. python scripts/check_startup_readiness.py --format json
+2. scripts/gloggur status --json
 EOF

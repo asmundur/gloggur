@@ -30,7 +30,8 @@ emit_missing_python() {
     printf '  "message": "No usable Python interpreter was found for gloggur preflight.",\n'
     printf '  "remediation": [\n'
     printf '    "Install Python 3.10+ and ensure python3 is available on PATH.",\n'
-    printf '    "Run %s/scripts/bootstrap_gloggur_env.sh to create/repair .venv and install dependencies."\n' "$REPO_ROOT"
+    printf '    "Run %s/scripts/bootstrap_gloggur_env.sh to create/repair .venv and install dependencies.",\n' "$REPO_ROOT"
+    printf '    "After bootstrap succeeds, run python scripts/check_startup_readiness.py --format json."\n'
     printf '  ],\n'
     printf '  "detected_environment": {\n'
     printf '    "repo_root": "%s",\n' "$REPO_ROOT"
@@ -50,6 +51,7 @@ emit_missing_python() {
   else
     >&2 echo "gloggur preflight failed (missing_python): No usable Python interpreter was found."
     >&2 echo "Install Python 3.10+ and run ${REPO_ROOT}/scripts/bootstrap_gloggur_env.sh."
+    >&2 echo "After bootstrap succeeds, run python scripts/check_startup_readiness.py --format json."
   fi
 }
 

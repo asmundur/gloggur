@@ -11,6 +11,7 @@ The verification workflow also includes non-pytest required gates on Python `3.1
 - `python scripts/run_smoke.py --format json`
 - `python scripts/run_packaging_smoke.py --format json`
 - `python scripts/run_artifact_smoke.py --format json`
+- `python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json`
 
 The workflow also includes a lane-policy audit gate:
 
@@ -64,6 +65,9 @@ python scripts/run_packaging_smoke.py --format json --skip-install-smoke
 
 # Run artifact publish -> validate -> restore smoke
 python scripts/run_artifact_smoke.py --format json
+
+# Run deterministic performance regression benchmarks against the checked-in baseline
+python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json
 
 # Verify the published error-code catalog matches live source contracts
 python scripts/check_error_catalog_contract.py --format json
@@ -132,3 +136,24 @@ Failure codes:
 - `artifact_smoke_restore_failed`
 - `artifact_smoke_status_failed`
 - `artifact_smoke_search_failed`
+
+`run_edge_bench.py` validates phase-4 benchmark regression policy against the
+checked-in baseline at `benchmarks/performance_baseline.json`.
+
+The baseline-backed gate fails with `performance_threshold_exceeded` when any of
+these drift limits are exceeded:
+
+- cold index duration: more than 20% slower than baseline
+- unchanged incremental duration: more than 25% slower than baseline
+- search average latency: more than 20% slower than baseline
+- index throughput: more than 15% below baseline
+
+To refresh the baseline intentionally after an accepted performance tradeoff:
+
+```bash
+python scripts/run_edge_bench.py \
+  --benchmark-only \
+  --baseline-file benchmarks/performance_baseline.json \
+  --write-baseline \
+  --format json
+```

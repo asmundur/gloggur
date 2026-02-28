@@ -8,8 +8,10 @@
 2. Keep task IDs stable (`R1`, `R2`, `R3`, `F1`, etc.).
 3. Use explicit completion criteria (tests, behavior, docs).
 4. Update status on every working session (`planned`, `in_progress`, `blocked`, `ready_for_review`).
-5. When completed, move the full item to `DONEs.md` with the same ID and completion date.
-6. Do not delete historical tasks; if obsolete, mark as `cancelled` with reason.
+5. Completed-but-not-yet-moved items stay here as `ready_for_review` with a terminal `DONE Candidate (YYYY-MM-DD)` subsection.
+6. Blocked items must include `**Unblock Conditions**` with the exact missing artifact or input.
+7. When completed and accepted, move the full item to `DONEs.md` with the same ID and completion date.
+8. Do not delete historical tasks; if obsolete, mark as `cancelled` with reason.
 
 ## Task Template
 
@@ -45,6 +47,22 @@ Copy this section for new tasks:
 
 **Links**
 - PR/commit/issues/docs: <links or paths>
+
+**DONE Candidate (YYYY-MM-DD)**
+**Delivered**
+- <implemented change 1>
+
+**Verification**
+- <command and result summary>
+
+**Evidence**
+- <files, docs, workflow steps, or artifacts>
+
+**Remaining External Evidence**
+- None | <hosted CI run, live credential proof, published release artifact, etc.>
+
+**Unblock Conditions**
+- <only for blocked tasks>
 ```
 
 # Reliability Backlog
@@ -64,7 +82,7 @@ Execution rule:
 
 ## R5 - Deterministic New-Session Bootstrap for Local Codex Worktrees
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P2
 **Owner**: codex
 
@@ -101,11 +119,43 @@ Execution rule:
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
 
+**Progress Update (2026-02-28, startup-readiness probe + bootstrap enforcement)**
+- Added a deterministic startup-readiness probe in `scripts/check_startup_readiness.py`:
+  - runs `scripts/gloggur status --json` then `scripts/gloggur watch status --json`,
+  - emits stable non-zero failure codes for probe failures, malformed watch payloads, and contradictory watch runtime state.
+- Hardened local bootstrap and launcher guidance:
+  - `scripts/bootstrap_gloggur_env.sh` now runs the readiness probe after index freshness succeeds and fails loud when startup state is inconsistent,
+  - `scripts/gloggur` and `src/gloggur/bootstrap_launcher.py` now point operators to the same canonical readiness check.
+- Updated docs and regression coverage:
+  - `README.md` and `docs/AGENT_INTEGRATION.md` now define `python scripts/check_startup_readiness.py --format json` as the single local worktree readiness probe,
+  - `tests/integration/test_bootstrap_env_script.py` now covers clean success, status-probe failure, watch-status failure, and contradictory watch-runtime artifacts,
+  - bootstrap launcher and wrapper suites remain green.
+
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Added `scripts/check_startup_readiness.py` and enforced it from `scripts/bootstrap_gloggur_env.sh`.
+- Normalized bootstrap remediation/docs around one canonical readiness command.
+- Added regression coverage for startup probe failure bubbling and contradictory watch-state detection.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/integration/test_bootstrap_env_script.py tests/unit/test_bootstrap_launcher.py tests/integration/test_bootstrap_wrapper.py -q` (`16 passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/check_startup_readiness.py --format json` (`ok: true`; `status` probe clean; `watch` probe `stopped`)
+
+**Evidence**
+- `scripts/check_startup_readiness.py`
+- `scripts/bootstrap_gloggur_env.sh`
+- `src/gloggur/bootstrap_launcher.py`
+- `README.md`
+- `docs/AGENT_INTEGRATION.md`
+
+**Remaining External Evidence**
+- None
+
 ---
 
 ## R6 - End-to-End Smoke-Test Harness for Full Workflow
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -168,11 +218,29 @@ Execution rule:
 - Remaining closure gaps:
   - collect CI run artifact/link showing smoke harness execution on required lane after next hosted workflow run.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Implemented the full-workflow smoke harness in `scripts/run_smoke.py` with deterministic stage ordering and failure codes.
+- Wired the harness into the required Python `3.13` verification lane and documented local reproduction.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_verification_workflow.py tests/integration/test_run_smoke_harness.py -q` (`workflow and harness suites passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/run_smoke.py --format json` (`ok: true`)
+
+**Evidence**
+- `scripts/run_smoke.py`
+- `tests/integration/test_run_smoke_harness.py`
+- `.github/workflows/verification.yml`
+- `docs/VERIFICATION.md`
+
+**Remaining External Evidence**
+- Hosted CI evidence for the required-lane smoke step is still pending, but it is non-blocking for `ready_for_review`.
+
 ---
 
 ## R7 - CLI and Docs Quickstart for Agent/Developer Onboarding
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -248,11 +316,30 @@ Execution rule:
 - Remaining closure gap:
   - no hosted CI evidence link yet for the new quickstart smoke/contract checks; local verification is in place, but branch/PR run evidence still needs to be collected after the next hosted run.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Published the deterministic onboarding path in `docs/QUICKSTART.md`.
+- Added the quickstart contract checker and executable quickstart smoke harness.
+- Linked the quickstart flow from the operator and agent docs.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/integration/test_run_quickstart_smoke_harness.py tests/integration/test_check_quickstart_contract_script.py -q` (`quickstart suites passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/run_quickstart_smoke.py --format json` (`ok: true`)
+
+**Evidence**
+- `docs/QUICKSTART.md`
+- `scripts/check_quickstart_contract.py`
+- `scripts/run_quickstart_smoke.py`
+- `docs/AGENT_INTEGRATION.md`
+
+**Remaining External Evidence**
+- Hosted CI evidence for the quickstart contract/smoke checks is still pending, but it is non-blocking for `ready_for_review`.
+
 ---
 
 ## R8 - Standardized Error Codes and Diagnostics Across CLI Paths
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -432,11 +519,30 @@ Execution rule:
 - Remaining closure gap:
   - none from the R8 error-block audit; the CI evidence link for a hosted verification run remains the only uncollected item.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Normalized non-zero JSON CLI exits around stable `failure_codes`, `failure_guidance`, and top-level `error` objects.
+- Published `docs/ERROR_CODES.md` and added `scripts/check_error_catalog_contract.py`.
+- Promoted the error-catalog contract checker to an explicit required-lane verification step.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_check_error_catalog_contract.py tests/integration/test_check_error_catalog_contract_script.py tests/unit/test_cli_main.py tests/unit/test_cli_watch.py tests/integration/test_cli.py -q -k 'error_catalog or attach_primary_error_from_failure_contract or foreground_fail_closed_emits_primary_error_contract or vector_metadata_mismatch_on_tampered_vector_map or inspect_fails_closed_without_allow_partial_on_decode_errors'` (`targeted R8 suite passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/check_error_catalog_contract.py --format json` (`ok: true`)
+
+**Evidence**
+- `docs/ERROR_CODES.md`
+- `scripts/check_error_catalog_contract.py`
+- `src/gloggur/cli/main.py`
+- `.github/workflows/verification.yml`
+
+**Remaining External Evidence**
+- Hosted CI evidence for the required-lane error-catalog contract step is still pending, but it is non-blocking for `ready_for_review`.
+
 ---
 
 ## R9 - Packaging and Distribution Hardening
 
-**Status**: in_progress
+**Status**: blocked
 **Priority**: P1
 **Owner**: codex
 
@@ -562,11 +668,16 @@ Execution rule:
 - Remaining closure gap:
   - add isolated install->upgrade evidence against published previous release artifacts (not just current build outputs).
 
+**Unblock Conditions**
+- Identify a real previously published release artifact to use as the install baseline.
+- Run isolated install-from-previous-release then upgrade-to-current-wheel validation against that published artifact.
+- Record the artifact provenance and verification output alongside the packaging smoke evidence.
+
 ---
 
 ## R10 - Performance Benchmarking and Regression Tracking
 
-**Status**: planned
+**Status**: ready_for_review
 **Priority**: P2
 **Owner**: codex
 
@@ -605,11 +716,43 @@ Execution rule:
 **Links**
 - PR/commit/issues/docs: pending local implementation in this worktree
 
+**Progress Update (2026-02-28, baseline-backed benchmark harness + CI artifact gate)**
+- Extended `scripts/run_edge_bench.py` into a deterministic benchmark harness:
+  - added `--benchmark-only`, `--baseline-file`, `--write-baseline`, and optional `--repo`,
+  - uses a generated fixture corpus by default instead of benchmarking the mutable repo checkout,
+  - records cold index time, unchanged incremental time, average search latency, and indexing throughput.
+- Added baseline comparison and threshold enforcement:
+  - checked in `benchmarks/performance_baseline.json`,
+  - integrated reporter baseline/comparison support with explicit `performance_threshold_exceeded` failures.
+- Wired required-lane workflow coverage and artifact retention:
+  - `.github/workflows/verification.yml` now runs the benchmark on Python `3.13`,
+  - uploads the JSON benchmark artifact for trend inspection.
+- Added docs and regression coverage for local baseline refresh and threshold interpretation.
+
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Reworked `scripts/run_edge_bench.py` into a deterministic performance regression gate backed by a checked-in baseline.
+- Added `benchmarks/performance_baseline.json`, workflow execution on the required lane, and artifact upload.
+- Documented baseline regeneration and drift policy in the operator docs.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_run_edge_bench.py tests/integration/test_run_edge_bench_harness.py tests/unit/test_verification_workflow.py -q` (`benchmark and workflow suites passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json` (`ok: true`)
+
+**Evidence**
+- `scripts/run_edge_bench.py`
+- `benchmarks/performance_baseline.json`
+- `.github/workflows/verification.yml`
+- `docs/VERIFICATION.md`
+
+**Remaining External Evidence**
+- Hosted CI evidence for the required-lane benchmark artifact is still pending, but it is non-blocking for `ready_for_review`.
+
 ---
 
 ## R11 - Fix Misleading Coverage Signals and Add Static Quality Gates in CI
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -737,11 +880,30 @@ Execution rule:
   - add hosted CI evidence for the widened required-lane gate.
   - intentionally reduce runtime-package `mypy` debt so the required lane can eventually enforce `mypy src/gloggur` instead of the current script-only subset.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Corrected coverage targeting to `src/gloggur` and added workflow-policy regression guards.
+- Added `scripts/run_static_quality_gates.py` and wired it into the required Python `3.13` lane.
+- Expanded the required-lane lint/format scope to include `src/gloggur` while keeping `mypy` intentionally scoped to the verification control plane.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_run_static_quality_gates.py tests/unit/test_verification_workflow.py tests/integration/test_run_static_quality_gates_harness.py -q` (`16 passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/run_static_quality_gates.py --format json` (`ok: true`; `target_scope` includes `src/gloggur`)
+
+**Evidence**
+- `pyproject.toml`
+- `scripts/run_static_quality_gates.py`
+- `.github/workflows/verification.yml`
+- `docs/VERIFICATION.md`
+
+**Remaining External Evidence**
+- Hosted CI evidence for the widened required-lane static gate is still pending, but it is non-blocking for `ready_for_review`.
+
 ---
 
 ## F2 - Validate OpenAI and Gemini Embedding Providers End-to-End
 
-**Status**: in_progress
+**Status**: blocked
 **Priority**: P0
 **Owner**: codex
 
@@ -883,11 +1045,16 @@ Execution rule:
 - Remaining closure gaps:
   - live-key smoke probe artifact is still pending outside CI/local because no OpenAI/Gemini credentials are available in this environment.
 
+**Unblock Conditions**
+- Run `scripts/run_provider_probe.py --format markdown` with valid live OpenAI credentials and retain the output artifact.
+- Run `scripts/run_provider_probe.py --format markdown` with valid live Gemini credentials and retain the output artifact.
+- Attach the resulting command output or artifact paths so the real-provider smoke evidence is recorded alongside the mocked coverage already in repo.
+
 ---
 
 ## F3 - Portable Index Artifact Publishing for CI/CD and Codex Cloud
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -1136,11 +1303,30 @@ Execution rule:
 - Remaining closure gaps:
   - collect hosted CI evidence/link from a real branch or PR run showing the new artifact smoke step executing on the required lane.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Implemented publish, validate, restore, uploader-command, and direct HTTP PUT artifact flows.
+- Added the downstream artifact smoke harness and required-lane workflow gate.
+- Documented artifact transport and restore contracts for CI/Codex reuse.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/integration/test_run_artifact_smoke_harness.py tests/unit/test_verification_workflow.py -q -k 'artifact_smoke_harness'` (`artifact smoke workflow tests passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/run_artifact_smoke.py --format json` (`ok: true`)
+
+**Evidence**
+- `src/gloggur/cli/main.py`
+- `scripts/run_artifact_smoke.py`
+- `.github/workflows/verification.yml`
+- `README.md`
+
+**Remaining External Evidence**
+- Hosted CI evidence for the required-lane artifact smoke step is still pending, but it is non-blocking for `ready_for_review`.
+
 ---
 
 ## F4 - Expand GitHub Actions Python Coverage to 3.13 and 3.14
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -1251,6 +1437,25 @@ Execution rule:
 - Remaining closure gap:
   - gather hosted CI evidence link from a real PR/branch run showing all lane artifacts + passing lane-audit after this change lands.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Expanded the verification matrix to Python `3.10` through `3.14` with explicit required/provisional policy.
+- Added per-lane report artifacts plus the fail-closed `lane-audit` job.
+- Documented runtime support tiers and matrix evolution policy.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_audit_verification_lanes.py tests/unit/test_verification_workflow.py -q` (`lane policy suites passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/audit_verification_lanes.py --reports-dir /tmp/verification-lane-artifacts --format json` was validated through unit coverage; hosted artifact collection is the remaining external proof.
+
+**Evidence**
+- `.github/workflows/verification.yml`
+- `scripts/audit_verification_lanes.py`
+- `README.md`
+- `docs/VERIFICATION.md`
+
+**Remaining External Evidence**
+- Hosted CI evidence for all matrix lanes and the `lane-audit` job is still pending, but it is non-blocking for `ready_for_review`.
+
 ---
 
 # Agent Foundations Backlog
@@ -1259,7 +1464,7 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 
 ## F5 - Deterministic Index Fingerprinting and Session Continuity
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P0
 **Owner**: codex
 
@@ -1386,11 +1591,29 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 - Remaining closure gaps:
   - none for this F5 override sub-scope.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Added deterministic resume fingerprints, machine-readable resume decisions, and persisted last-success markers.
+- Added explicit tool-version drift override controls for CLI and environment usage with strict validation.
+- Documented the agent-facing resume-decision flow.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/integration/test_resume_contract_integration.py tests/integration/test_provider_cli_integration.py -q` (`resume and provider parity suites passed`)
+- `source ./.venv/bin/activate && scripts/gloggur status --json` (`resume_decision: "resume_ok"`; deterministic fingerprint fields present)
+
+**Evidence**
+- `src/gloggur/cli/main.py`
+- `tests/integration/test_resume_contract_integration.py`
+- `README.md`
+
+**Remaining External Evidence**
+- None
+
 ---
 
 ## F6 - Incremental Rebuild Engine for Changed Files Only
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P0
 **Owner**: codex
 
@@ -1690,11 +1913,30 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
 - Remaining gap:
   - none for F6 — all Tests Required items are now covered; all acceptance criteria were already met.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Implemented change-only indexing with deterministic delta counters, stale-path cleanup, and vector/cache consistency checks.
+- Closed parity gaps across repository indexing, single-file indexing, and watch-driven incremental updates.
+- Added the unchanged-run performance regression test to prove near-no-op speedups remain intact.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/integration/test_cli.py -q -k 'unchanged_run_skips_all_files_and_is_faster or vector_metadata_mismatch_on_tampered_vector_map or index_docstring_only_change_is_not_skipped or single_file_index_rename_prunes_missing_old_path_entries' tests/integration/test_watch_cli_lifecycle_integration.py` (`targeted incremental-index suite passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest tests/integration/test_cli.py::test_cli_index_unchanged_run_skips_all_files_and_is_faster -q -n 0` (`1 passed`)
+
+**Evidence**
+- `src/gloggur/indexer/indexer.py`
+- `src/gloggur/watch/service.py`
+- `tests/integration/test_cli.py`
+- `tests/integration/test_watch_cli_lifecycle_integration.py`
+
+**Remaining External Evidence**
+- None
+
 ---
 
 ## F7 - Retrieval Confidence Scoring and Bounded Re-query
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -1771,11 +2013,28 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
   - search response contract was previously loosely assumed (consumer trusted payload shape and similarity field type), which risks silent confidence skew when internal response schema drifts.
   - fixed by validating payload shape and score types and failing closed with deterministic error codes.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Added bounded retrieval confidence scoring, one-step deterministic re-query, and explicit low-confidence metadata to `search --json`.
+- Added fail-closed option validation and payload-shape checks for search confidence handling.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_cli_main.py tests/integration/test_cli.py -q -k 'confidence or requery or low_signal'` (`F7 retrieval-confidence suites passed`)
+
+**Evidence**
+- `src/gloggur/cli/main.py`
+- `tests/unit/test_cli_main.py`
+- `tests/integration/test_cli.py`
+- `README.md`
+
+**Remaining External Evidence**
+- None
+
 ---
 
 ## F8 - Evidence Trace and Validation Hooks for Agent Outputs
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -1867,11 +2126,29 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
   - search payload consumers previously relied on loosely-typed result dictionaries with no standardized evidence schema contract.
   - fixed by introducing explicit evidence schema normalization and fail-closed validation/error codes.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Added evidence-trace normalization and default grounding validation primitives.
+- Extended `search --json` with opt-in evidence/validation flags and fail-on-ungrounded behavior.
+- Documented the retrieve -> validate -> emit/repair integration flow for agents.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_search_evidence.py tests/unit/test_cli_main.py tests/integration/test_cli.py -q -k 'evidence or grounding'` (`F8 evidence-trace suites passed`)
+
+**Evidence**
+- `src/gloggur/search/evidence.py`
+- `src/gloggur/cli/main.py`
+- `docs/AGENT_INTEGRATION.md`
+- `README.md`
+
+**Remaining External Evidence**
+- None
+
 ---
 
 ## F9 - Minimal Reference Agent Loop and Eval Harness
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -1961,6 +2238,25 @@ These tasks operationalize a minimal, production-grade agent path for Glöggur: 
   - initial harness behavior accidentally stacked F9 retries on top of F7 search internal retries, creating non-obvious double-retry behavior and unstable eval outcomes.
   - fixed by forcing single-layer retry ownership in the harness command path.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Added the compact reference loop and eval harness in `scripts/run_reference_agent_eval.py`.
+- Standardized agent loop outcomes, timeout/retry contracts, and deterministic eval summary metrics.
+- Documented the minimal integration path in the operator and agent docs.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_run_reference_agent_eval.py tests/integration/test_run_reference_agent_eval_harness.py -q` (`reference-loop suites passed`)
+- `source ./.venv/bin/activate && ./.venv/bin/python scripts/run_reference_agent_eval.py --mode eval --format json --min-pass-rate 0.8` (`ok: true`)
+
+**Evidence**
+- `scripts/run_reference_agent_eval.py`
+- `tests/integration/test_run_reference_agent_eval_harness.py`
+- `docs/AGENT_INTEGRATION.md`
+- `docs/VERIFICATION.md`
+
+**Remaining External Evidence**
+- None
+
 ---
 
 # Inspect Findings Backlog (2026-02-26 forced scan)
@@ -1978,7 +2274,7 @@ Observed problem output (snapshot):
 
 ## F10 - Make Inspect Output Actionable by Default
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P0
 **Owner**: codex
 
@@ -2142,9 +2438,28 @@ Observed problem output (snapshot):
 - Remaining closure gap:
   - none for this F10 cache-reuse sub-scope.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Made `inspect` source-focused by default with explicit `--include-tests` and `--include-scripts` opt-ins.
+- Added stable grouped warning summaries, schema policy metadata, and fail-closed inspect failure contracts.
+- Fixed repeated-run false-cleans by reusing cached reports and pruning stale audit rows per file.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_cache.py tests/unit/test_cli_main.py -q -k 'inspect' tests/integration/test_cli.py -q -k 'inspect'` (`inspect-focused suite passed`)
+- `source ./.venv/bin/activate && GLOGGUR_EMBEDDING_PROVIDER='' scripts/gloggur inspect src/gloggur --json --force --allow-partial` (`warning_summary.by_path_class.src = 122`; `tests/scripts = 0`; failure contract fields present)
+
+**Evidence**
+- `src/gloggur/cli/main.py`
+- `src/gloggur/indexer/cache.py`
+- `tests/integration/test_cli.py`
+- `README.md`
+
+**Remaining External Evidence**
+- None
+
 ## F11 - Burn Down Source Missing-Docstring Hotspots
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -2245,9 +2560,27 @@ Observed problem output (snapshot):
 - Remaining gap:
   - none for this F11 missing-docstring sub-scope.
 
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Cleared the original missing-docstring hotspot files and the remaining private/nested helper debt across `src/gloggur`.
+- Added a regression that keeps the recent F11 hotspot set free of `Missing docstring` warnings.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/unit/test_bootstrap_launcher.py tests/integration/test_cli.py -q -k 'recent_f11_hotspots'` (`6 passed`)
+- `source ./.venv/bin/activate && GLOGGUR_EMBEDDING_PROVIDER='' scripts/gloggur inspect src/gloggur --json --force --allow-partial` (`warning_summary.by_warning_type["Missing docstring"] = 0`)
+
+**Evidence**
+- `src/gloggur/bootstrap_launcher.py`
+- `src/gloggur/io_failures.py`
+- `src/gloggur/embeddings/errors.py`
+- `tests/integration/test_cli.py`
+
+**Remaining External Evidence**
+- None
+
 ## F12 - Calibrate Semantic Warning Scoring for Source Code
 
-**Status**: in_progress
+**Status**: ready_for_review
 **Priority**: P1
 **Owner**: codex
 
@@ -2336,3 +2669,22 @@ Observed problem output (snapshot):
   - `.venv/bin/python -m pytest tests/integration/test_cli.py::test_cli_inspect_warning_summary_payload_schema_is_stable -q -n 0` (`1 passed`) to confirm no inspect payload regression.
 - Remaining closure gaps:
   - none for this F12 sub-scope (integration floor guard + threshold rationale doc now covered).
+
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Calibrated semantic warning thresholds with kind-aware overrides and minimum code-body gating.
+- Added score explainability metadata and a deterministic integration regression for warning-count reduction.
+- Documented the threshold rationale and current defaults.
+
+**Verification**
+- `source ./.venv/bin/activate && ./.venv/bin/python -m pytest -n 0 tests/integration/test_cli.py -q -k 'calibrated_threshold_reduces_low_semantic_warning_count or inspect_warning_summary_payload_schema_is_stable'` (`2 passed`)
+- `source ./.venv/bin/activate && GLOGGUR_EMBEDDING_PROVIDER='' scripts/gloggur inspect src/gloggur --json --force --allow-partial` (`warning_summary.by_warning_type["Low semantic similarity"] = 122`; score metadata emitted per symbol)
+
+**Evidence**
+- `src/gloggur/audit/docstring_audit.py`
+- `src/gloggur/config.py`
+- `tests/unit/test_docstring_audit.py`
+- `README.md`
+
+**Remaining External Evidence**
+- None

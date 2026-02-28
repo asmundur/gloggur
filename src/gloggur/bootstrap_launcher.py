@@ -165,10 +165,7 @@ def _resolve_system_candidates(env: dict[str, str]) -> list[str]:
 
 
 def _resolve_venv_python(repo_root: str, env: dict[str, str]) -> str:
-    (
-        "Return the expected venv Python path, honouring"
-        " ``GLOGGUR_PREFLIGHT_VENV_PYTHON`` overrides."
-    )
+    """Return the expected venv Python path, honoring explicit overrides."""
     override = env.get("GLOGGUR_PREFLIGHT_VENV_PYTHON")
     if override:
         return override
@@ -349,9 +346,11 @@ def _failure_message(error_code: str, repo_root: str, venv_python: str) -> str:
 def _remediation_steps(error_code: str, repo_root: str) -> list[str]:
     """Return an ordered list of remediation steps for the given error code."""
     bootstrap = os.path.join(repo_root, "scripts", "bootstrap_gloggur_env.sh")
+    readiness = "python scripts/check_startup_readiness.py --format json"
     common = [
         f"Run `{bootstrap}` to create/repair .venv and install dependencies.",
         "Re-run `scripts/gloggur status --json` after bootstrap completes.",
+        f"Confirm startup readiness with `{readiness}`.",
     ]
     if error_code == "missing_python":
         return [
