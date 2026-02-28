@@ -55,14 +55,20 @@ class EmbeddingProviderError(RuntimeError):
 
     def to_payload(self) -> dict[str, object]:
         """Return a machine-readable error payload for JSON CLI outputs."""
+        error_code = "embedding_provider_error"
         return {
             "error": {
-                "type": "embedding_provider_error",
+                "type": error_code,
+                "code": error_code,
                 "provider": self.provider,
                 "operation": self.operation,
                 "detail": self.detail,
                 "remediation": self.remediation,
-            }
+            },
+            "failure_codes": [error_code],
+            "failure_guidance": {
+                error_code: list(self.remediation),
+            },
         }
 
 

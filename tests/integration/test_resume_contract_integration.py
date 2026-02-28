@@ -177,3 +177,94 @@ def test_resume_requires_reindex_when_last_success_tool_version_is_tampered() ->
         assert metadata["needs_reindex"] is True
         assert "tool_version_changed" in set(metadata["resume_reason_codes"])
         assert metadata["resume_decision"] == "reindex_required"
+
+
+def test_resume_allows_explicit_tool_version_drift_override() -> None:
+    """Explicit override should allow resume/search while keeping drift diagnostics machine-readable."""
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_FALLBACK": "1",
+        }
+
+        index_run = _run_cli(["index", str(repo), "--json"], env)
+        assert index_run.returncode == 0, f"{index_run.stderr}\n{index_run.stdout}"
+
+        _set_cache_meta(cache_dir, "last_success_tool_version", "tampered-version")
+
+        status_run = _run_cli(["status", "--json", "--allow-tool-version-drift"], env)
+        assert status_run.returncode == 0, f"{status_run.stderr}\n{status_run.stdout}"
+        payload = _parse_json_payload(status_run.stdout)
+        assert payload["resume_decision"] == "resume_ok"
+        assert payload["needs_reindex"] is False
+        assert payload["allow_tool_version_drift"] is True
+        assert payload["tool_version_drift_detected"] is True
+        assert payload["tool_version_drift_override_applied"] is True
+        assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+        assert payload["reindex_reason"] is None
+
+        search_run = _run_cli(
+            ["search", "add", "--json", "--allow-tool-version-drift"],
+            env,
+        )
+        assert search_run.returncode == 0, f"{search_run.stderr}\n{search_run.stdout}"
+        search_payload = _parse_json_payload(search_run.stdout)
+        results = search_payload["results"]
+        assert isinstance(results, list)
+        assert results
+        metadata = search_payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["resume_decision"] == "resume_ok"
+        assert metadata["needs_reindex"] is False
+        assert metadata["allow_tool_version_drift"] is True
+        assert metadata["tool_version_drift_detected"] is True
+        assert metadata["tool_version_drift_override_applied"] is True
+        assert metadata["resume_reason_codes"] == ["tool_version_changed_override"]
+
+
+def test_resume_allows_tool_version_drift_override_from_env_var() -> None:
+    """Env override should enable tool-version drift resume behavior without CLI flag."""
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_ALLOW_TOOL_VERSION_DRIFT": "true",
+        }
+
+        index_run = _run_cli(["index", str(repo), "--json"], env)
+        assert index_run.returncode == 0, f"{index_run.stderr}\n{index_run.stdout}"
+
+        _set_cache_meta(cache_dir, "last_success_tool_version", "tampered-version")
+
+        status_run = _run_cli(["status", "--json"], env)
+        assert status_run.returncode == 0, f"{status_run.stderr}\n{status_run.stdout}"
+        payload = _parse_json_payload(status_run.stdout)
+        assert payload["resume_decision"] == "resume_ok"
+        assert payload["needs_reindex"] is False
+        assert payload["allow_tool_version_drift"] is True
+        assert payload["tool_version_drift_detected"] is True
+        assert payload["tool_version_drift_override_applied"] is True
+        assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+        assert payload["reindex_reason"] is None
+
+        search_run = _run_cli(["search", "add", "--json"], env)
+        assert search_run.returncode == 0, f"{search_run.stderr}\n{search_run.stdout}"
+        search_payload = _parse_json_payload(search_run.stdout)
+        metadata = search_payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["resume_decision"] == "resume_ok"
+        assert metadata["needs_reindex"] is False
+        assert metadata["allow_tool_version_drift"] is True
+        assert metadata["tool_version_drift_detected"] is True
+        assert metadata["tool_version_drift_override_applied"] is True
+        assert metadata["resume_reason_codes"] == ["tool_version_changed_override"]

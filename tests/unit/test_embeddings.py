@@ -78,6 +78,32 @@ def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatc
     assert provider.get_dimension() == 2
 
 
+def test_openai_embed_batch_empty_returns_empty_without_api_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI batch embedding should not call the API for an empty batch."""
+    call_count = 0
+
+    class FakeEmbeddings:
+        def create(self, model: str, input: object):
+            nonlocal call_count
+            _ = model, input
+            call_count += 1
+            return SimpleNamespace(data=[])
+
+    class FakeOpenAI:
+        def __init__(self, api_key: str) -> None:
+            _ = api_key
+            self.embeddings = FakeEmbeddings()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
+    assert provider.embed_batch([]) == []
+    assert call_count == 0
+
+
 def test_openai_provider_api_failure_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenAI failures should include model context and original detail."""
 
@@ -96,6 +122,55 @@ def test_openai_provider_api_failure_is_actionable(monkeypatch: pytest.MonkeyPat
 
     provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
     with pytest.raises(RuntimeError, match="OpenAI embedding request failed"):
+        OpenAIEmbeddingProvider.embed_text.__wrapped__(provider, "hello")
+
+
+def test_openai_provider_fails_closed_on_malformed_batch_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI provider should fail loud on missing vectors instead of returning partial results."""
+
+    class FakeEmbeddings:
+        def create(self, model: str, input: object):
+            _ = model
+            payload = list(input) if isinstance(input, list) else [input]
+            return SimpleNamespace(
+                data=[SimpleNamespace(embedding=[0.1, 0.2])] * max(0, len(payload) - 1)
+            )
+
+    class FakeOpenAI:
+        def __init__(self, api_key: str) -> None:
+            _ = api_key
+            self.embeddings = FakeEmbeddings()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
+    with pytest.raises(RuntimeError, match="returned 1 vectors for 2 inputs"):
+        provider.embed_batch(["a", "b"])
+
+
+def test_openai_provider_fails_closed_on_non_numeric_vector_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAI provider should reject malformed vector entries."""
+
+    class FakeEmbeddings:
+        def create(self, model: str, input: object):
+            _ = model, input
+            return SimpleNamespace(data=[SimpleNamespace(embedding=[0.1, "bad"])])
+
+    class FakeOpenAI:
+        def __init__(self, api_key: str) -> None:
+            _ = api_key
+            self.embeddings = FakeEmbeddings()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
+    with pytest.raises(RuntimeError, match="non-numeric vector value"):
         OpenAIEmbeddingProvider.embed_text.__wrapped__(provider, "hello")
 
 
@@ -166,6 +241,19 @@ def test_gemini_extract_vectors_variants() -> None:
 
     response_embedding = {"embedding": [{"embedding": [0.9, 1.0]}]}
     assert GeminiEmbeddingProvider._extract_vectors(response_embedding) == [[0.9, 1.0]]
+
+
+def test_gemini_extract_vectors_fails_closed_when_response_has_no_embeddings() -> None:
+    """Gemini extraction should fail loud instead of returning an empty list."""
+    with pytest.raises(RuntimeError, match="returned no embeddings"):
+        GeminiEmbeddingProvider._extract_vectors({}, model="gemini-embedding-001")
+
+
+def test_gemini_extract_vectors_rejects_non_numeric_values() -> None:
+    """Gemini extraction should reject malformed vector payloads."""
+    response = {"embeddings": [{"values": [0.5, "bad"]}]}
+    with pytest.raises(RuntimeError, match="non-numeric vector value"):
+        GeminiEmbeddingProvider._extract_vectors(response, model="gemini-embedding-001")
 
 
 def _patch_genai(monkeypatch: pytest.MonkeyPatch, fake_client_cls: type) -> None:

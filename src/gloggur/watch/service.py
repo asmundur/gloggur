@@ -331,6 +331,7 @@ class WatchService:
         metadata_invalidated = False
 
         def _invalidate_metadata() -> None:
+            """Drop index metadata once per batch before mutating incremental state."""
             nonlocal metadata_invalidated
             if metadata_invalidated:
                 return

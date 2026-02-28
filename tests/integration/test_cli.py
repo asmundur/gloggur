@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import sys
+import tarfile
 import tempfile
+import urllib.error
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
+from gloggur.cli import main as cli_main
 from gloggur.cli.main import cli
+from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from scripts.verification.fixtures import TestFixtures
 
@@ -46,6 +54,11 @@ def _tamper_vector_id_map_drop_one_symbol(cache_dir: str) -> None:
     id_map_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf8")
 
 
+def _sha256_for_file(path: Path) -> str:
+    """Return sha256 digest for a file path."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def test_cli_index_search_status_and_clear_cache() -> None:
     """End-to-end CLI test for index/search/status/clear-cache."""
     runner = CliRunner()
@@ -76,6 +89,130 @@ def test_cli_index_search_status_and_clear_cache() -> None:
         assert clear_result.exit_code == 0
         clear_payload = _parse_json_output(clear_result.output)
         assert clear_payload["cleared"] is True
+
+
+def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
+    """Low-signal search should emit deterministic retry telemetry and low-confidence marker."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0
+
+        search_result = runner.invoke(
+            cli,
+            [
+                "search",
+                "unlikely-token-for-low-signal",
+                "--json",
+                "--file",
+                "missing.py",
+                "--top-k",
+                "2",
+                "--confidence-threshold",
+                "0.95",
+                "--max-requery-attempts",
+                "1",
+            ],
+            env=env,
+        )
+        assert search_result.exit_code == 0, search_result.output
+        payload = _parse_json_output(search_result.output)
+        metadata = payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert int(metadata["total_results"]) == 0
+        assert metadata["initial_confidence"] == pytest.approx(0.0)
+        assert metadata["final_confidence"] == pytest.approx(0.0)
+        assert metadata["retry_performed"] is True
+        assert metadata["retry_attempts"] == 1
+        assert metadata["retry_strategy"] == "top_k_expansion"
+        assert metadata["initial_top_k"] == 2
+        assert metadata["final_top_k"] == 4
+        assert metadata["low_confidence"] is True
+
+
+def test_cli_search_emits_evidence_trace_and_validation_for_grounded_query() -> None:
+    """Grounded search should emit evidence trace and passing validation when requested."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0
+
+        search_result = runner.invoke(
+            cli,
+            [
+                "search",
+                "add",
+                "--json",
+                "--with-evidence-trace",
+                "--validate-grounding",
+                "--evidence-min-confidence",
+                "0.0",
+                "--evidence-min-items",
+                "1",
+            ],
+            env=env,
+        )
+        assert search_result.exit_code == 0, search_result.output
+        payload = _parse_json_output(search_result.output)
+        evidence = payload["evidence_trace"]
+        assert isinstance(evidence, list) and evidence
+        first = evidence[0]
+        assert isinstance(first["symbol_id"], str)
+        assert first["line_span"]["start"] >= 1
+        validation = payload["validation"]
+        assert isinstance(validation, dict)
+        assert validation["passed"] is True
+        assert validation["reason_code"] == "grounding_sufficient"
+
+
+def test_cli_search_fail_on_ungrounded_returns_nonzero_with_validation_payload() -> None:
+    """Ungrounded validation path should fail closed with deterministic JSON contract."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0
+
+        search_result = runner.invoke(
+            cli,
+            [
+                "search",
+                "needle",
+                "--json",
+                "--file",
+                "missing.py",
+                "--validate-grounding",
+                "--fail-on-ungrounded",
+            ],
+            env=env,
+        )
+        assert search_result.exit_code == 1
+        payload = _parse_json_output(search_result.output)
+        validation = payload["validation"]
+        assert isinstance(validation, dict)
+        assert validation["passed"] is False
+        assert validation["reason_code"] == "grounding_evidence_missing"
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "search_grounding_validation_failed"
+        assert payload["failure_codes"] == ["search_grounding_validation_failed"]
 
 
 def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
@@ -348,6 +485,11 @@ def test_cli_index_reports_vector_metadata_mismatch_on_tampered_vector_map() -> 
         assert "vector_metadata_mismatch" in guidance
         assert isinstance(guidance["vector_metadata_mismatch"], list)
         assert guidance["vector_metadata_mismatch"]
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "index_failure"
+        assert error["code"] == "vector_metadata_mismatch"
+        assert "Indexing completed with file-level failures." in str(error["detail"])
 
 
 def test_cli_single_file_index_fails_closed_on_tampered_vector_map() -> None:
@@ -565,6 +707,557 @@ def test_cli_clear_cache_self_heals_corrupted_cache() -> None:
     assert payload["cleared"] is True
 
 
+def test_cli_artifact_publish_packages_cache_with_manifest() -> None:
+    """artifact publish should emit deterministic checksums and embed manifest in archive."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        artifacts_dir = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-"))
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            ["artifact", "publish", "--json", "--destination", str(artifacts_dir)],
+            env=env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        payload = _parse_json_output(publish_result.output)
+        assert payload["published"] is True
+        artifact_path = Path(str(payload["artifact_path"]))
+        assert artifact_path.exists()
+        assert payload["artifact_uri"] == artifact_path.resolve().as_uri()
+        assert payload["archive_sha256"] == _sha256_for_file(artifact_path)
+        assert int(payload["archive_bytes"]) == artifact_path.stat().st_size
+        manifest = payload["manifest"]
+        assert isinstance(manifest, dict)
+        assert manifest["manifest_schema_version"] == "1"
+        assert int(manifest["files_total"]) > 0
+        manifest_payload = json.dumps(manifest, sort_keys=True, indent=2).encode("utf8") + b"\n"
+        assert payload["manifest_sha256"] == hashlib.sha256(manifest_payload).hexdigest()
+
+        with tarfile.open(artifact_path, "r:gz") as archive:
+            names = sorted(archive.getnames())
+            assert "manifest.json" in names
+            assert any(name.startswith("cache/") for name in names)
+            manifest_member = archive.extractfile("manifest.json")
+            assert manifest_member is not None
+            archived_manifest = json.loads(manifest_member.read().decode("utf8"))
+            assert archived_manifest == manifest
+
+
+def test_cli_artifact_publish_fails_closed_for_unsupported_destination_scheme() -> None:
+    """artifact publish should return structured failure codes for unsupported destination schemes."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            ["artifact", "publish", "--json", "--destination", "ftp://example.com/upload"],
+            env=env,
+        )
+        assert result.exit_code == 1, result.output
+        payload = _parse_json_output(result.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "cli_contract_error"
+        assert error["code"] == "artifact_destination_unsupported"
+        assert payload["failure_codes"] == ["artifact_destination_unsupported"]
+
+
+def test_cli_artifact_publish_fails_closed_for_uninitialized_source_cache() -> None:
+    """artifact publish should fail closed when source cache has no index metadata."""
+    runner = CliRunner()
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    _write_fallback_marker(cache_dir)
+    env = {"GLOGGUR_CACHE_DIR": cache_dir}
+    destination = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-")) / "artifact.tar.gz"
+
+    result = runner.invoke(
+        cli,
+        ["artifact", "publish", "--json", "--destination", str(destination)],
+        env=env,
+    )
+    assert result.exit_code == 1, result.output
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "cli_contract_error"
+    assert error["code"] == "artifact_source_uninitialized"
+    assert payload["failure_codes"] == ["artifact_source_uninitialized"]
+
+
+def test_cli_artifact_publish_fails_closed_when_destination_exists_without_overwrite() -> None:
+    """artifact publish should not silently overwrite existing destination artifacts."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        destination_path = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-")) / "cache-artifact.tgz"
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        first_publish = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "publish",
+                "--json",
+                "--destination",
+                str(destination_path),
+            ],
+            env=env,
+        )
+        assert first_publish.exit_code == 0, first_publish.output
+
+        second_publish = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "publish",
+                "--json",
+                "--destination",
+                str(destination_path),
+            ],
+            env=env,
+        )
+        assert second_publish.exit_code == 1, second_publish.output
+        payload = _parse_json_output(second_publish.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "cli_contract_error"
+        assert error["code"] == "artifact_destination_exists"
+        assert payload["failure_codes"] == ["artifact_destination_exists"]
+
+
+def test_cli_artifact_publish_supports_uploader_command_template() -> None:
+    """artifact publish should support external uploader-command transport with stable metadata."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        uploader_dir = Path(tempfile.mkdtemp(prefix="gloggur-uploader-"))
+        uploader_script = uploader_dir / "copy_uploader.py"
+        uploader_script.write_text(
+            "from pathlib import Path\n"
+            "import shutil\n"
+            "import sys\n"
+            "src = Path(sys.argv[1])\n"
+            "dest = Path(sys.argv[2])\n"
+            "dest.parent.mkdir(parents=True, exist_ok=True)\n"
+            "shutil.copyfile(src, dest)\n",
+            encoding="utf8",
+        )
+        uploaded_artifact = uploader_dir / "uploaded" / "cache-artifact.tgz"
+        uploader_template = (
+            f"{sys.executable} {uploader_script} "
+            "{artifact_path} {destination}"
+        )
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "publish",
+                "--json",
+                "--destination",
+                str(uploaded_artifact),
+                "--uploader-command",
+                uploader_template,
+            ],
+            env=env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        payload = _parse_json_output(publish_result.output)
+        assert payload["published"] is True
+        assert payload["transport"] == "uploader_command"
+        assert payload["artifact_destination"] == str(uploaded_artifact)
+        assert payload["artifact_path"] is None
+        assert payload["artifact_uri"] == str(uploaded_artifact)
+        assert uploaded_artifact.exists()
+        assert payload["archive_sha256"] == _sha256_for_file(uploaded_artifact)
+        assert int(payload["archive_bytes"]) == uploaded_artifact.stat().st_size
+        uploader = payload["uploader"]
+        assert isinstance(uploader, dict)
+        assert uploader["mode"] == "uploader_command"
+        assert uploader["destination"] == str(uploaded_artifact)
+        validate_result = runner.invoke(
+            cli,
+            ["artifact", "validate", "--json", "--artifact", str(uploaded_artifact)],
+        )
+        assert validate_result.exit_code == 0, validate_result.output
+
+
+def test_cli_artifact_publish_fails_closed_for_uploader_command_failure() -> None:
+    """artifact publish should surface structured failure codes for uploader-command errors."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        uploader_dir = Path(tempfile.mkdtemp(prefix="gloggur-uploader-"))
+        uploader_script = uploader_dir / "fail_uploader.py"
+        uploader_script.write_text(
+            "import sys\n"
+            "sys.stderr.write('simulated uploader failure\\n')\n"
+            "raise SystemExit(7)\n",
+            encoding="utf8",
+        )
+        uploader_template = (
+            f"{sys.executable} {uploader_script} "
+            "{artifact_path} {destination}"
+        )
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "publish",
+                "--json",
+                "--destination",
+                "https://example.com/upload",
+                "--uploader-command",
+                uploader_template,
+            ],
+            env=env,
+        )
+        assert result.exit_code == 1, result.output
+        payload = _parse_json_output(result.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "cli_contract_error"
+        assert error["code"] == "artifact_uploader_failed"
+        assert payload["failure_codes"] == ["artifact_uploader_failed"]
+
+
+def test_cli_artifact_publish_supports_direct_http_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """artifact publish should support direct HTTP PUT upload with stable metadata and headers."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    destination_url = "https://artifacts.example.test/upload/cache-artifact.tgz"
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.headers = {
+                "Content-Type": "application/json",
+                "ETag": "test-etag",
+            }
+
+        def read(self) -> bytes:
+            return b'{"uploaded": true}'
+
+        def getcode(self) -> int:
+            return self.status
+
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    def _fake_urlopen(request: object, timeout: float) -> _FakeResponse:
+        assert isinstance(request, cli_main.urllib_request.Request)
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = request.data
+        return _FakeResponse()
+
+    monkeypatch.setattr(cli_main.urllib_request, "urlopen", _fake_urlopen)
+
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "publish",
+                "--json",
+                "--destination",
+                destination_url,
+            ],
+            env=env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        payload = _parse_json_output(publish_result.output)
+        assert payload["published"] is True
+        assert payload["transport"] == "http_put"
+        assert payload["artifact_destination"] == destination_url
+        assert payload["artifact_path"] is None
+        assert payload["artifact_uri"] == destination_url
+        http_upload = payload["http_upload"]
+        assert isinstance(http_upload, dict)
+        assert http_upload["mode"] == "http_put"
+        assert http_upload["destination"] == destination_url
+        assert int(http_upload["status_code"]) == 200
+        uploaded_body = captured["body"]
+        assert isinstance(uploaded_body, bytes)
+        assert hashlib.sha256(uploaded_body).hexdigest() == payload["archive_sha256"]
+        assert len(uploaded_body) == int(payload["archive_bytes"])
+        headers = captured["headers"]
+        assert isinstance(headers, dict)
+        assert headers["X-gloggur-archive-sha256"] == payload["archive_sha256"]
+        assert headers["X-gloggur-archive-bytes"] == str(payload["archive_bytes"])
+        assert headers["X-gloggur-manifest-sha256"] == payload["manifest_sha256"]
+        uploaded_path = Path(tempfile.mkdtemp(prefix="gloggur-http-upload-")) / "uploaded-artifact.tgz"
+        uploaded_path.write_bytes(uploaded_body)
+        validate_result = runner.invoke(
+            cli,
+            ["artifact", "validate", "--json", "--artifact", str(uploaded_path)],
+        )
+        assert validate_result.exit_code == 0, validate_result.output
+
+
+def test_cli_artifact_publish_fails_closed_for_http_upload_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """artifact publish should emit a stable contract for non-2xx HTTP upload responses."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    destination_url = "https://artifacts.example.test/upload/cache-artifact.tgz"
+
+    def _failing_urlopen(request: object, timeout: float) -> object:
+        assert isinstance(request, cli_main.urllib_request.Request)
+        raise urllib.error.HTTPError(
+            destination_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b"forbidden"),
+        )
+
+    monkeypatch.setattr(cli_main.urllib_request, "urlopen", _failing_urlopen)
+
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "publish",
+                "--json",
+                "--destination",
+                destination_url,
+            ],
+            env=env,
+        )
+        assert result.exit_code == 1, result.output
+        payload = _parse_json_output(result.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "cli_contract_error"
+        assert error["code"] == "artifact_http_upload_failed"
+        assert payload["failure_codes"] == ["artifact_http_upload_failed"]
+
+
+def test_cli_artifact_validate_reports_verified_metadata_after_publish() -> None:
+    """artifact validate should verify published archive integrity and manifest metadata."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        artifacts_dir = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-"))
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            ["artifact", "publish", "--json", "--destination", str(artifacts_dir)],
+            env=env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        publish_payload = _parse_json_output(publish_result.output)
+        artifact_path = Path(str(publish_payload["artifact_path"]))
+
+        validate_result = runner.invoke(
+            cli,
+            ["artifact", "validate", "--json", "--artifact", str(artifact_path)],
+        )
+        assert validate_result.exit_code == 0, validate_result.output
+        payload = _parse_json_output(validate_result.output)
+        assert payload["valid"] is True
+        assert payload["artifact_uri"] == artifact_path.resolve().as_uri()
+        assert payload["archive_sha256"] == _sha256_for_file(artifact_path)
+        assert int(payload["archive_bytes"]) == artifact_path.stat().st_size
+        assert payload["manifest"] == publish_payload["manifest"]
+        verification = payload["file_hash_verification"]
+        assert verification["enabled"] is True
+        assert verification["checked_files"] == payload["manifest"]["files_total"]
+        assert verification["checked_bytes"] == payload["manifest"]["bytes_total"]
+
+
+def test_cli_artifact_validate_fails_closed_for_missing_artifact_path() -> None:
+    """artifact validate should emit a stable contract when the requested archive is missing."""
+    runner = CliRunner()
+    missing_artifact = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-")) / "missing.tar.gz"
+
+    result = runner.invoke(
+        cli,
+        ["artifact", "validate", "--json", "--artifact", str(missing_artifact)],
+    )
+    assert result.exit_code == 1, result.output
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "cli_contract_error"
+    assert error["code"] == "artifact_path_missing"
+    assert payload["failure_codes"] == ["artifact_path_missing"]
+
+
+def test_cli_artifact_restore_restores_cache_for_downstream_search() -> None:
+    """artifact restore should recreate a reusable cache directory for downstream status/search."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        source_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-source-")
+        _write_fallback_marker(source_cache_dir)
+        artifacts_dir = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-"))
+        source_env = {"GLOGGUR_CACHE_DIR": source_cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=source_env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            ["artifact", "publish", "--json", "--destination", str(artifacts_dir)],
+            env=source_env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        publish_payload = _parse_json_output(publish_result.output)
+        artifact_path = Path(str(publish_payload["artifact_path"]))
+
+        restore_root = Path(tempfile.mkdtemp(prefix="gloggur-restored-parent-"))
+        restore_dir = restore_root / "restored-cache"
+        restore_result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "restore",
+                "--json",
+                "--artifact",
+                str(artifact_path),
+                "--destination",
+                str(restore_dir),
+            ],
+        )
+        assert restore_result.exit_code == 0, restore_result.output
+        restore_payload = _parse_json_output(restore_result.output)
+        assert restore_payload["restored"] is True
+        assert restore_payload["destination_cache_dir"] == str(restore_dir)
+        assert restore_payload["restored_files"] == publish_payload["manifest"]["files_total"]
+        assert restore_payload["restored_bytes"] == publish_payload["manifest"]["bytes_total"]
+        assert (restore_dir / "index.db").exists()
+
+        restored_env = {"GLOGGUR_CACHE_DIR": str(restore_dir)}
+        status_result = runner.invoke(cli, ["status", "--json"], env=restored_env)
+        assert status_result.exit_code == 0, status_result.output
+        status_payload = _parse_json_output(status_result.output)
+        assert int(status_payload["total_symbols"]) > 0
+
+        search_result = runner.invoke(
+            cli,
+            ["search", "add", "--json", "--top-k", "3"],
+            env=restored_env,
+        )
+        assert search_result.exit_code == 0, search_result.output
+        search_payload = _parse_json_output(search_result.output)
+        assert int(search_payload["metadata"]["total_results"]) > 0
+
+
+def test_cli_artifact_restore_fails_closed_when_destination_exists_without_overwrite() -> None:
+    """artifact restore should not silently replace an existing cache directory."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        source_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-source-")
+        _write_fallback_marker(source_cache_dir)
+        artifacts_dir = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-"))
+        source_env = {"GLOGGUR_CACHE_DIR": source_cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=source_env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            ["artifact", "publish", "--json", "--destination", str(artifacts_dir)],
+            env=source_env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        artifact_path = Path(str(_parse_json_output(publish_result.output)["artifact_path"]))
+
+        restore_dir = Path(tempfile.mkdtemp(prefix="gloggur-restored-cache-"))
+        result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "restore",
+                "--json",
+                "--artifact",
+                str(artifact_path),
+                "--destination",
+                str(restore_dir),
+            ],
+        )
+        assert result.exit_code == 1, result.output
+        payload = _parse_json_output(result.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "cli_contract_error"
+        assert error["code"] == "artifact_restore_destination_exists"
+        assert payload["failure_codes"] == ["artifact_restore_destination_exists"]
+
+
 def test_cli_inspect_self_heals_corrupted_cache() -> None:
     """Inspect command should run after automatic corruption recovery."""
     runner = CliRunner()
@@ -677,6 +1370,266 @@ def test_cli_inspect_explicit_tests_path_remains_included_without_flags() -> Non
         assert int(by_class["src"]) == 0
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "src/gloggur/config.py",
+        "src/gloggur/cli/main.py",
+        "src/gloggur/embeddings/gemini.py",
+        "src/gloggur/indexer/concurrency.py",
+        "src/gloggur/indexer/indexer.py",
+        "src/gloggur/watch/service.py",
+    ],
+)
+def test_cli_inspect_reports_no_missing_docstrings_for_recent_f11_hotspots(
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+) -> None:
+    """Recently cleaned hotspot files should stay free of Missing docstring warnings."""
+    runner = CliRunner()
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda config: None,
+    )
+    env = {
+        "GLOGGUR_CACHE_DIR": tempfile.mkdtemp(prefix="gloggur-cache-"),
+        "GLOGGUR_EMBEDDING_PROVIDER": "",
+    }
+
+    result = runner.invoke(cli, ["inspect", relative_path, "--json", "--force"], env=env)
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    missing = [
+        item["symbol_id"]
+        for item in payload["warnings"]
+        if "Missing docstring" in item.get("warnings", [])
+    ]
+    assert missing == []
+
+
+def test_cli_inspect_reuses_cached_warning_reports_for_unchanged_files() -> None:
+    """Second inspect without --force should preserve actionable warnings from cache."""
+    runner = CliRunner()
+    source_no_docstring = (
+        "def sample(value: int) -> int:\n"
+        "    return value + 1\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"src/main.py": source_no_docstring})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        first = runner.invoke(cli, ["inspect", str(repo), "--json", "--force"], env=env)
+        assert first.exit_code == 0, first.output
+        first_payload = _parse_json_output(first.output)
+        assert int(first_payload["total"]) > 0
+        assert int(first_payload["cached_files_reused"]) == 0
+        first_warning_ids = sorted(str(item["symbol_id"]) for item in first_payload["warnings"])
+
+        second = runner.invoke(cli, ["inspect", str(repo), "--json"], env=env)
+        assert second.exit_code == 0, second.output
+        second_payload = _parse_json_output(second.output)
+        assert int(second_payload["skipped_files"]) == 1
+        assert int(second_payload["cached_files_reused"]) == 1
+        assert int(second_payload["cached_warning_reports_reused"]) == int(first_payload["total"])
+        second_warning_ids = sorted(str(item["symbol_id"]) for item in second_payload["warnings"])
+        assert second_warning_ids == first_warning_ids
+        assert int(second_payload["total"]) == int(first_payload["total"])
+        assert second_payload["failure_codes"] == []
+
+
+def test_cli_inspect_reuses_cached_clean_reports_for_unchanged_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second inspect without --force should preserve clean semantic reports from cache."""
+    runner = CliRunner()
+    source = (
+        "def sample(value: int) -> int:\n"
+        '    """Increment the value."""\n'
+        "    return value + 1\n"
+    )
+
+    class FakeEmbedding(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [1.0, 0.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            _ = texts
+            return [[1.0, 0.0], [1.0, 0.0]]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda config: FakeEmbedding(),
+    )
+
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"src/main.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config_path = Path(repo) / "gloggur.yaml"
+        config_path.write_text(
+            "docstring_semantic_threshold: 0.2\n"
+            "docstring_semantic_min_chars: 0\n",
+            encoding="utf8",
+        )
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        first = runner.invoke(
+            cli,
+            ["inspect", str(repo), "--json", "--force", "--config", str(config_path)],
+            env=env,
+        )
+        assert first.exit_code == 0, first.output
+        first_payload = _parse_json_output(first.output)
+        assert int(first_payload["total"]) == 0
+        assert int(first_payload["reports_total"]) == 1
+        assert int(first_payload["cached_reports_reused"]) == 0
+
+        second = runner.invoke(
+            cli,
+            ["inspect", str(repo), "--json", "--config", str(config_path)],
+            env=env,
+        )
+        assert second.exit_code == 0, second.output
+        second_payload = _parse_json_output(second.output)
+        assert int(second_payload["skipped_files"]) == 1
+        assert int(second_payload["cached_files_reused"]) == 1
+        assert int(second_payload["cached_reports_reused"]) == 1
+        assert int(second_payload["cached_warning_reports_reused"]) == 0
+        assert int(second_payload["total"]) == 0
+        assert int(second_payload["reports_total"]) == 1
+        reports = second_payload["reports"]
+        assert isinstance(reports, list)
+        assert len(reports) == 1
+        score_metadata = reports[0]["score_metadata"]
+        assert isinstance(score_metadata, dict)
+        assert score_metadata["cached_report_reuse"] is True
+
+
+def test_cli_inspect_clears_stale_cached_reports_after_file_is_fixed() -> None:
+    """A fixed file should not resurrect stale cached warnings on the next unchanged inspect."""
+    runner = CliRunner()
+    source_no_docstring = (
+        "def sample(value: int) -> int:\n"
+        "    return value + 1\n"
+    )
+    source_with_docstring = (
+        "def sample(value: int) -> int:\n"
+        '    """Increment the value."""\n'
+        "    return value + 1\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"src/main.py": source_no_docstring})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        first = runner.invoke(cli, ["inspect", str(repo), "--json", "--force"], env=env)
+        assert first.exit_code == 0, first.output
+        first_payload = _parse_json_output(first.output)
+        assert int(first_payload["total"]) == 1
+
+        (Path(repo) / "src" / "main.py").write_text(source_with_docstring, encoding="utf8")
+        second = runner.invoke(cli, ["inspect", str(repo), "--json", "--force"], env=env)
+        assert second.exit_code == 0, second.output
+        second_payload = _parse_json_output(second.output)
+        assert int(second_payload["total"]) == 0
+
+        third = runner.invoke(cli, ["inspect", str(repo), "--json"], env=env)
+        assert third.exit_code == 0, third.output
+        third_payload = _parse_json_output(third.output)
+        assert int(third_payload["skipped_files"]) == 1
+        assert int(third_payload["cached_files_reused"]) == 1
+        assert int(third_payload["cached_warning_reports_reused"]) == 0
+        assert int(third_payload["total"]) == 0
+        assert int(third_payload["reports_total"]) == int(second_payload["reports_total"])
+
+
+def test_cli_inspect_allow_partial_emits_failure_contract_for_decode_errors() -> None:
+    """Inspect should report deterministic failure codes/guidance when partial failures are allowed."""
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/main.py": (
+                    "def sample(value: int) -> int:\n"
+                    "    return value + 1\n"
+                )
+            }
+        )
+        (repo / "src" / "broken.py").write_bytes(b"\xff\xfe\x00\x00")
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        result = runner.invoke(
+            cli,
+            ["inspect", str(repo), "--json", "--force", "--allow-partial"],
+            env=env,
+        )
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert int(payload["failed"]) == 1
+        assert payload["allow_partial"] is True
+        assert payload["allow_partial_applied"] is True
+        reasons = payload["failed_reasons"]
+        assert isinstance(reasons, dict)
+        assert reasons == {"decode_error": 1}
+        failure_codes = payload["failure_codes"]
+        assert isinstance(failure_codes, list)
+        assert failure_codes == ["decode_error"]
+        guidance = payload["failure_guidance"]
+        assert isinstance(guidance, dict)
+        assert "decode_error" in guidance
+        assert isinstance(guidance["decode_error"], list)
+        assert guidance["decode_error"]
+        samples = payload["failed_samples"]
+        assert isinstance(samples, list)
+        assert samples
+
+
+def test_cli_inspect_fails_closed_without_allow_partial_on_decode_errors() -> None:
+    """Inspect should exit non-zero when file failures occur without explicit partial override."""
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/main.py": (
+                    "def sample(value: int) -> int:\n"
+                    "    return value + 1\n"
+                )
+            }
+        )
+        (repo / "src" / "broken.py").write_bytes(b"\xff\xfe\x00\x00")
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        result = runner.invoke(
+            cli,
+            ["inspect", str(repo), "--json", "--force"],
+            env=env,
+        )
+        assert result.exit_code == 1, result.output
+        payload = _parse_json_output(result.output)
+        assert int(payload["failed"]) == 1
+        assert payload["allow_partial"] is False
+        assert payload["allow_partial_applied"] is False
+        assert payload["failure_codes"] == ["decode_error"]
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "inspect_failure"
+        assert error["code"] == "decode_error"
+        assert "Inspect completed with file-level failures." in str(error["detail"])
+
+
 def test_cli_inspect_warning_summary_payload_schema_is_stable() -> None:
     """Inspect payload should keep stable summary fields and value types for automations."""
     runner = CliRunner()
@@ -707,6 +1660,16 @@ def test_cli_inspect_warning_summary_payload_schema_is_stable() -> None:
 
         assert "inspect_payload_schema_version" in payload
         assert payload["inspect_payload_schema_version"] == "1"
+        schema_policy = payload["inspect_payload_schema_policy"]
+        assert isinstance(schema_policy, dict)
+        assert set(schema_policy.keys()) == {
+            "policy_version",
+            "bump_required_for",
+            "bump_not_required_for",
+        }
+        assert schema_policy["policy_version"] == "1"
+        assert isinstance(schema_policy["bump_required_for"], list)
+        assert isinstance(schema_policy["bump_not_required_for"], list)
 
         scope = payload["inspect_scope"]
         assert isinstance(scope, dict)
@@ -714,6 +1677,8 @@ def test_cli_inspect_warning_summary_payload_schema_is_stable() -> None:
         assert isinstance(scope["default_src_focus"], bool)
         assert isinstance(scope["include_tests"], bool)
         assert isinstance(scope["include_scripts"], bool)
+        assert payload["allow_partial"] is False
+        assert payload["allow_partial_applied"] is False
 
         summary = payload["warning_summary"]
         assert isinstance(summary, dict)
@@ -745,3 +1710,113 @@ def test_cli_inspect_warning_summary_payload_schema_is_stable() -> None:
             assert isinstance(item["file"], str)
             assert isinstance(item["warnings"], int)
             assert item["path_class"] in {"src", "tests", "scripts", "other"}
+
+        assert payload["failure_codes"] == []
+        assert payload["failure_guidance"] == {}
+
+
+def test_cli_inspect_calibrated_threshold_reduces_low_semantic_warning_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calibrated threshold should reduce low-semantic warnings versus legacy 0.2."""
+    runner = CliRunner()
+
+    class DeterministicInspectEmbeddingProvider(EmbeddingProvider):
+        """Deterministic provider to stabilize inspect warning-count regression checks."""
+
+        @staticmethod
+        def _vector_for_score(score: float) -> list[float]:
+            safe_score = max(0.0, min(1.0, score))
+            tail = (1.0 - (safe_score * safe_score)) ** 0.5
+            return [safe_score, tail]
+
+        def embed_text(self, text: str) -> list[float]:
+            lowered = text.lower()
+            if "doc_hi" in lowered:
+                return [1.0, 0.0]
+            if "doc_mid_a" in lowered:
+                return [1.0, 0.0]
+            if "doc_mid_b" in lowered:
+                return [1.0, 0.0]
+            if "doc_low" in lowered:
+                return [1.0, 0.0]
+            if "code_hi" in lowered:
+                return self._vector_for_score(0.90)
+            if "code_mid_a" in lowered:
+                return self._vector_for_score(0.15)
+            if "code_mid_b" in lowered:
+                return self._vector_for_score(0.16)
+            if "code_low" in lowered:
+                return self._vector_for_score(0.02)
+            return [1.0, 0.0]
+
+        def embed_batch(self, texts) -> list[list[float]]:
+            return [self.embed_text(text) for text in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda _config, **_kwargs: DeterministicInspectEmbeddingProvider(),
+    )
+
+    source = (
+        "def high_signal() -> int:\n"
+        "    \"\"\"DOC_HI descriptive text.\"\"\"\n"
+        "    value = 1 + 1  # CODE_HI marker with stable semantic alignment padding text.\n"
+        "    return value\n\n"
+        "def medium_signal_a() -> int:\n"
+        "    \"\"\"DOC_MID_A descriptive text.\"\"\"\n"
+        "    value = 2 + 2  # CODE_MID_A marker with deterministic medium score padding.\n"
+        "    return value\n\n"
+        "def medium_signal_b() -> int:\n"
+        "    \"\"\"DOC_MID_B descriptive text.\"\"\"\n"
+        "    value = 3 + 3  # CODE_MID_B marker with deterministic medium score padding.\n"
+        "    return value\n\n"
+        "def low_signal() -> int:\n"
+        "    \"\"\"DOC_LOW descriptive text.\"\"\"\n"
+        "    value = 4 + 4  # CODE_LOW marker with deterministic low score padding text.\n"
+        "    return value\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"src/sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        legacy_config = repo / "legacy-threshold.yaml"
+        legacy_config.write_text(
+            "docstring_semantic_threshold: 0.2\n",
+            encoding="utf8",
+        )
+
+        calibrated_result = runner.invoke(
+            cli,
+            ["inspect", str(repo), "--json", "--force"],
+            env=env,
+        )
+        assert calibrated_result.exit_code == 0, calibrated_result.output
+        calibrated_payload = _parse_json_output(calibrated_result.output)
+        calibrated_summary = calibrated_payload["warning_summary"]
+        assert isinstance(calibrated_summary, dict)
+        calibrated_by_type = calibrated_summary["by_warning_type"]
+        assert isinstance(calibrated_by_type, dict)
+        calibrated_low = int(calibrated_by_type.get("Low semantic similarity", 0))
+
+        legacy_result = runner.invoke(
+            cli,
+            ["inspect", str(repo), "--json", "--force", "--config", str(legacy_config)],
+            env=env,
+        )
+        assert legacy_result.exit_code == 0, legacy_result.output
+        legacy_payload = _parse_json_output(legacy_result.output)
+        legacy_summary = legacy_payload["warning_summary"]
+        assert isinstance(legacy_summary, dict)
+        legacy_by_type = legacy_summary["by_warning_type"]
+        assert isinstance(legacy_by_type, dict)
+        legacy_low = int(legacy_by_type.get("Low semantic similarity", 0))
+
+        assert legacy_low == 3
+        assert calibrated_low == 1
+        assert calibrated_low <= int(legacy_low * 0.6)

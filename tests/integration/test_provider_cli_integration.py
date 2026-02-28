@@ -120,8 +120,153 @@ def test_missing_provider_credentials_fail_without_traceback_and_with_json_paylo
     error = payload["error"]
     assert isinstance(error, dict)
     assert error["type"] == "embedding_provider_error"
+    assert error["code"] == "embedding_provider_error"
     assert error["provider"] == provider
     assert detail_hint in str(error["detail"])
+    assert payload["failure_codes"] == ["embedding_provider_error"]
+    assert payload["failure_guidance"] == {
+        "embedding_provider_error": error["remediation"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_env", "model_value", "factory_attr"),
+    [
+        ("openai", "GLOGGUR_OPENAI_MODEL", "openai-test-model", "OpenAIEmbeddingProvider"),
+        ("gemini", "GLOGGUR_GEMINI_MODEL", "gemini-test-model", "GeminiEmbeddingProvider"),
+    ],
+)
+def test_provider_malformed_batch_response_fails_closed_in_json_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model_env: str,
+    model_value: str,
+    factory_attr: str,
+) -> None:
+    """Malformed provider batch output must fail non-zero instead of silently indexing partially."""
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(repo)
+    (repo / "sample.py").write_text(
+        "def add(a: int, b: int) -> int:\n"
+        "    return a + b\n"
+        "def sub(a: int, b: int) -> int:\n"
+        "    return a - b\n",
+        encoding="utf8",
+    )
+
+    class FakeProvider:
+        provider = "unknown"
+
+        def __init__(self, model: str, api_key: str | None = None) -> None:
+            _ = model, api_key
+
+        def embed_text(self, _text: str) -> list[float]:
+            return [0.1, 0.2, 0.3]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            _ = texts
+            return [[0.1, 0.2, 0.3]]
+
+        def get_dimension(self) -> int:
+            return 3
+
+    FakeProvider.provider = provider
+    monkeypatch.setattr(f"gloggur.embeddings.factory.{factory_attr}", FakeProvider)
+    env = {
+        "GLOGGUR_CACHE_DIR": str(tmp_path / f"cache-{provider}"),
+        "GLOGGUR_EMBEDDING_PROVIDER": provider,
+        model_env: model_value,
+        "GLOGGUR_GEMINI_API_KEY": "test-key",
+        "OPENAI_API_KEY": "test-key",
+    }
+
+    result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+
+    assert result.exit_code == 1
+    assert "Traceback (most recent call last)" not in result.output
+    payload = _parse_json_output(result.output)
+    failure_codes = payload["failure_codes"]
+    assert isinstance(failure_codes, list)
+    assert failure_codes == ["embedding_provider_error"]
+    failed_samples = payload["failed_samples"]
+    assert isinstance(failed_samples, list)
+    assert failed_samples
+    assert f"Embedding provider failure [{provider}]" in failed_samples[0]
+    assert "returned 1 vectors" in failed_samples[0]
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_env", "model_value", "factory_attr"),
+    [
+        ("openai", "GLOGGUR_OPENAI_MODEL", "openai-test-model", "OpenAIEmbeddingProvider"),
+        ("gemini", "GLOGGUR_GEMINI_MODEL", "gemini-test-model", "GeminiEmbeddingProvider"),
+    ],
+)
+def test_single_file_index_provider_failures_keep_embedding_provider_error_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model_env: str,
+    model_value: str,
+    factory_attr: str,
+) -> None:
+    """Single-file index should not misclassify provider runtime failures as storage errors."""
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(repo)
+    file_path = repo / "sample.py"
+    file_path.write_text(
+        "def add(a: int, b: int) -> int:\n"
+        "    return a + b\n",
+        encoding="utf8",
+    )
+
+    class FakeProvider:
+        provider = "unknown"
+
+        def __init__(self, model: str, api_key: str | None = None) -> None:
+            _ = model, api_key
+
+        def embed_text(self, _text: str) -> list[float]:
+            return [0.1, 0.2, 0.3]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            _ = texts
+            raise RuntimeError("provider batch exploded")
+
+        def get_dimension(self) -> int:
+            return 3
+
+    FakeProvider.provider = provider
+    monkeypatch.setattr(f"gloggur.embeddings.factory.{factory_attr}", FakeProvider)
+    env = {
+        "GLOGGUR_CACHE_DIR": str(tmp_path / f"cache-{provider}"),
+        "GLOGGUR_EMBEDDING_PROVIDER": provider,
+        model_env: model_value,
+        "GLOGGUR_GEMINI_API_KEY": "test-key",
+        "OPENAI_API_KEY": "test-key",
+    }
+
+    result = runner.invoke(cli, ["index", str(file_path), "--json"], env=env)
+
+    assert result.exit_code == 1
+    assert "Traceback (most recent call last)" not in result.output
+    payload = _parse_json_output(result.output)
+    failure_codes = payload["failure_codes"]
+    assert isinstance(failure_codes, list)
+    assert failure_codes == ["embedding_provider_error"]
+    failed_reasons = payload["failed_reasons"]
+    assert isinstance(failed_reasons, dict)
+    assert failed_reasons == {"embedding_provider_error": 1}
+    failed_samples = payload["failed_samples"]
+    assert isinstance(failed_samples, list)
+    assert failed_samples
+    assert "Embedding provider failure" in failed_samples[0]
+    assert "provider batch exploded" in failed_samples[0]
 
 
 def test_gemini_profile_not_overwritten_by_different_provider(

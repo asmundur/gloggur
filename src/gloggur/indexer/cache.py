@@ -7,7 +7,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
 from gloggur.io_failures import wrap_io_error
@@ -401,13 +401,37 @@ class CacheManager:
 
     def set_audit_warnings(self, symbol_id: str, warnings: List[str]) -> None:
         """Store audit warnings for a symbol."""
+        payload = self._serialize_audit_payload(warnings)
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO audits (symbol_id, warnings) VALUES (?, ?)
                 ON CONFLICT(symbol_id) DO UPDATE SET warnings = excluded.warnings
                 """,
-                (symbol_id, json.dumps(warnings)),
+                (symbol_id, payload),
+            )
+
+    def set_audit_report(
+        self,
+        symbol_id: str,
+        *,
+        warnings: List[str],
+        semantic_score: Optional[float] = None,
+        score_metadata: Optional[Dict[str, object]] = None,
+    ) -> None:
+        """Store a structured audit report for a symbol."""
+        payload = self._serialize_audit_payload(
+            warnings,
+            semantic_score=semantic_score,
+            score_metadata=score_metadata,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO audits (symbol_id, warnings) VALUES (?, ?)
+                ON CONFLICT(symbol_id) DO UPDATE SET warnings = excluded.warnings
+                """,
+                (symbol_id, payload),
             )
 
     def get_audit_warnings(self, symbol_id: str) -> List[str]:
@@ -418,7 +442,38 @@ class CacheManager:
             ).fetchone()
             if not row:
                 return []
-            return json.loads(row["warnings"])
+            warnings, _, _ = self._deserialize_audit_payload(row["warnings"])
+            return warnings
+
+    def list_audit_reports_for_file(
+        self,
+        path: str,
+    ) -> List[Tuple[str, List[str], Optional[float], Optional[Dict[str, object]]]]:
+        """Fetch cached audit report payloads for one file path."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT symbol_id, warnings FROM audits WHERE symbol_id LIKE ? ORDER BY symbol_id",
+                (f"{path}:%",),
+            ).fetchall()
+            reports: List[Tuple[str, List[str], Optional[float], Optional[Dict[str, object]]]] = []
+            for row in rows:
+                warnings, semantic_score, score_metadata = self._deserialize_audit_payload(
+                    row["warnings"]
+                )
+                reports.append((row["symbol_id"], warnings, semantic_score, score_metadata))
+            return reports
+
+    def list_audit_warnings_for_file(self, path: str) -> List[tuple[str, List[str]]]:
+        """Fetch cached audit warnings for all symbols belonging to one file path."""
+        return [
+            (symbol_id, warnings)
+            for symbol_id, warnings, _, _ in self.list_audit_reports_for_file(path)
+        ]
+
+    def delete_audit_reports_for_file(self, path: str) -> None:
+        """Delete cached audit report rows for one file path."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM audits WHERE symbol_id LIKE ?", (f"{path}:%",))
 
     def get_audit_file_metadata(self, path: str) -> Optional[AuditFileMetadata]:
         """Return cached audit metadata for a file."""
@@ -662,6 +717,42 @@ class CacheManager:
         if not row:
             return None
         return str(row[0])
+
+    @staticmethod
+    def _serialize_audit_payload(
+        warnings: List[str],
+        *,
+        semantic_score: Optional[float] = None,
+        score_metadata: Optional[Dict[str, object]] = None,
+    ) -> str:
+        """Serialize legacy warning-only or structured audit report payloads."""
+        if semantic_score is None and score_metadata is None:
+            return json.dumps(warnings)
+        return json.dumps(
+            {
+                "warnings": warnings,
+                "semantic_score": semantic_score,
+                "score_metadata": score_metadata,
+            }
+        )
+
+    @staticmethod
+    def _deserialize_audit_payload(
+        raw_payload: str,
+    ) -> Tuple[List[str], Optional[float], Optional[Dict[str, object]]]:
+        """Deserialize audit payload rows with backward compatibility for legacy lists."""
+        payload = json.loads(raw_payload)
+        if isinstance(payload, list):
+            return [str(item) for item in payload], None, None
+        if isinstance(payload, dict):
+            raw_warnings = payload.get("warnings", [])
+            warnings = [str(item) for item in raw_warnings] if isinstance(raw_warnings, list) else []
+            raw_score = payload.get("semantic_score")
+            semantic_score = float(raw_score) if isinstance(raw_score, (int, float)) else None
+            raw_metadata = payload.get("score_metadata")
+            score_metadata = raw_metadata if isinstance(raw_metadata, dict) else None
+            return warnings, semantic_score, score_metadata
+        raise ValueError("audit payload must be a list or object")
 
     def _list_symbol_ids(self, conn: sqlite3.Connection, path: str) -> List[str]:
         """Return symbol ids for a file (internal helper)."""

@@ -53,3 +53,70 @@ jobs:
 
       - name: Run pytest
         run: pytest
+
+      - name: Run verification static quality gates
+        if: ${{ matrix.python-version == '3.13' }}
+        run: python scripts/run_static_quality_gates.py --format json
+
+      - name: Run error catalog contract check
+        if: ${{ matrix.python-version == '3.13' }}
+        run: python scripts/check_error_catalog_contract.py --format json
+
+      - name: Run full workflow smoke harness
+        if: ${{ matrix.python-version == '3.13' }}
+        run: python scripts/run_smoke.py --format json
+
+      - name: Run packaging smoke harness
+        if: ${{ matrix.python-version == '3.13' }}
+        run: python scripts/run_packaging_smoke.py --format json
+
+      - name: Run artifact smoke harness
+        if: ${{ matrix.python-version == '3.13' }}
+        run: python scripts/run_artifact_smoke.py --format json
+
+      - name: Write lane report
+        if: ${{ always() }}
+        env:
+          GLOGGUR_MATRIX_PYTHON_VERSION: ${{ matrix.python-version }}
+          GLOGGUR_MATRIX_REQUIRED: ${{ matrix.required }}
+          GLOGGUR_LANE_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = {
+              "python_version": os.environ["GLOGGUR_MATRIX_PYTHON_VERSION"],
+              "required": os.environ["GLOGGUR_MATRIX_REQUIRED"],
+              "status": os.environ["GLOGGUR_LANE_STATUS"],
+          }
+          output = Path(f"verification-lane-{report['python_version']}.json")
+          output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf8")
+          print(output)
+          PY
+
+      - name: Upload lane report artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-lane-${{ matrix.python-version }}
+          path: verification-lane-${{ matrix.python-version }}.json
+          if-no-files-found: error
+
+  lane-audit:
+    runs-on: ubuntu-latest
+    needs: tests
+    if: ${{ always() }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download lane report artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: verification-lane-*
+          path: verification-lane-artifacts
+          merge-multiple: true
+
+      - name: Audit lane coverage and required/provisional policy
+        run: python scripts/audit_verification_lanes.py --reports-dir verification-lane-artifacts --format json

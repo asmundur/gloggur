@@ -46,6 +46,8 @@ scripts/gloggur <command> --json
 
 ## Quick workflow
 
+For the single-path onboarding flow with provider setup and troubleshooting codes, see `docs/QUICKSTART.md`.
+
 1. **Create or refresh the index**:
    ```bash
    scripts/gloggur index . --json
@@ -84,6 +86,33 @@ Pytest defaults for this repo:
 - Search by **concepts**, not just filenames (e.g., "incremental hashing", "embedding provider", "tree-sitter parser").
 - Use `--top-k` to widen or narrow results based on the task.
 - Use `--stream` if you are integrating results into a tool chain.
+
+Grounded retrieve -> validate -> emit/repair flow (recommended for agent outputs):
+
+```bash
+scripts/gloggur search "<query>" --json \
+  --with-evidence-trace \
+  --validate-grounding \
+  --evidence-min-confidence 0.6 \
+  --evidence-min-items 1
+```
+
+- If `validation.passed` is `true`: emit response and cite `evidence_trace` items.
+- If `validation.passed` is `false`: repair by broadening query and/or increasing `--top-k`.
+- To hard-block ungrounded responses in automation, add `--fail-on-ungrounded` and branch on non-zero exit plus `error.code=search_grounding_validation_failed`.
+
+Minimal reference loop/eval harness:
+
+```bash
+# Single query loop with structured step logs
+python scripts/run_reference_agent_eval.py --mode run --query "<query>" --format json
+
+# Built-in tiny eval suite (10 deterministic cases)
+python scripts/run_reference_agent_eval.py --mode eval --format json --min-pass-rate 0.8
+```
+
+- Loop steps are always emitted as structured logs: `decide`, `act`, `validate`, `stop`.
+- Eval mode exits non-zero when pass rate falls below threshold (`agent_eval_threshold_failed`).
 
 ## Configuration
 

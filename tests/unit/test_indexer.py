@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import tempfile
 
 import pytest
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
+from gloggur.embeddings.errors import EmbeddingProviderError
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.indexer import Indexer
 from gloggur.parsers.registry import ParserRegistry
@@ -441,3 +443,92 @@ def test_apply_embeddings_no_progress_callback_works() -> None:
     result = indexer._apply_embeddings(symbols, "def s0(): pass\ndef s1(): pass\ndef s2(): pass\n")
     assert len(result) == 3
     assert all(s.embedding_vector == [0.5, 0.5] for s in result)
+
+
+def test_apply_embeddings_fails_closed_on_provider_vector_count_mismatch() -> None:
+    """Indexer must fail loud when a provider returns fewer vectors than requested."""
+
+    class FakeProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self._chunk_size = 10
+
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            _ = texts
+            return [[0.1, 0.2]]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    from gloggur.models import Symbol
+
+    symbols = [
+        Symbol(
+            id=f"s{i}",
+            name=f"s{i}",
+            kind="function",
+            file_path="f.py",
+            start_line=1,
+            end_line=2,
+            signature=f"def s{i}():",
+            body_hash="abc",
+        )
+        for i in range(2)
+    ]
+
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(cache_dir=cache_dir, embedding_provider="openai")
+    cache = CacheManager(CacheConfig(cache_dir))
+    indexer = Indexer(
+        config=config,
+        cache=cache,
+        parser_registry=ParserRegistry(),
+        embedding_provider=FakeProvider(),
+    )
+
+    with pytest.raises(EmbeddingProviderError, match="returned 1 vectors for 2 symbols"):
+        indexer._apply_embeddings(symbols, "def s0(): pass\ndef s1(): pass\n")
+
+
+def test_index_file_with_outcome_classifies_embedding_provider_failures() -> None:
+    """Single-file indexing should preserve provider failure taxonomy for CLI contracts."""
+
+    class FakeProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            _ = texts
+            raise RuntimeError("provider vector API failed")
+
+        def get_dimension(self) -> int:
+            return 2
+
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    repo_dir = tempfile.mkdtemp(prefix="gloggur-repo-")
+    file_path = os.path.join(repo_dir, "sample.py")
+    with open(file_path, "w", encoding="utf8") as handle:
+        handle.write("def add(a, b):\n    return a + b\n")
+
+    config = GloggurConfig(
+        cache_dir=cache_dir,
+        embedding_provider="openai",
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    indexer = Indexer(
+        config=config,
+        cache=cache,
+        parser_registry=ParserRegistry(),
+        embedding_provider=FakeProvider(),
+    )
+
+    outcome = indexer.index_file_with_outcome(file_path)
+
+    assert outcome.status == "failed"
+    assert outcome.reason == "embedding_provider_error"
+    assert outcome.detail is not None
+    assert "Embedding provider failure [openai]" in outcome.detail

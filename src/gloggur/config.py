@@ -139,12 +139,14 @@ class GloggurConfig:
         env_values.update(os.environ)
 
         def _env_value(name: str) -> Optional[str]:
+            """Return a non-empty environment value or None when unset/blank."""
             value = env_values.get(name)
             if value is None or value == "":
                 return None
             return value
 
         def _env_bool(name: str) -> Optional[bool]:
+            """Parse common truthy/falsey strings from the merged environment map."""
             value = _env_value(name)
             if value is None:
                 return None

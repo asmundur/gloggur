@@ -156,10 +156,12 @@ class HybridSearch:
     def _serialize_result(self, symbol, score: float) -> Dict[str, object]:
         """Build the JSON-friendly result payload for a symbol."""
         return {
+            "symbol_id": symbol.id,
             "symbol": symbol.name,
             "kind": symbol.kind,
             "file": symbol.file_path,
             "line": symbol.start_line,
+            "line_end": symbol.end_line,
             "signature": symbol.signature,
             "docstring": symbol.docstring,
             "similarity_score": score,

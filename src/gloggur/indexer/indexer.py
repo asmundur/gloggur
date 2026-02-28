@@ -8,7 +8,7 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
-from gloggur.embeddings.errors import wrap_embedding_error
+from gloggur.embeddings.errors import EmbeddingProviderError, wrap_embedding_error
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.models import FileMetadata, IndexMetadata, Symbol
 from gloggur.parsers.registry import ParserRegistry
@@ -35,6 +35,10 @@ FAILURE_REMEDIATION: Dict[str, List[str]] = {
     "storage_error": [
         "Check cache directory writability and free disk space.",
         "Retry `gloggur index . --json` after resolving storage issues.",
+    ],
+    "embedding_provider_error": [
+        "Inspect provider credentials, model configuration, and provider failure details in failed_samples.",
+        "Retry `gloggur index . --json` after fixing the embedding provider error.",
     ],
     "stale_cleanup_error": [
         "Ensure stale file paths can be removed from cache metadata.",
@@ -223,6 +227,7 @@ class Indexer:
                     total: int,
                     base: int = embedded_symbols_done,
                 ) -> None:
+                    """Translate file-local embedding progress into repository-global counts."""
                     nonlocal file_progress_done
                     _ = total
                     file_progress_done = done
@@ -239,7 +244,11 @@ class Indexer:
                 self._persist_prepared_file(prepared)
             except Exception as exc:
                 failed_files += 1
-                reason = "storage_error"
+                reason = (
+                    "embedding_provider_error"
+                    if isinstance(exc, EmbeddingProviderError)
+                    else "storage_error"
+                )
                 failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
                 if len(failed_samples) < 5:
                     failed_samples.append(f"{prepared.path}: {type(exc).__name__}: {exc}")
@@ -333,7 +342,11 @@ class Indexer:
         except Exception as exc:
             return FileIndexOutcome(
                 status="failed",
-                reason="storage_error",
+                reason=(
+                    "embedding_provider_error"
+                    if isinstance(exc, EmbeddingProviderError)
+                    else "storage_error"
+                ),
                 detail=f"{type(exc).__name__}: {exc}",
             )
 
@@ -571,6 +584,11 @@ class Indexer:
             chunk_symbols = symbols[i : i + chunk_size]
             try:
                 vectors = self.embedding_provider.embed_batch(chunk_texts)
+                if len(vectors) != len(chunk_symbols):
+                    raise RuntimeError(
+                        "embedding provider returned "
+                        f"{len(vectors)} vectors for {len(chunk_symbols)} symbols during indexing"
+                    )
             except Exception as exc:
                 raise wrap_embedding_error(
                     exc,

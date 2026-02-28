@@ -15,10 +15,16 @@ import gloggur.storage.metadata_store as metadata_store_module
 import gloggur.storage.vector_store as vector_store_module
 from gloggur.cli import main as cli_main
 from gloggur.cli.main import (
+    CLI_FAILURE_REMEDIATION,
+    INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY,
+    _build_inspect_failure_contract,
     _build_inspect_warning_summary,
+    _load_cached_inspect_reports,
     _build_resume_contract,
+    _compute_retrieval_confidence,
     _inspect_path_class,
     _metadata_reindex_reason,
+    _next_retry_top_k,
     _profile_reindex_reason,
     _should_include_inspect_path,
     _stable_fingerprint,
@@ -26,7 +32,7 @@ from gloggur.cli.main import (
 )
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.io_failures import StorageIOError
-from gloggur.models import IndexMetadata
+from gloggur.models import IndexMetadata, Symbol
 
 
 def test_profile_reindex_reason_no_metadata_and_no_profile() -> None:
@@ -98,6 +104,46 @@ def test_tool_version_reindex_reason_detects_version_drift() -> None:
         current_tool_version="0.2.0",
     )
     assert reason == "tool version changed (cached=0.1.0, current=0.2.0)"
+
+
+def test_compute_retrieval_confidence_empty_results_is_zero() -> None:
+    """Empty result sets should report explicit zero confidence."""
+    assert _compute_retrieval_confidence([]) == 0.0
+
+
+def test_compute_retrieval_confidence_weights_top_and_top3_average() -> None:
+    """Confidence should use deterministic weighted top-score + top3 average formula."""
+    confidence = _compute_retrieval_confidence(
+        [
+            {"similarity_score": 0.2},
+            {"similarity_score": 0.6},
+            {"similarity_score": 0.8},
+            {"similarity_score": 0.4},
+        ]
+    )
+    # top=0.8, top3avg=(0.8+0.6+0.4)/3=0.6 -> 0.7*0.8 + 0.3*0.6 = 0.74
+    assert confidence == pytest.approx(0.74)
+
+
+def test_compute_retrieval_confidence_rejects_non_numeric_scores() -> None:
+    """Malformed similarity scores should fail loud to avoid silent confidence drift."""
+    with pytest.raises(ValueError, match="non-numeric similarity_score"):
+        _compute_retrieval_confidence([{"similarity_score": "not-a-float"}])
+
+
+def test_next_retry_top_k_expands_and_caps_deterministically() -> None:
+    """Retry strategy should expand top-k and clamp at configured max."""
+    assert _next_retry_top_k(4) == 8
+    assert _next_retry_top_k(33, max_top_k=64) == 64
+    assert _next_retry_top_k(64, max_top_k=64) == 64
+
+
+def test_next_retry_top_k_rejects_non_positive_inputs() -> None:
+    """Invalid retry strategy bounds should fail loudly."""
+    with pytest.raises(ValueError, match="current_top_k must be >= 1"):
+        _next_retry_top_k(0)
+    with pytest.raises(ValueError, match="max_top_k must be >= 1"):
+        _next_retry_top_k(1, max_top_k=0)
 
 
 def test_stable_fingerprint_is_order_independent() -> None:
@@ -200,6 +246,232 @@ def test_inspect_warning_summary_groups_by_type_path_class_and_top_files() -> No
     assert top_files[0]["file"] == "/tmp/repo/src/a.py"
     assert top_files[0]["warnings"] == 2
     assert top_files[0]["path_class"] == "src"
+
+
+def test_inspect_failure_contract_is_machine_readable_and_normalized() -> None:
+    """Inspect failure contract should expose stable codes/guidance and ignore invalid counters."""
+    contract = _build_inspect_failure_contract(
+        {
+            "decode_error": 2,
+            "parse_error": 1,
+            "bogus_zero": 0,
+            "bogus_negative": -1,
+        }
+    )
+    assert contract["failure_codes"] == ["decode_error", "parse_error"]
+    guidance = contract["failure_guidance"]
+    assert isinstance(guidance, dict)
+    assert "decode_error" in guidance
+    assert isinstance(guidance["decode_error"], list)
+    assert guidance["decode_error"]
+    assert "parse_error" in guidance
+    assert isinstance(guidance["parse_error"], list)
+    assert guidance["parse_error"]
+
+
+def test_attach_primary_error_from_failure_contract_uses_primary_failure_code() -> None:
+    """Aggregate failure payloads should expose a stable top-level error block."""
+    payload: dict[str, object] = {
+        "failure_codes": ["decode_error", "parse_error"],
+        "failure_guidance": {
+            "decode_error": ["normalize file encoding"],
+            "parse_error": ["fix file syntax"],
+        },
+    }
+
+    cli_main._attach_primary_error_from_failure_contract(
+        payload,
+        error_type="inspect_failure",
+        detail="Inspect completed with file-level failures.",
+        probable_cause="One or more files could not be inspected.",
+        default_remediation="default remediation",
+    )
+
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "inspect_failure"
+    assert error["code"] == "decode_error"
+    assert error["detail"] == "Inspect completed with file-level failures."
+    assert error["probable_cause"] == "One or more files could not be inspected."
+    assert error["remediation"] == ["normalize file encoding"]
+
+
+def test_inspect_payload_schema_policy_declares_breaking_change_rules() -> None:
+    """Inspect schema policy should define explicit bump/no-bump conditions."""
+    assert INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY["policy_version"] == "1"
+    bump_required = INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY["bump_required_for"]
+    assert isinstance(bump_required, list)
+    assert "remove_or_rename_existing_field" in bump_required
+    assert "change_existing_field_type" in bump_required
+    no_bump = INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY["bump_not_required_for"]
+    assert isinstance(no_bump, list)
+    assert "add_new_optional_field" in no_bump
+
+
+def test_load_cached_inspect_reports_rehydrates_cached_reports(tmp_path: Path) -> None:
+    """Inspect should reuse cached warning and score metadata for unchanged files."""
+    cache_dir = tmp_path / "cache"
+    cache = CacheManager(CacheConfig(str(cache_dir)))
+    symbol = Symbol(
+        id=str(tmp_path / "src" / "main.py") + ":1:sample",
+        name="sample",
+        kind="function",
+        file_path=str(tmp_path / "src" / "main.py"),
+        start_line=1,
+        end_line=2,
+        signature="def sample():",
+        body_hash="abc",
+    )
+    cache.set_audit_report(
+        symbol.id,
+        warnings=[],
+        semantic_score=0.91,
+        score_metadata={"threshold_applied": 0.2, "scored": True},
+    )
+
+    reports = _load_cached_inspect_reports(
+        cache,
+        symbol.file_path,
+        symbol_ids=(),
+    )
+
+    assert len(reports) == 1
+    assert reports[0].symbol_id == symbol.id
+    assert reports[0].warnings == []
+    assert reports[0].semantic_score == pytest.approx(0.91)
+    assert reports[0].score_metadata == {
+        "threshold_applied": 0.2,
+        "scored": True,
+        "cached_report_reuse": True,
+    }
+
+
+def test_cli_failure_catalog_includes_watch_preflight_codes() -> None:
+    """Watch preflight failure codes should stay documented in the CLI failure catalog."""
+    for code in ("watch_mode_conflict", "watch_path_missing", "watch_mode_invalid"):
+        assert code in CLI_FAILURE_REMEDIATION
+        guidance = CLI_FAILURE_REMEDIATION[code]
+        assert isinstance(guidance, list)
+        assert guidance
+
+
+def test_cli_failure_catalog_includes_artifact_publish_codes() -> None:
+    """Artifact publish failure codes should stay documented in the CLI failure catalog."""
+    for code in (
+        "artifact_source_missing",
+        "artifact_source_not_directory",
+        "artifact_source_uninitialized",
+        "artifact_destination_unsupported",
+        "artifact_destination_exists",
+        "artifact_destination_inside_source",
+    ):
+        assert code in CLI_FAILURE_REMEDIATION
+        guidance = CLI_FAILURE_REMEDIATION[code]
+        assert isinstance(guidance, list)
+        assert guidance
+
+
+def test_cli_failure_catalog_includes_artifact_restore_codes() -> None:
+    """Artifact restore/validate failure codes should stay documented in the CLI failure catalog."""
+    for code in (
+        "artifact_path_missing",
+        "artifact_path_not_file",
+        "artifact_archive_invalid",
+        "artifact_manifest_missing",
+        "artifact_manifest_invalid",
+        "artifact_manifest_schema_unsupported",
+        "artifact_manifest_file_mismatch",
+        "artifact_manifest_totals_mismatch",
+        "artifact_restore_destination_exists",
+        "artifact_restore_destination_not_directory",
+    ):
+        assert code in CLI_FAILURE_REMEDIATION
+        guidance = CLI_FAILURE_REMEDIATION[code]
+        assert isinstance(guidance, list)
+        assert guidance
+
+
+def test_cli_failure_catalog_includes_artifact_uploader_codes() -> None:
+    """Artifact uploader failure codes should stay documented in the CLI failure catalog."""
+    for code in (
+        "artifact_uploader_command_invalid",
+        "artifact_uploader_failed",
+        "artifact_uploader_timeout",
+        "artifact_http_upload_failed",
+        "artifact_http_upload_timeout",
+    ):
+        assert code in CLI_FAILURE_REMEDIATION
+        guidance = CLI_FAILURE_REMEDIATION[code]
+        assert isinstance(guidance, list)
+        assert guidance
+
+
+def test_resolve_artifact_destination_rejects_unsupported_scheme() -> None:
+    """Artifact destination parser should fail closed for non-file URI schemes."""
+    with pytest.raises(cli_main.CLIContractError) as exc_info:
+        cli_main._resolve_artifact_destination(
+            "https://example.com/upload",
+            default_filename="artifact.tar.gz",
+        )
+    error = exc_info.value
+    assert error.error_code == "artifact_destination_unsupported"
+
+
+def test_resolve_artifact_destination_supports_file_directory_uri(tmp_path: Path) -> None:
+    """file:// URI destination should resolve to default filename under directory path."""
+    destination_dir = tmp_path / "artifacts"
+    destination_dir.mkdir()
+    resolved = cli_main._resolve_artifact_destination(
+        destination_dir.resolve().as_uri() + "/",
+        default_filename="artifact.tar.gz",
+    )
+    assert resolved == str(destination_dir / "artifact.tar.gz")
+
+
+def test_resolve_artifact_restore_path_rejects_parent_traversal(tmp_path: Path) -> None:
+    """Restore path resolution should reject manifest entries that escape the restore root."""
+    with pytest.raises(cli_main.CLIContractError) as exc_info:
+        cli_main._resolve_artifact_restore_path(str(tmp_path), "../escape.db")
+    error = exc_info.value
+    assert error.error_code == "artifact_manifest_invalid"
+
+
+def test_render_artifact_uploader_command_formats_supported_placeholders() -> None:
+    """Uploader command template should expand supported placeholders deterministically."""
+    argv = cli_main._render_artifact_uploader_command(
+        "tool --src {artifact_path} --dest {destination} --sha {archive_sha256}",
+        artifact_path="/tmp/cache.tgz",
+        destination="https://example.com/upload",
+        artifact_name="cache.tgz",
+        archive_sha256="abc123",
+        archive_bytes=42,
+        manifest_sha256="def456",
+    )
+    assert argv == [
+        "tool",
+        "--src",
+        "/tmp/cache.tgz",
+        "--dest",
+        "https://example.com/upload",
+        "--sha",
+        "abc123",
+    ]
+
+
+def test_render_artifact_uploader_command_rejects_unknown_placeholder() -> None:
+    """Uploader command template should fail closed on unsupported placeholders."""
+    with pytest.raises(cli_main.CLIContractError) as exc_info:
+        cli_main._render_artifact_uploader_command(
+            "tool {artifact_path} {unknown}",
+            artifact_path="/tmp/cache.tgz",
+            destination="https://example.com/upload",
+            artifact_name="cache.tgz",
+            archive_sha256="abc123",
+            archive_bytes=42,
+            manifest_sha256="def456",
+        )
+    error = exc_info.value
+    assert error.error_code == "artifact_uploader_command_invalid"
 
 
 def test_resume_contract_profile_change_is_machine_readable() -> None:
@@ -342,6 +614,60 @@ def test_resume_contract_detects_tool_version_drift_since_last_success() -> None
     assert payload["last_success_resume_fingerprint_match"] is False
 
 
+def test_resume_contract_tool_version_override_is_explicit_and_resume_ok() -> None:
+    """Explicit tool-version drift override should be machine-readable and not silent."""
+    metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
+    payload = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+        tool_version="0.2.0",
+        last_success_tool_version="0.1.0",
+        allow_tool_version_drift=True,
+    )
+
+    assert payload["resume_decision"] == "resume_ok"
+    assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+    assert payload["tool_version_drift_detected"] is True
+    assert payload["allow_tool_version_drift"] is True
+    assert payload["tool_version_drift_override_applied"] is True
+    remediation = payload["resume_remediation"]
+    assert isinstance(remediation, dict)
+    assert "tool_version_changed_override" in remediation
+    assert isinstance(remediation["tool_version_changed_override"], list)
+    assert remediation["tool_version_changed_override"]
+
+
+def test_resume_contract_tool_version_override_does_not_bypass_missing_metadata() -> None:
+    """Tool-version override must not mask true missing-metadata reindex requirements."""
+    payload = _build_resume_contract(
+        metadata=None,
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile="local:model-a",
+        reset_reason=None,
+        needs_reindex=True,
+        last_success_resume_fingerprint="last-success",
+        last_success_resume_at="2026-02-27T00:00:00+00:00",
+        tool_version="0.2.0",
+        last_success_tool_version="0.1.0",
+        allow_tool_version_drift=True,
+    )
+
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["allow_tool_version_drift"] is True
+    assert payload["tool_version_drift_override_applied"] is True
+    codes = set(payload["resume_reason_codes"])
+    assert "tool_version_changed_override" in codes
+    assert "missing_index_metadata" in codes
+    assert "index_interrupted" in codes
+
+
 def test_resume_contract_missing_tool_version_marker_remains_resume_ok() -> None:
     """Legacy caches without tool-version markers should keep resume compatibility logic stable."""
     metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
@@ -405,6 +731,103 @@ def test_build_status_payload_requires_reindex_on_tool_version_drift() -> None:
     assert payload["resume_fingerprint_match"] is False
 
 
+def test_build_status_payload_allows_explicit_tool_version_drift_override() -> None:
+    """Status payload should allow explicit tool-version drift override with explicit metadata."""
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir="/tmp/cache",
+    )
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=3, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_tool_version(self) -> str:
+            return "0.0.1"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def list_symbols(self) -> list[object]:
+            return [object(), object(), object()]
+
+    payload = cli_main._build_status_payload(
+        config,
+        FakeCache(),
+        allow_tool_version_drift=True,
+    )
+
+    assert payload["needs_reindex"] is False
+    assert payload["reindex_reason"] is None
+    assert payload["resume_decision"] == "resume_ok"
+    assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+    assert payload["tool_version_drift_detected"] is True
+    assert payload["allow_tool_version_drift"] is True
+    assert payload["tool_version_drift_override_applied"] is True
+
+
+def test_resolve_allow_tool_version_drift_combines_cli_flag_and_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI flag should OR with strict env override values."""
+    monkeypatch.setattr(cli_main.GloggurConfig, "_load_dotenv", lambda _path=".env": {})
+    monkeypatch.delenv("GLOGGUR_ALLOW_TOOL_VERSION_DRIFT", raising=False)
+    assert cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=False) is False
+    assert cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=True) is True
+
+    monkeypatch.setenv("GLOGGUR_ALLOW_TOOL_VERSION_DRIFT", "true")
+    assert cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=False) is True
+    assert cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=True) is True
+
+    monkeypatch.setenv("GLOGGUR_ALLOW_TOOL_VERSION_DRIFT", "false")
+    assert cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=False) is False
+    assert cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=True) is True
+
+
+def test_resolve_allow_tool_version_drift_rejects_invalid_env_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid env override values should fail loudly with stable code."""
+    monkeypatch.setattr(cli_main.GloggurConfig, "_load_dotenv", lambda _path=".env": {})
+    monkeypatch.setenv("GLOGGUR_ALLOW_TOOL_VERSION_DRIFT", "sometimes")
+
+    with pytest.raises(cli_main.CLIContractError) as error:
+        cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=False)
+
+    assert error.value.error_code == "allow_tool_version_drift_env_invalid"
+
+
+def test_status_json_rejects_invalid_tool_version_drift_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """status --json should fail closed on malformed drift override env values."""
+    runner = CliRunner()
+    monkeypatch.setattr(cli_main.GloggurConfig, "_load_dotenv", lambda _path=".env": {})
+    result = runner.invoke(
+        cli_main.cli,
+        ["status", "--json"],
+        env={"GLOGGUR_ALLOW_TOOL_VERSION_DRIFT": "sometimes"},
+    )
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "allow_tool_version_drift_env_invalid"
+    assert payload["failure_codes"] == ["allow_tool_version_drift_env_invalid"]
+
+
 def test_status_supports_tilde_expanded_config_path(tmp_path: Path) -> None:
     """status should expand `~` in --config paths before loading files."""
     runner = CliRunner()
@@ -420,7 +843,7 @@ def test_status_supports_tilde_expanded_config_path(tmp_path: Path) -> None:
     result = runner.invoke(
         cli_main.cli,
         ["status", "--json", "--config", "~/.gloggur.yaml"],
-        env={"HOME": str(fake_home)},
+        env={"HOME": str(fake_home), "GLOGGUR_CACHE_DIR": ""},
     )
 
     assert result.exit_code == 0, result.output
@@ -1085,9 +1508,14 @@ def test_index_json_reports_missing_embedding_provider_configuration(
     error = payload["error"]
     assert isinstance(error, dict)
     assert error["type"] == "embedding_provider_error"
+    assert error["code"] == "embedding_provider_error"
     assert error["provider"] == "unknown"
     assert error["operation"] == "initialize embedding provider"
     assert "embedding provider is not configured" in str(error["detail"])
+    assert payload["failure_codes"] == ["embedding_provider_error"]
+    assert payload["failure_guidance"] == {
+        "embedding_provider_error": error["remediation"],
+    }
     assert "Traceback (most recent call last)" not in result.output
 
 
@@ -1110,7 +1538,7 @@ def test_search_json_reports_missing_embedding_provider_configuration(
     result = runner.invoke(
         cli_main.cli,
         ["search", "needle", "--json", "--config", str(config_path)],
-        env={"GLOGGUR_EMBEDDING_PROVIDER": ""},
+        env={"GLOGGUR_EMBEDDING_PROVIDER": "", "GLOGGUR_CACHE_DIR": ""},
     )
 
     assert result.exit_code == 1
@@ -1118,9 +1546,14 @@ def test_search_json_reports_missing_embedding_provider_configuration(
     error = payload["error"]
     assert isinstance(error, dict)
     assert error["type"] == "embedding_provider_error"
+    assert error["code"] == "embedding_provider_error"
     assert error["provider"] == "unknown"
     assert error["operation"] == "initialize embedding provider"
     assert "embedding provider is not configured" in str(error["detail"])
+    assert payload["failure_codes"] == ["embedding_provider_error"]
+    assert payload["failure_guidance"] == {
+        "embedding_provider_error": error["remediation"],
+    }
     assert "Traceback (most recent call last)" not in result.output
 
 
@@ -1174,6 +1607,785 @@ def test_search_json_requires_reindex_on_tool_version_drift(
     assert "tool version changed" in str(metadata["reindex_reason"])
     assert metadata["resume_decision"] == "reindex_required"
     assert metadata["resume_reason_codes"] == ["tool_version_changed"]
+
+
+def test_search_json_allows_explicit_tool_version_drift_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """search --json should proceed only when explicit tool-version drift override is set."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return "0.0.1"
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = filters
+            _ = top_k
+            return {
+                "query": query,
+                "results": [
+                    {
+                        "symbol": "needle",
+                        "kind": "function",
+                        "file": "sample.py",
+                        "line": 1,
+                        "signature": "def needle() -> None",
+                        "similarity_score": 0.9,
+                    }
+                ],
+                "metadata": {"total_results": 1, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["search", "needle", "--json", "--allow-tool-version-drift"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["results"]
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["resume_decision"] == "resume_ok"
+    assert metadata["needs_reindex"] is False
+    assert metadata["resume_reason_codes"] == ["tool_version_changed_override"]
+    assert metadata["tool_version_drift_detected"] is True
+    assert metadata["allow_tool_version_drift"] is True
+    assert metadata["tool_version_drift_override_applied"] is True
+
+
+def test_search_json_retries_once_for_low_confidence_and_emits_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Low-confidence retrieval should perform one deterministic bounded retry by default."""
+    runner = CliRunner()
+    search_top_k_calls: list[int] = []
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = filters
+            search_top_k_calls.append(top_k)
+            score = 0.2 if len(search_top_k_calls) == 1 else 0.95
+            return {
+                "query": "needle",
+                "results": [
+                    {
+                        "symbol": "needle",
+                        "kind": "function",
+                        "file": "sample.py",
+                        "line": 1,
+                        "signature": "def needle() -> None",
+                        "similarity_score": score,
+                    }
+                ],
+                "metadata": {"total_results": 1, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "search",
+            "needle",
+            "--json",
+            "--confidence-threshold",
+            "0.90",
+            "--max-requery-attempts",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert search_top_k_calls == [10, 20]
+    payload = _parse_json_output(result.output)
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["initial_confidence"] == pytest.approx(0.2)
+    assert metadata["final_confidence"] == pytest.approx(0.95)
+    assert metadata["retry_performed"] is True
+    assert metadata["retry_attempts"] == 1
+    assert metadata["retry_strategy"] == "top_k_expansion"
+    assert metadata["initial_top_k"] == 10
+    assert metadata["final_top_k"] == 20
+    assert metadata["low_confidence"] is False
+
+
+def test_search_json_requery_is_bounded_by_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Retry flow should stop at configured max attempts and emit explicit low-confidence marker."""
+    runner = CliRunner()
+    search_top_k_calls: list[int] = []
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = filters
+            search_top_k_calls.append(top_k)
+            return {
+                "query": "needle",
+                "results": [
+                    {
+                        "symbol": "needle",
+                        "kind": "function",
+                        "file": "sample.py",
+                        "line": 1,
+                        "signature": "def needle() -> None",
+                        "similarity_score": 0.1,
+                    }
+                ],
+                "metadata": {"total_results": 1, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "search",
+            "needle",
+            "--json",
+            "--confidence-threshold",
+            "0.90",
+            "--max-requery-attempts",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert search_top_k_calls == [10, 20]
+    payload = _parse_json_output(result.output)
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["retry_performed"] is True
+    assert metadata["retry_attempts"] == 1
+    assert metadata["max_requery_attempts"] == 1
+    assert metadata["low_confidence"] is True
+    assert metadata["final_confidence"] == pytest.approx(0.1)
+
+
+def test_search_json_disable_bounded_requery_skips_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit retry disable should preserve low-confidence marker without second query."""
+    runner = CliRunner()
+    search_top_k_calls: list[int] = []
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = filters
+            search_top_k_calls.append(top_k)
+            return {
+                "query": "needle",
+                "results": [
+                    {
+                        "symbol": "needle",
+                        "kind": "function",
+                        "file": "sample.py",
+                        "line": 1,
+                        "signature": "def needle() -> None",
+                        "similarity_score": 0.2,
+                    }
+                ],
+                "metadata": {"total_results": 1, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "search",
+            "needle",
+            "--json",
+            "--confidence-threshold",
+            "0.90",
+            "--max-requery-attempts",
+            "1",
+            "--disable-bounded-requery",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert search_top_k_calls == [10]
+    payload = _parse_json_output(result.output)
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["retry_enabled"] is False
+    assert metadata["retry_performed"] is False
+    assert metadata["retry_attempts"] == 0
+    assert metadata["low_confidence"] is True
+
+
+def test_search_json_rejects_invalid_confidence_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Out-of-range confidence threshold should fail loud with deterministic CLI contract code."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", lambda *_args, **_kwargs: object())
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["search", "needle", "--json", "--confidence-threshold", "1.5"],
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "search_confidence_threshold_invalid"
+
+
+def test_search_json_rejects_stream_with_grounding_contract_options() -> None:
+    """Stream mode should fail closed when evidence/validation payloads are requested."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.cli,
+        ["search", "needle", "--json", "--stream", "--validate-grounding"],
+    )
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "search_stream_contract_conflict"
+
+
+def test_search_json_opt_in_evidence_trace_and_validation_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Opt-in evidence trace should be emitted and validator should pass for grounded results."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = filters
+            _ = top_k
+            return {
+                "query": "needle",
+                "results": [
+                    {
+                        "symbol_id": "sample.py:1:needle",
+                        "symbol": "needle",
+                        "kind": "function",
+                        "file": "sample.py",
+                        "line": 1,
+                        "line_end": 1,
+                        "signature": "def needle() -> None",
+                        "similarity_score": 0.95,
+                    }
+                ],
+                "metadata": {"total_results": 1, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "search",
+            "needle",
+            "--json",
+            "--with-evidence-trace",
+            "--validate-grounding",
+            "--evidence-min-confidence",
+            "0.8",
+            "--evidence-min-items",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    evidence = payload["evidence_trace"]
+    assert isinstance(evidence, list)
+    assert evidence and evidence[0]["symbol_id"] == "sample.py:1:needle"
+    validation = payload["validation"]
+    assert isinstance(validation, dict)
+    assert validation["passed"] is True
+    assert validation["reason_code"] == "grounding_sufficient"
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["grounding_validation_enabled"] is True
+    assert metadata["grounding_validation_passed"] is True
+
+
+def test_search_json_fail_on_ungrounded_exits_nonzero_with_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fail-on-ungrounded should emit deterministic error contract and non-zero exit."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = filters
+            _ = top_k
+            return {
+                "query": "needle",
+                "results": [],
+                "metadata": {"total_results": 0, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "search",
+            "needle",
+            "--json",
+            "--validate-grounding",
+            "--fail-on-ungrounded",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    validation = payload["validation"]
+    assert isinstance(validation, dict)
+    assert validation["passed"] is False
+    assert validation["reason_code"] == "grounding_evidence_missing"
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "search_grounding_validation_failed"
+    assert payload["failure_codes"] == ["search_grounding_validation_failed"]
+
+
+def test_search_json_default_is_backward_compatible_without_trace_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Default search path should remain opt-in for trace/validation payload fields."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = filters
+            _ = top_k
+            return {
+                "query": "needle",
+                "results": [
+                    {
+                        "symbol_id": "sample.py:1:needle",
+                        "symbol": "needle",
+                        "kind": "function",
+                        "file": "sample.py",
+                        "line": 1,
+                        "signature": "def needle() -> None",
+                        "similarity_score": 0.7,
+                    }
+                ],
+                "metadata": {"total_results": 1, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert "evidence_trace" not in payload
+    assert "validation" not in payload
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["grounding_validation_enabled"] is False
+    assert metadata["grounding_validation_passed"] is None
 
 
 def test_search_json_wraps_metadata_store_connect_failure(

@@ -1,5 +1,5 @@
 ## Required workflow
-start each session by running ./.venv/bin/active in bash 
+start each session by running ./.venv/bin/activate 
 
 
 If the index is missing or stale, update it:

@@ -52,6 +52,33 @@ def test_cache_round_trip_symbols_metadata_and_warnings() -> None:
     assert warnings == ["Missing docstring"]
 
 
+def test_cache_round_trip_structured_audit_reports_and_legacy_warning_reads() -> None:
+    """Structured audit payloads should preserve score metadata without breaking warning reads."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+
+    symbol = _sample_symbol("sample.py:1:add")
+    cache.set_audit_report(
+        symbol.id,
+        warnings=[],
+        semantic_score=0.88,
+        score_metadata={"scored": True, "threshold_applied": 0.2},
+    )
+
+    warnings = cache.get_audit_warnings(symbol.id)
+    reports = cache.list_audit_reports_for_file("sample.py")
+
+    assert warnings == []
+    assert reports == [
+        (
+            symbol.id,
+            [],
+            0.88,
+            {"scored": True, "threshold_applied": 0.2},
+        )
+    ]
+
+
 def test_cache_clear_removes_entries() -> None:
     """Ensure cache clear removes all entries."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")

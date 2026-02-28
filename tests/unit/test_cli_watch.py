@@ -50,8 +50,19 @@ def test_watch_init_writes_default_config(tmp_path: Path, monkeypatch) -> None:
 def test_watch_start_rejects_conflicting_mode_flags() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["watch", "start", "--foreground", "--daemon", "--json"])
-    assert result.exit_code != 0
-    assert "Use only one of --foreground or --daemon." in result.output
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "cli_contract_error"
+    assert error["code"] == "watch_mode_conflict"
+    assert "Use only one of --foreground or --daemon." in str(error["detail"])
+    assert payload["failure_codes"] == ["watch_mode_conflict"]
+    guidance = payload["failure_guidance"]
+    assert isinstance(guidance, dict)
+    assert "watch_mode_conflict" in guidance
+    assert isinstance(guidance["watch_mode_conflict"], list)
+    assert guidance["watch_mode_conflict"]
 
 
 def test_watch_start_rejects_unsupported_mode(tmp_path: Path, monkeypatch) -> None:
@@ -72,8 +83,102 @@ def test_watch_start_rejects_unsupported_mode(tmp_path: Path, monkeypatch) -> No
         cli,
         ["watch", "start", "--config", str(tmp_path / "cfg.yaml"), "--json"],
     )
-    assert result.exit_code != 0
-    assert "Unsupported watch mode: invalid-mode" in result.output
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "cli_contract_error"
+    assert error["code"] == "watch_mode_invalid"
+    assert "Unsupported watch mode: invalid-mode" in str(error["detail"])
+    assert payload["failure_codes"] == ["watch_mode_invalid"]
+
+
+def test_watch_start_reports_missing_watch_path_with_failure_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    config = GloggurConfig(
+        watch_path=str(tmp_path / "missing-repo"),
+        watch_mode="daemon",
+    )
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_runtime",
+        lambda **_kwargs: (config, None, None),
+    )
+
+    result = runner.invoke(
+        cli,
+        ["watch", "start", "--config", str(tmp_path / "cfg.yaml"), "--json"],
+    )
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "cli_contract_error"
+    assert error["code"] == "watch_path_missing"
+    assert "Watch path does not exist:" in str(error["detail"])
+    assert payload["failure_codes"] == ["watch_path_missing"]
+
+
+def test_watch_start_foreground_fail_closed_emits_primary_error_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = GloggurConfig(
+        watch_path=str(repo),
+        watch_mode="foreground",
+        watch_pid_file=str(tmp_path / "watch.pid"),
+    )
+
+    class DummyWatchService:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_forever(self, _path: str) -> dict[str, object]:
+            return {
+                "watch_path": str(repo),
+                "files_considered": 1,
+                "indexed": 0,
+                "unchanged": 0,
+                "failed": 1,
+                "failed_reasons": {"vector_metadata_mismatch": 1},
+                "failed_samples": ["sample.py: vector metadata mismatch"],
+                "failure_codes": ["vector_metadata_mismatch"],
+                "failure_guidance": {
+                    "vector_metadata_mismatch": ["rebuild cache metadata"],
+                },
+                "indexed_files": 0,
+                "indexed_symbols": 0,
+                "skipped_files": 0,
+                "error_count": 1,
+            }
+
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_runtime",
+        lambda **_kwargs: (config, object(), object()),
+    )
+    monkeypatch.setattr("gloggur.cli.main._read_pid_file", lambda _path: None)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: False)
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_embedding_provider_for_command",
+        lambda _cfg: None,
+    )
+    monkeypatch.setattr("gloggur.cli.main.WatchService", DummyWatchService)
+
+    result = runner.invoke(cli, ["watch", "start", "--foreground", "--json"])
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "watch_failure"
+    assert error["code"] == "vector_metadata_mismatch"
+    assert "Watch foreground run completed with file-level failures." in str(error["detail"])
+    assert payload["failure_codes"] == ["vector_metadata_mismatch"]
 
 
 def test_watch_start_reports_already_running(tmp_path: Path, monkeypatch) -> None:
@@ -173,6 +278,90 @@ def test_watch_start_daemon_and_stop(tmp_path: Path, monkeypatch) -> None:
     stopped_again_payload = _parse_json_output(stopped_again.output)
     assert stopped_again_payload["stopped"] is False
     assert stopped_again_payload["running"] is False
+
+
+def test_watch_start_daemon_resets_stale_last_batch_failure_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Daemon startup should clear stale last_batch/failure fields before new batches run."""
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state_file = tmp_path / "watch_state.json"
+    pid_file = tmp_path / "watch.pid"
+    log_file = tmp_path / "watch.log"
+    state_file.write_text(
+        json.dumps(
+            {
+                "status": "running_with_errors",
+                "running": False,
+                "failed": 3,
+                "error_count": 3,
+                "failed_reasons": {"vector_metadata_mismatch": 3},
+                "failure_codes": ["vector_metadata_mismatch"],
+                "failure_guidance": {"vector_metadata_mismatch": ["stale guidance"]},
+                "last_batch": {
+                    "failed": 1,
+                    "failed_reasons": {"vector_metadata_mismatch": 1},
+                },
+                "last_error": "stale failure",
+            }
+        ),
+        encoding="utf8",
+    )
+    config = GloggurConfig(
+        watch_path=str(repo),
+        watch_mode="daemon",
+        watch_state_file=str(state_file),
+        watch_pid_file=str(pid_file),
+        watch_log_file=str(log_file),
+    )
+
+    class DummyWatchService:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_forever(self, _path: str) -> dict[str, object]:
+            return {"indexed_files": 0, "indexed_symbols": 0, "skipped_files": 0, "error_count": 0}
+
+    class DummyProcess:
+        pid = 4321
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_runtime",
+        lambda **_kwargs: (config, object(), object()),
+    )
+    monkeypatch.setattr("gloggur.cli.main._read_pid_file", lambda _path: None)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: False)
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_embedding_provider_for_command",
+        lambda _cfg: None,
+    )
+    monkeypatch.setattr("gloggur.cli.main.WatchService", DummyWatchService)
+    monkeypatch.setattr("gloggur.cli.main.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "gloggur.cli.main.subprocess.Popen",
+        lambda *args, **kwargs: DummyProcess(),
+    )
+
+    result = runner.invoke(cli, ["watch", "start", "--daemon", "--json"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(state_file.read_text(encoding="utf8"))
+    assert payload["status"] == "starting"
+    assert payload["running"] is True
+    assert payload["failed"] == 0
+    assert payload["error_count"] == 0
+    assert payload["failed_reasons"] == {}
+    assert payload["failure_codes"] == []
+    assert payload["failure_guidance"] == {}
+    assert payload["last_batch"] == {}
+    assert payload["last_error"] is None
 
 
 def test_watch_stop_handles_missing_pid_file(tmp_path: Path, monkeypatch) -> None:

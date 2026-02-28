@@ -1,0 +1,328 @@
+# Error Code Catalog
+
+This document is the consolidated machine-readable error-code catalog for Glöggur
+CLI JSON surfaces. Every code listed here is expected to remain stable enough for
+automation branching unless a documented breaking-change policy says otherwise.
+
+For fail-closed JSON exits that also carry `failure_codes`, the top-level
+`error.code` is expected to mirror the primary failure code for the command.
+
+Fields:
+
+- Command(s): primary CLI surface(s) that emit the code.
+- Meaning: what the code means in operator terms.
+- Retryability: whether retry is reasonable without changing inputs or state.
+- Operator action: the shortest safe next step.
+
+## CLI Contract Errors
+
+- `cli_usage_error`
+  - Command(s): any `--json` CLI path when Click argument parsing fails.
+  - Meaning: the command line is syntactically invalid for the selected command.
+  - Retryability: retry after fixing arguments.
+  - Operator action: correct the command usage or rerun with `--help`.
+- `watch_mode_conflict`
+  - Command(s): `watch start`.
+  - Meaning: mutually exclusive watch mode flags were combined.
+  - Retryability: retry after removing one mode override.
+  - Operator action: use exactly one of `--foreground` or `--daemon`.
+- `watch_mode_invalid`
+  - Command(s): `watch start`.
+  - Meaning: configured watch mode is unsupported.
+  - Retryability: retry after fixing config.
+  - Operator action: set mode to `foreground` or `daemon`.
+- `watch_path_missing`
+  - Command(s): `watch start`.
+  - Meaning: configured watch path does not exist.
+  - Retryability: retry after creating/fixing the path.
+  - Operator action: run `gloggur watch init <path>` or fix `watch_path`.
+- `allow_tool_version_drift_env_invalid`
+  - Command(s): `status`, `search`.
+  - Meaning: `GLOGGUR_ALLOW_TOOL_VERSION_DRIFT` has an unsupported value.
+  - Retryability: retry after fixing or unsetting the env var.
+  - Operator action: use `1/0`, `true/false`, `yes/no`, or `on/off`.
+- `search_top_k_invalid`
+  - Command(s): `search`.
+  - Meaning: `--top-k` is less than 1.
+  - Retryability: retry after fixing the option.
+  - Operator action: set `--top-k` to a positive integer.
+- `search_confidence_threshold_invalid`
+  - Command(s): `search`.
+  - Meaning: `--confidence-threshold` is outside `0.0..1.0`.
+  - Retryability: retry after fixing the option.
+  - Operator action: set a threshold inside the valid range.
+- `search_max_requery_attempts_invalid`
+  - Command(s): `search`.
+  - Meaning: `--max-requery-attempts` is negative.
+  - Retryability: retry after fixing the option.
+  - Operator action: set a non-negative integer.
+- `search_evidence_min_confidence_invalid`
+  - Command(s): `search`.
+  - Meaning: `--evidence-min-confidence` is outside `0.0..1.0`.
+  - Retryability: retry after fixing the option.
+  - Operator action: set a valid confidence floor.
+- `search_evidence_min_items_invalid`
+  - Command(s): `search`.
+  - Meaning: `--evidence-min-items` is less than 1.
+  - Retryability: retry after fixing the option.
+  - Operator action: set `--evidence-min-items >= 1`.
+- `search_stream_contract_conflict`
+  - Command(s): `search`.
+  - Meaning: `--stream` was combined with evidence-trace or grounding-validation options.
+  - Retryability: retry after choosing one mode.
+  - Operator action: disable `--stream` or disable evidence/grounding extras.
+- `search_result_payload_invalid`
+  - Command(s): `search`.
+  - Meaning: search backend returned malformed JSON contract data.
+  - Retryability: retry only after fixing the implementation/backend.
+  - Operator action: inspect the malformed payload source and repair the contract.
+- `search_evidence_trace_invalid`
+  - Command(s): `search`.
+  - Meaning: generated evidence-trace payload is malformed or incomplete.
+  - Retryability: retry only after fixing the trace producer or thresholds.
+  - Operator action: inspect evidence-trace generation/validation inputs.
+- `search_grounding_validation_failed`
+  - Command(s): `search`.
+  - Meaning: retrieved evidence did not meet grounding validation thresholds.
+  - Retryability: retry with broader query or explicit threshold changes.
+  - Operator action: increase evidence breadth or lower thresholds deliberately.
+- `artifact_source_missing`
+  - Command(s): `artifact publish`.
+  - Meaning: source cache path does not exist.
+  - Retryability: retry after fixing the path.
+  - Operator action: point `--source` at an existing cache dir or build one first.
+- `artifact_source_not_directory`
+  - Command(s): `artifact publish`.
+  - Meaning: source path is not a directory.
+  - Retryability: retry after fixing the path.
+  - Operator action: use a cache directory, not a file.
+- `artifact_source_uninitialized`
+  - Command(s): `artifact publish`.
+  - Meaning: cache exists but lacks initialized index metadata.
+  - Retryability: retry after a successful index build.
+  - Operator action: run `gloggur index . --json` first.
+- `artifact_destination_unsupported`
+  - Command(s): `artifact publish`.
+  - Meaning: destination scheme is unsupported for the selected transport.
+  - Retryability: retry after changing destination/transport.
+  - Operator action: use a supported local/file/http destination mode.
+- `artifact_destination_exists`
+  - Command(s): `artifact publish`.
+  - Meaning: destination file already exists and overwrite was not allowed.
+  - Retryability: retry after choosing a new path or enabling overwrite.
+  - Operator action: pass `--overwrite` or change destination.
+- `artifact_destination_inside_source`
+  - Command(s): `artifact publish`.
+  - Meaning: destination points inside the source cache tree.
+  - Retryability: retry after changing destination.
+  - Operator action: publish outside the source cache directory.
+- `artifact_uploader_command_invalid`
+  - Command(s): `artifact publish`.
+  - Meaning: uploader command template is malformed or uses unsupported placeholders.
+  - Retryability: retry after fixing the template.
+  - Operator action: use an argv-style command with supported placeholders.
+- `artifact_uploader_failed`
+  - Command(s): `artifact publish`.
+  - Meaning: external uploader command exited non-zero.
+  - Retryability: retry after fixing uploader configuration or remote permissions.
+  - Operator action: inspect uploader stdout/stderr and exit code.
+- `artifact_uploader_timeout`
+  - Command(s): `artifact publish`.
+  - Meaning: external uploader command exceeded timeout.
+  - Retryability: retry after increasing timeout or fixing the remote path.
+  - Operator action: adjust timeout or repair the uploader workflow.
+- `artifact_http_upload_failed`
+  - Command(s): `artifact publish`.
+  - Meaning: direct HTTP upload returned a failing status/response.
+  - Retryability: retry after fixing auth, permissions, or presigned URL inputs.
+  - Operator action: inspect the HTTP status/body.
+- `artifact_http_upload_timeout`
+  - Command(s): `artifact publish`.
+  - Meaning: direct HTTP upload timed out.
+  - Retryability: retry after fixing timeout or endpoint behavior.
+  - Operator action: increase timeout or repair the upload endpoint.
+- `artifact_path_missing`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: requested artifact file does not exist.
+  - Retryability: retry after fixing the path.
+  - Operator action: point `--artifact` at an existing artifact.
+- `artifact_path_not_file`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: artifact path is not a regular file.
+  - Retryability: retry after fixing the path.
+  - Operator action: use a regular `.tar.gz` artifact file.
+- `artifact_archive_invalid`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: artifact is unreadable or not a valid archive.
+  - Retryability: retry after republishing a valid artifact.
+  - Operator action: rebuild and republish the artifact.
+- `artifact_manifest_missing`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: archive is missing `manifest.json`.
+  - Retryability: retry after republishing.
+  - Operator action: recreate the artifact from a healthy cache.
+- `artifact_manifest_invalid`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: manifest is malformed or missing required fields.
+  - Retryability: retry after republishing.
+  - Operator action: fix the manifest-producing code path and republish.
+- `artifact_manifest_schema_unsupported`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: manifest schema version is unsupported by this CLI.
+  - Retryability: retry only after using a compatible tool version.
+  - Operator action: rebuild artifact with a compatible CLI/tool version.
+- `artifact_manifest_file_mismatch`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: file checksums or sizes do not match the manifest.
+  - Retryability: retry after republishing.
+  - Operator action: treat the artifact as corrupted and rebuild it.
+- `artifact_manifest_totals_mismatch`
+  - Command(s): `artifact validate`, `artifact restore`.
+  - Meaning: manifest aggregate totals do not match file entries.
+  - Retryability: retry after republishing.
+  - Operator action: regenerate the artifact from a healthy cache.
+- `artifact_restore_destination_exists`
+  - Command(s): `artifact restore`.
+  - Meaning: destination directory already exists and overwrite is not allowed.
+  - Retryability: retry after changing destination or enabling overwrite.
+  - Operator action: choose a new directory or pass `--overwrite`.
+- `artifact_restore_destination_not_directory`
+  - Command(s): `artifact restore`.
+  - Meaning: restore destination is an existing file or invalid non-directory target.
+  - Retryability: retry after fixing the destination.
+  - Operator action: point `--destination` at a directory path.
+
+## Embedding Provider Failures
+
+- `embedding_provider_error`
+  - Command(s): `index`, `search`, provider-backed paths in JSON mode.
+  - Meaning: embedding provider initialization or runtime execution failed.
+  - Retryability: retry only after fixing provider credentials, model config, or upstream provider behavior.
+  - Operator action: inspect provider detail/remediation and rerun after correction.
+
+## Index Failure Codes
+
+- `decode_error`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: source file could not be decoded as UTF-8.
+  - Retryability: retry after normalizing file encoding.
+  - Operator action: resave as UTF-8 or exclude the file.
+- `read_error`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: source file could not be read from disk.
+  - Retryability: retry after fixing filesystem state.
+  - Operator action: inspect permissions/path existence.
+- `parser_unavailable`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: no parser is registered for the file type.
+  - Retryability: retry after excluding the file or adding parser support.
+  - Operator action: use a supported extension or register a parser.
+- `parse_error`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: parser failed on file contents.
+  - Retryability: retry after fixing source syntax or parser compatibility.
+  - Operator action: inspect source syntax and parser support.
+- `storage_error`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: cache/vector persistence failed.
+  - Retryability: retry after fixing disk/cache state.
+  - Operator action: inspect cache writability and disk space.
+- `stale_cleanup_error`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: stale file or symbol cleanup failed during incremental maintenance.
+  - Retryability: retry after fixing cache cleanup conditions.
+  - Operator action: inspect stale cache rows and rebuild if needed.
+- `vector_metadata_mismatch`
+  - Command(s): `index`, watch incremental batches, watch status rollups.
+  - Meaning: cache symbol ids and vector symbol ids diverged.
+  - Retryability: retry after rebuilding or clearing inconsistent vector state.
+  - Operator action: run `gloggur index . --json` or clear cache.
+- `vector_consistency_unverifiable`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: vector-store implementation cannot provide deterministic symbol-id listing for validation.
+  - Retryability: retry only after using a compatible vector store.
+  - Operator action: enable a vector-store implementation with deterministic id listing.
+- `watch_incremental_inconsistent`
+  - Command(s): watch incremental batches.
+  - Meaning: watch batch failed but did not report stable reason codes on its own.
+  - Retryability: retry after restarting watch or rebuilding cache state.
+  - Operator action: restart watch and verify version/cache compatibility.
+
+## Inspect Failure Codes
+
+- `decode_error`
+  - Command(s): `inspect`.
+  - Meaning: inspected file could not be decoded as UTF-8.
+  - Retryability: retry after fixing encoding.
+  - Operator action: convert the file to UTF-8 or exclude it from inspect scope.
+- `read_error`
+  - Command(s): `inspect`.
+  - Meaning: inspected file could not be read from disk.
+  - Retryability: retry after fixing path or permissions.
+  - Operator action: verify the file still exists and is readable.
+- `parser_unavailable`
+  - Command(s): `inspect`.
+  - Meaning: no parser is registered for the inspected file type.
+  - Retryability: retry after changing inspect scope or parser support.
+  - Operator action: inspect only supported source files or add parser support.
+- `parse_error`
+  - Command(s): `inspect`.
+  - Meaning: parser failed while extracting symbols for inspection.
+  - Retryability: retry after fixing syntax or parser compatibility.
+  - Operator action: correct the file contents and rerun inspect.
+
+## Watch Status Failure Codes
+
+- `watch_state_inconsistent`
+  - Command(s): `watch status`.
+  - Meaning: watch state reports failures without stable reason codes.
+  - Retryability: retry after restarting watch or rebuilding cache state.
+  - Operator action: restart watch and verify state-file updates.
+- `watch_last_batch_inconsistent`
+  - Command(s): `watch status`.
+  - Meaning: `last_batch` reports failures but lacks stable reason codes.
+  - Retryability: retry after restarting watch or rebuilding cache state.
+  - Operator action: inspect daemon state writes and rerun watch.
+
+## Resume Reason Codes
+
+- `missing_index_metadata`
+  - Command(s): `status`, `search`.
+  - Meaning: index metadata required for safe resume is missing.
+  - Retryability: retry after a successful full index run.
+  - Operator action: run `gloggur index . --json`.
+- `index_interrupted`
+  - Command(s): `status`, `search`.
+  - Meaning: a previous index run appears to have been interrupted before finishing cleanly.
+  - Retryability: retry after a successful full index run.
+  - Operator action: rerun indexing to completion.
+- `missing_cached_profile`
+  - Command(s): `status`, `search`.
+  - Meaning: cached index profile marker is missing.
+  - Retryability: retry after rebuilding cache metadata.
+  - Operator action: run `gloggur index . --json`.
+- `embedding_profile_changed`
+  - Command(s): `status`, `search`.
+  - Meaning: current embedding profile does not match cached index profile.
+  - Retryability: retry after rebuilding under the active profile.
+  - Operator action: reindex using the current embedding profile.
+- `tool_version_changed`
+  - Command(s): `status`, `search`.
+  - Meaning: current CLI/tool version differs from the last successful indexed version.
+  - Retryability: retry after rebuilding with the current tool version.
+  - Operator action: run a full reindex before trusting cached retrieval.
+- `tool_version_changed_override`
+  - Command(s): `status`, `search`.
+  - Meaning: tool-version drift override is active and resume was allowed explicitly.
+  - Retryability: retry is allowed, but only under deliberate operator override.
+  - Operator action: verify retrieval correctness and schedule a real reindex.
+- `cache_corruption_recovered`
+  - Command(s): `status`, `search`.
+  - Meaning: cache corruption was detected and auto-recovery rebuilt the cache shell.
+  - Retryability: retry only after a fresh successful index build.
+  - Operator action: rebuild the index before using the cache.
+- `cache_schema_rebuilt`
+  - Command(s): `status`, `search`.
+  - Meaning: cache schema changed and the cache was rebuilt/invalidation occurred.
+  - Retryability: retry after a fresh successful index build.
+  - Operator action: rerun indexing under the current schema/tool version.

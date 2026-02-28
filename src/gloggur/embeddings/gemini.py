@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable, List
+from typing import Iterable, List, Sequence
 
 from tenacity import retry, retry_if_exception_type, wait_exponential
 
@@ -24,6 +24,26 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
 
 class _RateLimitError(Exception):
     """Sentinel re-raised when a Gemini call hits a rate-limit / quota error."""
+
+
+def _normalize_vector(vector: object, *, model: str, context: str) -> List[float]:
+    """Validate and normalize one embedding vector from Gemini."""
+    if not isinstance(vector, Sequence) or isinstance(vector, (str, bytes)):
+        raise RuntimeError(
+            f"Gemini embeddings returned invalid vector payload for model '{model}' during {context}"
+        )
+    normalized: List[float] = []
+    for value in vector:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError(
+                f"Gemini embeddings returned non-numeric vector value for model '{model}' during {context}"
+            )
+        normalized.append(float(value))
+    if not normalized:
+        raise RuntimeError(
+            f"Gemini embeddings returned an empty vector for model '{model}' during {context}"
+        )
+    return normalized
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
@@ -97,6 +117,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             reraise=True,
         )
         def _call() -> List[List[float]]:
+            """Execute one Gemini batch request and remap rate-limit/runtime failures."""
             try:
                 response = self._client.models.embed_content(
                     model=self.model, contents=chunk
@@ -107,7 +128,13 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 raise RuntimeError(
                     f"Gemini embedding request failed for model '{self.model}': {exc}"
                 ) from exc
-            return self._extract_vectors(response)
+            vectors = self._extract_vectors(
+                response,
+                model=self.model,
+                expected_count=len(chunk),
+                context="batch embedding",
+            )
+            return vectors
 
         return _call()
 
@@ -118,22 +145,47 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return self._dimension or 0
 
     @staticmethod
-    def _extract_vectors(response: object) -> List[List[float]]:
+    def _extract_vectors(
+        response: object,
+        *,
+        model: str = "unknown",
+        expected_count: int | None = None,
+        context: str = "embedding extraction",
+    ) -> List[List[float]]:
         """Extract embedding vectors from a Gemini response object."""
         embeddings = getattr(response, "embeddings", None) or getattr(response, "embedding", None)
         if embeddings is None and isinstance(response, dict):
             embeddings = response.get("embeddings") or response.get("embedding")
         if embeddings is None:
-            return []
+            raise RuntimeError(
+                f"Gemini embeddings returned no embeddings for model '{model}' during {context}"
+            )
         vectors: List[List[float]] = []
         for item in embeddings:
             if isinstance(item, list):
-                vectors.append(item)
+                vectors.append(_normalize_vector(item, model=model, context=context))
             elif isinstance(item, dict):
                 if "values" in item:
-                    vectors.append(list(item["values"]))
+                    vectors.append(
+                        _normalize_vector(item["values"], model=model, context=context)
+                    )
                 elif "embedding" in item:
-                    vectors.append(list(item["embedding"]))
+                    vectors.append(
+                        _normalize_vector(item["embedding"], model=model, context=context)
+                    )
             elif hasattr(item, "values"):
-                vectors.append(list(item.values))
+                vectors.append(_normalize_vector(item.values, model=model, context=context))
+        if not vectors:
+            raise RuntimeError(
+                f"Gemini embeddings returned no usable vectors for model '{model}' during {context}"
+            )
+        if expected_count is not None and len(vectors) != expected_count:
+            raise RuntimeError(
+                f"Gemini embeddings returned {len(vectors)} vectors for {expected_count} inputs with model '{model}'"
+            )
+        expected_dimension = len(vectors[0])
+        if any(len(vector) != expected_dimension for vector in vectors):
+            raise RuntimeError(
+                f"Gemini embeddings returned inconsistent vector dimensions for model '{model}' during {context}"
+            )
         return vectors

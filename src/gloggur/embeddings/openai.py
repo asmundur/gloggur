@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import os
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from gloggur.embeddings.base import EmbeddingProvider
+
+
+def _normalize_vector(vector: object, *, model: str, context: str) -> list[float]:
+    """Validate and normalize one embedding vector from the OpenAI client."""
+    if not isinstance(vector, Sequence) or isinstance(vector, (str, bytes)):
+        raise RuntimeError(
+            f"OpenAI embeddings returned invalid vector payload for model '{model}' during {context}"
+        )
+    normalized: list[float] = []
+    for value in vector:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError(
+                f"OpenAI embeddings returned non-numeric vector value for model '{model}' during {context}"
+            )
+        normalized.append(float(value))
+    if not normalized:
+        raise RuntimeError(
+            f"OpenAI embeddings returned an empty vector for model '{model}' during {context}"
+        )
+    return normalized
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
@@ -30,20 +50,53 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             raise RuntimeError(
                 f"OpenAI embedding request failed for model '{self.model}': {exc}"
             ) from exc
-        vector = response.data[0].embedding
+        data = getattr(response, "data", None)
+        if not isinstance(data, list) or len(data) != 1:
+            raise RuntimeError(
+                f"OpenAI embeddings returned invalid item count for model '{self.model}' during single-text embedding"
+            )
+        vector = _normalize_vector(
+            getattr(data[0], "embedding", None),
+            model=self.model,
+            context="single-text embedding",
+        )
         self._dimension = len(vector)
         return vector
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
         """Embed a batch of text strings."""
+        payload = list(texts)
+        if not payload:
+            return []
         try:
-            response = self.client.embeddings.create(model=self.model, input=list(texts))
+            response = self.client.embeddings.create(model=self.model, input=payload)
         except Exception as exc:
             raise RuntimeError(
                 f"OpenAI embedding request failed for model '{self.model}': {exc}"
             ) from exc
-        vectors = [item.embedding for item in response.data]
+        data = getattr(response, "data", None)
+        if not isinstance(data, list):
+            raise RuntimeError(
+                f"OpenAI embeddings returned invalid response payload for model '{self.model}' during batch embedding"
+            )
+        vectors = [
+            _normalize_vector(
+                getattr(item, "embedding", None),
+                model=self.model,
+                context="batch embedding",
+            )
+            for item in data
+        ]
+        if len(vectors) != len(payload):
+            raise RuntimeError(
+                f"OpenAI embeddings returned {len(vectors)} vectors for {len(payload)} inputs with model '{self.model}'"
+            )
+        expected_dimension = len(vectors[0]) if vectors else 0
+        if any(len(vector) != expected_dimension for vector in vectors):
+            raise RuntimeError(
+                f"OpenAI embeddings returned inconsistent vector dimensions for model '{self.model}'"
+            )
         if vectors:
             self._dimension = len(vectors[0])
         return vectors

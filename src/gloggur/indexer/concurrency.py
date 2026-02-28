@@ -31,6 +31,7 @@ class LockRetryPolicy:
     multiplier: float = DEFAULT_BACKOFF_MULTIPLIER
 
     def __post_init__(self) -> None:
+        """Reject invalid retry-policy values before lock acquisition starts."""
         if self.timeout_ms <= 0:
             raise ValueError("timeout_ms must be > 0")
         if self.initial_backoff_ms <= 0:
