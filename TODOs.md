@@ -69,6 +69,101 @@ Copy this section for new tasks:
 
 These tasks track reliability hardening for cache/index operations after the schema/profile auto-rebuild work.
 
+## D3 - Adopt Beads Task Tracking With Phased Markdown Coexistence
+
+**Status**: ready_for_review
+**Priority**: P2
+**Owner**: codex
+
+**Problem**
+- The repo does not have Beads configured yet, so agents cannot use `bd` for dependency-aware task tracking.
+- Existing workflow documentation points agents at `TODOs.md` and `DONEs.md` only, which does not reflect the requested Beads rollout.
+- Git hooks already run from `.githooks`, so an unreviewed `bd init` could create conflicting hook ownership.
+
+**Goal**
+- Install and initialize Beads in this repo, wire Codex integration, preserve the existing `.githooks` workflow, and document phased coexistence with `TODOs.md` / `DONEs.md`.
+
+**Scope**
+- Install `bd` via Homebrew and initialize the repo in tracked mode.
+- Merge any Beads hook behavior into the existing `.githooks` scripts without replacing current hook semantics.
+- Update agent and contributor docs to state that new work uses Beads while historical Markdown backlog remains in place for now.
+- Seed Beads with at least one verification task and capture verification evidence.
+
+**Out of Scope**
+- Bulk migration of existing Markdown tasks into Beads.
+- Retirement or deletion of `TODOs.md` / `DONEs.md`.
+
+**Acceptance Criteria**
+- `bd --version`, `bd init --quiet`, `bd ready`, and `bd show <id>` succeed in this repo.
+- `git config --get core.hooksPath` still returns `.githooks` after setup.
+- `AGENTS.md`, `README.md`, and `docs/AGENT_INTEGRATION.md` document the phased coexistence policy and Beads workflow.
+- Existing `.githooks/pre-commit` and `.githooks/pre-push` remain syntactically valid and preserve their current behaviors.
+
+**Tests Required**
+- Command verification for `bd` install/init/task creation/show/ready flows.
+- Shell syntax validation for `.githooks/pre-commit` and `.githooks/pre-push`.
+- Existing pre-push pytest command if practical after hook merge.
+
+**Links**
+- PR/commit/issues/docs: pending local implementation in this worktree
+
+**Progress Update (2026-02-28, Beads rollout + Markdown backlog import)**
+- Installed `bd` 0.55.4 via Homebrew and initialized Beads in this repo with a repaired Dolt-backed `.beads/` backend after recovering from a partial init.
+- Preserved `.githooks` as the active hook path and merged Beads sync behavior into the existing repo hooks:
+  - `.githooks/pre-commit` keeps the embedding-trace refresh first, then runs `bd hook pre-commit`
+  - `.githooks/pre-push` keeps the repo-wide `pytest -q` gate first, then runs `bd hooks run pre-push`
+  - added shared Beads hook shims for `post-merge`, `post-checkout`, and `prepare-commit-msg`
+- Updated agent and contributor docs for phased coexistence:
+  - `AGENTS.md`
+  - `CLAUDE.md`
+  - `README.md`
+  - `docs/AGENT_INTEGRATION.md`
+- Imported every open `TODOs.md` task into Beads with the original Markdown IDs preserved in the Beads titles and the full Markdown sections copied into the Beads descriptions.
+  - imported `19` Markdown tasks
+  - created verification/follow-up tasks:
+    - `bd-tip` - `Evaluate retirement plan for TODOs.md/DONEs.md after Beads rollout`
+    - `bd-wee` - `Beads setup verification task`
+    - `bd-qoe` - `Investigate Beads 0.55.4 panic on large imported task descriptions`
+- Verified Beads repo status after import:
+  - `bd status --json` reports `23` total issues, `19` open, `1` in progress, and `1` closed housekeeping task after sync
+  - `bd setup codex --check` now recognizes the installed Beads section in `AGENTS.md`
+  - `bd sync --json` exported `.beads/issues.jsonl` for git-backed sharing
+
+**DONE Candidate (2026-02-28)**
+**Delivered**
+- Installed and repaired a Dolt-backed Beads repo under `.beads/` and imported the open Markdown backlog into Beads.
+- Preserved `.githooks` as the canonical hook path while adding Beads sync behavior to the repo’s existing pre-commit and pre-push hooks.
+- Updated `AGENTS.md`, `CLAUDE.md`, `README.md`, and `docs/AGENT_INTEGRATION.md` for phased Beads/Markdown coexistence.
+- Recorded a follow-up Beads bug task (`bd-qoe`) for the `bd show` panic observed on one large imported task description.
+
+**Verification**
+- `bd --version` (`bd version 0.55.4 (Homebrew)`)
+- `bd ready --json` (returned ready tasks successfully; default JSON output is limited)
+- `bd status --json` (`23` total issues; `19` open; `1` in progress; `1` closed)
+- `bd show bd-wee --json` (`Beads setup verification task` returned successfully)
+- `bd show bd-qoe --json` (follow-up Beads panic task returned successfully)
+- `bd setup codex --check` (`Beads section found in AGENTS.md`)
+- `bd sync --json` (completed and exported `.beads/issues.jsonl`)
+- `git config --get core.hooksPath` (`.githooks`)
+- `sh -n .githooks/pre-commit && sh -n .githooks/pre-push && sh -n .githooks/post-merge && sh -n .githooks/post-checkout && sh -n .githooks/prepare-commit-msg` (passed)
+- `source ./.venv/bin/activate && .venv/bin/pytest -q` (`461 passed`)
+
+**Evidence**
+- `.beads/metadata.json`
+- `.beads/issues.jsonl`
+- `.githooks/pre-commit`
+- `.githooks/pre-push`
+- `.githooks/post-merge`
+- `.githooks/post-checkout`
+- `.githooks/prepare-commit-msg`
+- `AGENTS.md`
+- `CLAUDE.md`
+- `README.md`
+- `docs/AGENT_INTEGRATION.md`
+
+**Remaining External Evidence**
+- None
+
 ## Ordering / Priority
 
 1. **P0 now (complete before starting new workstreams):** `F2`, `F5`, `F6`, `F10`.

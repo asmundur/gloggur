@@ -9,25 +9,30 @@ OUTPUT_FILE="docs/semantic-search-embedding-breakdown-base.md"
 
 if [ ! -x ".venv/bin/python" ]; then
   echo "Skipping embedding trace hook: .venv/bin/python not found."
+else
+  NEEDS_REFRESH=0
+
+  if [ ! -f "${OUTPUT_FILE}" ]; then
+    NEEDS_REFRESH=1
+  fi
+
+  if git diff --cached --name-only --diff-filter=ACMR | grep -Eq \
+    '^(generate_embedding_breakdown\.py|gloggur/embeddings/base\.py|gloggur/indexer/indexer\.py|gloggur/parsers/treesitter_parser\.py|gloggur/embeddings/(base|factory|local|openai|gemini)\.py|gloggur/config\.py)$'; then
+    NEEDS_REFRESH=1
+  fi
+
+  if [ "${NEEDS_REFRESH}" -ne 0 ]; then
+    echo "Refreshing semantic embedding trace for ${TARGET_FILE}..."
+    .venv/bin/python generate_embedding_breakdown.py "${TARGET_FILE}" --output "${OUTPUT_FILE}"
+    git add "${OUTPUT_FILE}"
+    echo "Updated and auto-staged ${OUTPUT_FILE}"
+  fi
+fi
+
+if ! command -v bd >/dev/null 2>&1; then
+  echo "Warning: bd command not found in PATH, skipping Beads pre-commit hook" >&2
+  echo "  Install bd: brew install beads" >&2
   exit 0
 fi
 
-NEEDS_REFRESH=0
-
-if [ ! -f "${OUTPUT_FILE}" ]; then
-  NEEDS_REFRESH=1
-fi
-
-if git diff --cached --name-only --diff-filter=ACMR | grep -Eq \
-  '^(generate_embedding_breakdown\.py|gloggur/embeddings/base\.py|gloggur/indexer/indexer\.py|gloggur/parsers/treesitter_parser\.py|gloggur/embeddings/(base|factory|local|openai|gemini)\.py|gloggur/config\.py)$'; then
-  NEEDS_REFRESH=1
-fi
-
-if [ "${NEEDS_REFRESH}" -eq 0 ]; then
-  exit 0
-fi
-
-echo "Refreshing semantic embedding trace for ${TARGET_FILE}..."
-.venv/bin/python generate_embedding_breakdown.py "${TARGET_FILE}" --output "${OUTPUT_FILE}"
-git add "${OUTPUT_FILE}"
-echo "Updated and auto-staged ${OUTPUT_FILE}"
+exec bd hook pre-commit "$@"

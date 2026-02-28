@@ -53,6 +53,27 @@ scripts/gloggur <command> --json
   - `error_code`: `missing_venv`, `missing_python`, `missing_package`, or `broken_environment`
   - `remediation` guidance and detected runtime details
 
+## Task tracking with Beads
+
+New task tracking in this repo uses [Beads (`bd`)](https://github.com/steveyegge/beads).
+
+- Check for available work with `bd ready`.
+- Claim work with `bd update <id> --claim`.
+- Create new tasks with `bd create --title "..." -p 2`.
+- Inspect task details with `bd show <id>`.
+- Close completed work with `bd close <id>`.
+- Run `bd prime` when you need the current Beads workflow guidance optimized for agents.
+
+Transition policy:
+- `TODOs.md` and `DONEs.md` remain in the repo as the historical Markdown backlog and verification record.
+- Existing Markdown tasks stay where they are until explicitly migrated or retired.
+- New tasks created after the Beads rollout should go into `bd`.
+- Retire Markdown tracking only after every historical open Markdown task is imported and verified in Beads or explicitly archived/cancelled with provenance, one release cycle passes with no new Markdown tasks, `.beads/issues.jsonl` stays in parity with the live Beads DB, and the hook integration remains stable.
+- If Beads sync/export reliability regresses, keep Markdown tracking active and reopen the retirement decision.
+
+Operational note:
+- Run `bd` commands serially in this repo. Parallel `bd` invocations against the embedded Dolt store have reproduced tracker panics during local verification.
+
 ## Quick workflow
 
 For the single-path onboarding flow with provider setup and troubleshooting codes, see `docs/QUICKSTART.md`.

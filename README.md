@@ -90,6 +90,26 @@ scripts/bootstrap_gloggur_env.sh \
 
 For a deterministic first-run path (install, provider setup, index/watch/search/inspect, troubleshooting codes), use `docs/QUICKSTART.md`.
 
+## Task Tracking
+
+This repository now uses [Beads (`bd`)](https://github.com/steveyegge/beads) for new task tracking.
+
+- Start with `bd ready` to see unblocked work.
+- Claim work with `bd update <id> --claim`.
+- Create new tasks with `bd create --title "..." -p 2`.
+- Use `bd show <id>` for the full task record.
+
+`TODOs.md` and `DONEs.md` remain in the repo during the transition as the historical Markdown backlog and verification log. Existing items stay there for now, but new work created after the Beads rollout should be tracked in `bd`.
+
+Transition and retirement policy:
+- Keep `TODOs.md` and `DONEs.md` until every historical open Markdown task is either imported and verified in Beads or explicitly archived/cancelled with provenance.
+- Treat `DONEs.md` as a historical archive during coexistence; do not delete it as part of the Beads rollout.
+- Retire Markdown tracking only after one full release cycle with no new work landing in Markdown, no Beads command panics during normal serialized use, stable `.githooks` integration, and DB/export parity in `.beads/issues.jsonl`.
+- If Beads export or sync becomes unreliable again, keep Markdown tracking active and reopen the retirement decision instead of forcing a cutover.
+
+Beads operational note:
+- Run `bd` commands serially in this repo. Parallel `bd` invocations against the embedded Dolt store have triggered nil-pointer panics during local verification.
+
 For the consolidated machine-readable CLI error and resume code catalog, use `docs/ERROR_CODES.md`.
 
 Index a repository:

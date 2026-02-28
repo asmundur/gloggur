@@ -4,3 +4,11 @@ set -eu
 echo "Running pytest before push..."
 PYTHONPATH="${PYTHONPATH:-.}" .venv/bin/pytest -q
 echo "Tests passed. Proceeding with push."
+
+if ! command -v bd >/dev/null 2>&1; then
+  echo "Warning: bd command not found in PATH, skipping Beads pre-push hook" >&2
+  echo "  Install bd: brew install beads" >&2
+  exit 0
+fi
+
+exec bd hooks run pre-push "$@"
