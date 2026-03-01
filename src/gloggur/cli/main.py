@@ -1150,9 +1150,17 @@ def _build_status_payload(
         "cached_index_profile": cached_profile,
         "needs_reindex": needs_reindex,
         "reindex_reason": reindex_reason,
-        "total_symbols": cache.count_symbols(),
+        "total_symbols": _cache_total_symbols(cache),
         **resume_contract,
     }
+
+
+def _cache_total_symbols(cache: CacheManager) -> int:
+    """Return total symbol count with compatibility for older cache test doubles."""
+    count_symbols = getattr(cache, "count_symbols", None)
+    if callable(count_symbols):
+        return int(count_symbols())
+    return len(cache.list_symbols())
 
 
 def _create_status_payload(
