@@ -120,7 +120,9 @@ class VectorStore:
                 self._id_map_dirty = True
         if self._fallback_order:
             self._fallback_order = [
-                symbol_id for symbol_id in self._fallback_order if symbol_id in self._symbol_to_vector_id
+                symbol_id
+                for symbol_id in self._fallback_order
+                if symbol_id in self._symbol_to_vector_id
             ]
             self._id_map_dirty = True
 

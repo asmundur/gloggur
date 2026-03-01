@@ -232,7 +232,12 @@ class CacheManager:
         with self._connect() as conn:
             self._upsert_symbol_rows(conn, symbol_rows)
 
-    def replace_file_index(self, path: str, metadata: FileMetadata, symbols: Iterable[Symbol]) -> None:
+    def replace_file_index(
+        self,
+        path: str,
+        metadata: FileMetadata,
+        symbols: Iterable[Symbol],
+    ) -> None:
         """Replace one file's symbol rows and metadata in a single transaction."""
         symbol_rows = [self._symbol_row(symbol) for symbol in symbols]
         with self._connect() as conn:
