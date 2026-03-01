@@ -25,6 +25,7 @@ from gloggur.cli.main import (
     _inspect_path_class,
     _metadata_reindex_reason,
     _next_retry_top_k,
+    _persist_last_success_resume_state,
     _profile_reindex_reason,
     _should_include_inspect_path,
     _stable_fingerprint,
@@ -688,6 +689,83 @@ def test_resume_contract_missing_tool_version_marker_remains_resume_ok() -> None
     assert payload["resume_reason_codes"] == []
     assert payload["resume_fingerprint_match"] is True
     assert payload["last_success_tool_version_match"] is None
+
+
+def test_persist_last_success_resume_state_no_change_reindex_is_idempotent() -> None:
+    """An unchanged re-index must not advance last_success_resume_at or rewrite the fingerprint.
+
+    Regression test for bd-l7d: before the fix, _persist_last_success_resume_state wrote a
+    fresh metadata.last_updated timestamp to last_success_resume_at on every successful index
+    run — including runs where no indexed content changed.  This caused last_success_resume_at
+    to drift even when the resume fingerprint was stable.
+    """
+    from gloggur.cli.main import GLOGGUR_VERSION
+
+    writes: list[tuple[str, str]] = []
+
+    class FakeCache:
+        last_reset_reason = None
+        _fingerprint: str | None = None
+        _at: str | None = None
+        _tool_version: str | None = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=5, indexed_files=2)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> str | None:
+            return self._fingerprint
+
+        def set_last_success_resume_fingerprint(self, fp: str) -> None:
+            writes.append(("fingerprint", fp))
+            self._fingerprint = fp
+
+        def get_last_success_resume_at(self) -> str | None:
+            return self._at
+
+        def set_last_success_resume_at(self, ts: str) -> None:
+            writes.append(("at", ts))
+            self._at = ts
+
+        def get_last_success_tool_version(self) -> str | None:
+            return self._tool_version
+
+        def set_last_success_tool_version(self, v: str) -> None:
+            writes.append(("tool_version", v))
+            self._tool_version = v
+
+        def count_symbols(self) -> int:
+            return 5
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir="/tmp/cache",
+    )
+    cache = FakeCache()
+
+    # First call: cold state, fingerprint must be written.
+    _persist_last_success_resume_state(config, cache)
+    assert len(writes) == 3, f"First index should write all three fields, got: {writes}"
+    first_fp = cache._fingerprint
+    first_at = cache._at
+    assert first_fp is not None
+    assert first_at is not None
+
+    writes.clear()
+
+    # Second call: identical state (no content change).  Nothing must be rewritten.
+    _persist_last_success_resume_state(config, cache)
+    assert writes == [], (
+        f"Unchanged re-index must not rewrite any stored state, got writes: {writes}"
+    )
+    assert cache._fingerprint == first_fp, "expected_resume_fingerprint must be stable"
+    assert cache._at == first_at, "last_success_resume_at must not advance on unchanged re-index"
 
 
 def test_build_status_payload_requires_reindex_on_tool_version_drift() -> None:

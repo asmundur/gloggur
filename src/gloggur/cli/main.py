@@ -701,8 +701,14 @@ def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManage
     if resume_contract["resume_decision"] != "resume_ok":
         return
     fingerprint = resume_contract["expected_resume_fingerprint"]
-    if isinstance(fingerprint, str):
-        cache.set_last_success_resume_fingerprint(fingerprint)
+    if not isinstance(fingerprint, str):
+        return
+    # Skip all writes when the fingerprint is unchanged — an unchanged re-index must not
+    # advance last_success_resume_at (or any other stored state), because doing so would
+    # change observable session state even when no indexed content has changed.
+    if fingerprint == cache.get_last_success_resume_fingerprint():
+        return
+    cache.set_last_success_resume_fingerprint(fingerprint)
     cache.set_last_success_resume_at(metadata.last_updated.isoformat())
     cache.set_last_success_tool_version(GLOGGUR_VERSION)
 

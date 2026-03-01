@@ -30,7 +30,13 @@
       "Bash(.venv/bin/ruff check src/gloggur/ --select E501)",
       "Bash(.venv/bin/ruff check src/gloggur/ --select B905)",
       "Bash(source /Users/auzi/vinnustofa/gloggur/.venv/bin/activate)",
-      "Bash(.venv/bin/ruff check /Users/auzi/vinnustofa/gloggur/src/gloggur/bootstrap_launcher.py --select E501)"
+      "Bash(.venv/bin/ruff check /Users/auzi/vinnustofa/gloggur/src/gloggur/bootstrap_launcher.py --select E501)",
+      "Bash(bd show bd-l7d)",
+      "Bash(bd ready)",
+      "Bash(bd update bd-l7d --claim)",
+      "Bash(.venv/bin/python -c \":*)",
+      "Bash(.venv/bin/pytest tests/unit/test_cli_main.py::test_persist_last_success_resume_state_no_change_reindex_is_idempotent -xvs)",
+      "Bash(.venv/bin/pytest tests/unit/test_cli_main.py -x --tb=short -q)"
     ]
   }
 }
