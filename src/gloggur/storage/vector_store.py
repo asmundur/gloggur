@@ -52,6 +52,7 @@ class VectorStore:
         self._next_vector_id = 1
         self._fallback_vectors: dict[str, list[float]] = {}
         self._fallback_order: list[str] = []
+        self._id_map_dirty = False
         self._fallback_path = os.path.join(self.config.cache_dir, "vectors.npy")
         self._faiss_available = self._check_faiss()
         try:
@@ -90,7 +91,8 @@ class VectorStore:
             for symbol_id, vector in updates:
                 self._ensure_vector_id(symbol_id)
                 self._fallback_vectors[symbol_id] = vector
-        self._persist_id_map()
+            self._fallback_order = []
+            self._id_map_dirty = True
 
     def remove_ids(self, symbol_ids: Iterable[str]) -> None:
         """Remove vectors by symbol ids."""
@@ -115,7 +117,12 @@ class VectorStore:
             vector_id = self._symbol_to_vector_id.pop(symbol_id, None)
             if vector_id is not None:
                 self._vector_id_to_symbol.pop(vector_id, None)
-        self._persist_id_map()
+                self._id_map_dirty = True
+        if self._fallback_order:
+            self._fallback_order = [
+                symbol_id for symbol_id in self._fallback_order if symbol_id in self._symbol_to_vector_id
+            ]
+            self._id_map_dirty = True
 
     def list_symbol_ids(self) -> list[str]:
         """Return known vector symbol ids in deterministic order."""
@@ -155,10 +162,10 @@ class VectorStore:
     def save(self) -> None:
         """Persist vectors and id mapping to disk."""
 
-        self._persist_id_map()
         if self._faiss_available and self._index is not None:
             import faiss
 
+            self._persist_id_map()
             temp_path = self._temp_path(self.config.index_path)
             try:
                 faiss.write_index(self._index, temp_path)
@@ -178,12 +185,17 @@ class VectorStore:
                 self._fallback_vectors,
                 key=lambda symbol_id: self._symbol_to_vector_id.get(symbol_id, 0),
             )
+            self._id_map_dirty = True
+            self._persist_id_map()
             matrix = np.asarray(
                 [self._fallback_vectors[symbol_id] for symbol_id in self._fallback_order],
                 dtype="float32",
             )
             self._save_fallback_matrix(matrix)
         else:
+            self._fallback_order = []
+            self._id_map_dirty = True
+            self._persist_id_map()
             self._remove_file(self._fallback_path)
         self._touch_index_placeholder()
 
@@ -207,6 +219,8 @@ class VectorStore:
 
         if legacy_map:
             self._migrate_legacy_vectors()
+            return
+        self._id_map_dirty = False
 
     def clear(self) -> None:
         """Remove all persisted vectors and metadata files."""
@@ -217,6 +231,7 @@ class VectorStore:
         self._next_vector_id = 1
         self._fallback_vectors = {}
         self._fallback_order = []
+        self._id_map_dirty = False
         for path in (self.config.index_path, self.config.id_map_path, self._fallback_path):
             self._remove_file(path)
 
@@ -243,6 +258,7 @@ class VectorStore:
                 self._index.add_with_ids(bootstrap_matrix, bootstrap_ids)
                 self._fallback_vectors = {}
                 self._fallback_order = []
+                self._id_map_dirty = True
         matrix = np.asarray([vector for _symbol_id, vector in updates], dtype="float32")
         vector_ids = np.asarray(
             [self._ensure_vector_id(symbol_id) for symbol_id, _vector in updates],
@@ -260,6 +276,7 @@ class VectorStore:
         self._next_vector_id += 1
         self._symbol_to_vector_id[symbol_id] = vector_id
         self._vector_id_to_symbol[vector_id] = symbol_id
+        self._id_map_dirty = True
         return vector_id
 
     def _persist_id_map(self) -> None:
@@ -276,6 +293,7 @@ class VectorStore:
             operation="write vector id map",
             path=self.config.id_map_path,
         )
+        self._id_map_dirty = False
 
     def _load_id_map(self) -> bool:
         """Read id mapping from disk. Returns True when legacy format is detected."""
@@ -284,6 +302,7 @@ class VectorStore:
         self._vector_id_to_symbol = {}
         self._next_vector_id = 1
         self._fallback_order = []
+        self._id_map_dirty = False
         if not os.path.exists(self.config.id_map_path):
             return False
         try:
@@ -375,12 +394,14 @@ class VectorStore:
         self._symbol_to_vector_id = {}
         self._vector_id_to_symbol = {}
         self._next_vector_id = 1
+        self._id_map_dirty = False
         if self._faiss_available:
             self._upsert_faiss_vectors(vectors)
         else:
             for symbol_id, vector in vectors:
                 self._ensure_vector_id(symbol_id)
                 self._fallback_vectors[symbol_id] = vector
+            self._id_map_dirty = True
         self.save()
 
     def _load_vectors_from_db(self) -> list[tuple[str, list[float]]]:

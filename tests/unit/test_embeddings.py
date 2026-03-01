@@ -29,6 +29,24 @@ def test_local_embedding_fallback_marker_enables_offline_vectors() -> None:
     assert len(batch[0]) == provider.get_dimension()
 
 
+def test_local_embedding_fallback_reuses_cached_token_vectors() -> None:
+    """Fallback token hashing should memoize repeated token vectors across calls."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    marker = Path(cache_dir) / ".local_embedding_fallback"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch(exist_ok=True)
+
+    provider = LocalEmbeddingProvider("local", cache_dir=cache_dir)
+    first = provider.embed_text("repeat repeat")
+    cache_size_after_first = len(provider._token_vector_cache)
+    second = provider.embed_text("repeat again")
+
+    assert first
+    assert second
+    assert "repeat" in provider._token_vector_cache
+    assert len(provider._token_vector_cache) == cache_size_after_first + 1
+
+
 def test_openai_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenAI provider should require API key."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

@@ -34,6 +34,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         else:
             self._use_fallback = env_flag.strip().lower() not in ("", "0", "false", "no", "off")
         self._token_pattern = re.compile(r"[A-Za-z0-9_]+")
+        self._token_vector_cache: dict[str, list[float]] = {}
 
     def _load_model(self):
         """Load the sentence-transformers model or enable fallback."""
@@ -95,7 +96,10 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             tokens = [text]
         values = [0.0] * self._fallback_dimension
         for token in tokens:
-            token_vector = self._vector_from_seed(token.encode("utf8"))
+            token_vector = self._token_vector_cache.get(token)
+            if token_vector is None:
+                token_vector = self._vector_from_seed(token.encode("utf8"))
+                self._token_vector_cache[token] = token_vector
             for idx, token_value in enumerate(token_vector):
                 values[idx] += token_value
         norm = math.sqrt(sum(v * v for v in values)) or 1.0

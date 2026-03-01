@@ -1150,7 +1150,7 @@ def _build_status_payload(
         "cached_index_profile": cached_profile,
         "needs_reindex": needs_reindex,
         "reindex_reason": reindex_reason,
-        "total_symbols": len(cache.list_symbols()),
+        "total_symbols": cache.count_symbols(),
         **resume_contract,
     }
 
@@ -2169,7 +2169,7 @@ def index(
         if outcome and outcome.status != "failed" and failed == 0:
             metadata = IndexMetadata(
                 version=config.index_version,
-                total_symbols=len(cache.list_symbols()),
+                total_symbols=cache.count_symbols(),
                 indexed_files=cache.count_files(),
             )
             cache.set_index_metadata(metadata)

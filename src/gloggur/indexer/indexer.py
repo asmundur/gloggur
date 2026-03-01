@@ -292,7 +292,7 @@ class Indexer:
         if failed_files == 0:
             metadata = IndexMetadata(
                 version=self.config.index_version,
-                total_symbols=len(self.cache.list_symbols()),
+                total_symbols=self.cache.count_symbols(),
                 indexed_files=self.cache.count_files(),
             )
             self.cache.set_index_metadata(metadata)
@@ -449,15 +449,15 @@ class Indexer:
         """Persist one prepared file into cache and vector store."""
         if self.vector_store and prepared.previous_symbol_ids:
             self.vector_store.remove_ids(prepared.previous_symbol_ids)
-        self.cache.delete_symbols_for_file(prepared.path)
-        self.cache.upsert_symbols(prepared.symbols)
-        self.cache.upsert_file_metadata(
+        self.cache.replace_file_index(
+            prepared.path,
             FileMetadata(
                 path=prepared.path,
                 language=prepared.language,
                 content_hash=prepared.content_hash,
                 symbols=[symbol.id for symbol in prepared.symbols],
-            )
+            ),
+            prepared.symbols,
         )
         if self.vector_store and prepared.symbols:
             self.vector_store.upsert_vectors(prepared.symbols)

@@ -70,6 +70,44 @@ def test_indexer_skips_unchanged_files() -> None:
         assert metadata.content_hash
 
 
+def test_indexer_replaces_changed_file_symbols_and_updates_counts() -> None:
+    """Reindexing a changed file should replace stale symbol rows and refresh totals."""
+    initial_source = (
+        "def alpha(value: int) -> int:\n"
+        "    return value + 1\n"
+    )
+    updated_source = (
+        "def beta(value: int) -> int:\n"
+        "    return value + 2\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": initial_source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+
+        first = indexer.index_repository(str(repo))
+        assert first.failed == 0
+        first_symbols = cache.list_symbols_for_file(str(repo / "sample.py"))
+        assert [symbol.name for symbol in first_symbols] == ["alpha"]
+
+        (repo / "sample.py").write_text(updated_source, encoding="utf8")
+        second = indexer.index_repository(str(repo))
+
+        assert second.failed == 0
+        assert second.indexed_files == 1
+        assert second.symbols_added == 1
+        assert second.symbols_removed == 1
+        assert second.symbols_updated == 0
+        refreshed_symbols = cache.list_symbols_for_file(str(repo / "sample.py"))
+        assert [symbol.name for symbol in refreshed_symbols] == ["beta"]
+        assert cache.count_symbols() == 1
+        metadata = cache.get_index_metadata()
+        assert metadata is not None
+        assert metadata.total_symbols == 1
+
+
 def test_indexer_prunes_deleted_files_and_reports_symbol_removals() -> None:
     """Reindex should remove stale file symbols when files are deleted from disk."""
     keep_source = (

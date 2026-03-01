@@ -9,7 +9,7 @@ import pytest
 
 import gloggur.indexer.cache as cache_module
 from gloggur.indexer.cache import CACHE_SCHEMA_VERSION, CacheConfig, CacheManager
-from gloggur.models import IndexMetadata, Symbol
+from gloggur.models import FileMetadata, IndexMetadata, Symbol
 
 
 def _sample_symbol(symbol_id: str = "sample:1:add") -> Symbol:
@@ -52,6 +52,63 @@ def test_cache_round_trip_symbols_metadata_and_warnings() -> None:
     assert warnings == ["Missing docstring"]
 
 
+def test_cache_replace_file_index_replaces_symbol_rows_and_metadata() -> None:
+    """replace_file_index should atomically swap one file's metadata and symbol rows."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+
+    first = _sample_symbol("sample.py:1:add")
+    second = _sample_symbol("sample.py:5:subtract")
+    second.name = "subtract"
+    second.signature = "def subtract(a, b):"
+    second.start_line = 5
+    second.end_line = 6
+    second.embedding_vector = [0.3, 0.4]
+
+    cache.replace_file_index(
+        "sample.py",
+        FileMetadata(path="sample.py", language="python", content_hash="hash-a", symbols=[first.id]),
+        [first],
+    )
+    cache.replace_file_index(
+        "sample.py",
+        FileMetadata(
+            path="sample.py",
+            language="python",
+            content_hash="hash-b",
+            symbols=[second.id],
+        ),
+        [second],
+    )
+
+    metadata = cache.get_file_metadata("sample.py")
+    assert metadata is not None
+    assert metadata.content_hash == "hash-b"
+    assert metadata.symbols == [second.id]
+    symbols = cache.list_symbols_for_file("sample.py")
+    assert [symbol.id for symbol in symbols] == [second.id]
+    assert cache.count_symbols() == 1
+
+
+def test_cache_replace_file_index_keeps_metadata_for_empty_symbol_files() -> None:
+    """replace_file_index should preserve file metadata even when no symbols remain."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+
+    cache.replace_file_index(
+        "sample.py",
+        FileMetadata(path="sample.py", language="python", content_hash="hash-empty", symbols=[]),
+        [],
+    )
+
+    metadata = cache.get_file_metadata("sample.py")
+    assert metadata is not None
+    assert metadata.content_hash == "hash-empty"
+    assert metadata.symbols == []
+    assert cache.list_symbols_for_file("sample.py") == []
+    assert cache.count_symbols() == 0
+
+
 def test_cache_round_trip_structured_audit_reports_and_legacy_warning_reads() -> None:
     """Structured audit payloads should preserve score metadata without breaking warning reads."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -86,6 +143,7 @@ def test_cache_clear_removes_entries() -> None:
     cache.upsert_symbols([_sample_symbol()])
     cache.clear()
     assert cache.list_symbols() == []
+    assert cache.count_symbols() == 0
     assert cache.get_index_metadata() is None
 
 

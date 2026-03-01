@@ -212,22 +212,7 @@ class CacheManager:
     def upsert_file_metadata(self, metadata: FileMetadata) -> None:
         """Insert or update file metadata."""
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO files (path, language, content_hash, last_indexed)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET
-                    language = excluded.language,
-                    content_hash = excluded.content_hash,
-                    last_indexed = excluded.last_indexed
-                """,
-                (
-                    metadata.path,
-                    metadata.language,
-                    metadata.content_hash,
-                    metadata.last_indexed.isoformat(),
-                ),
-            )
+            self._upsert_file_metadata_row(conn, metadata)
 
     def delete_symbols_for_file(self, path: str) -> None:
         """Delete all cached symbols for a file."""
@@ -241,44 +226,20 @@ class CacheManager:
 
     def upsert_symbols(self, symbols: Iterable[Symbol]) -> None:
         """Insert or update a batch of symbols."""
+        symbol_rows = [self._symbol_row(symbol) for symbol in symbols]
+        if not symbol_rows:
+            return
         with self._connect() as conn:
-            for symbol in symbols:
-                conn.execute(
-                    """
-                    INSERT INTO symbols (
-                        id, name, kind, file_path, start_line, end_line,
-                        signature, docstring, body_hash, embedding_vector, language
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        name = excluded.name,
-                        kind = excluded.kind,
-                        file_path = excluded.file_path,
-                        start_line = excluded.start_line,
-                        end_line = excluded.end_line,
-                        signature = excluded.signature,
-                        docstring = excluded.docstring,
-                        body_hash = excluded.body_hash,
-                        embedding_vector = excluded.embedding_vector,
-                        language = excluded.language
-                    """,
-                    (
-                        symbol.id,
-                        symbol.name,
-                        symbol.kind,
-                        symbol.file_path,
-                        symbol.start_line,
-                        symbol.end_line,
-                        symbol.signature,
-                        symbol.docstring,
-                        symbol.body_hash,
-                        (
-                            json.dumps(symbol.embedding_vector)
-                            if symbol.embedding_vector is not None
-                            else None
-                        ),
-                        symbol.language,
-                    ),
-                )
+            self._upsert_symbol_rows(conn, symbol_rows)
+
+    def replace_file_index(self, path: str, metadata: FileMetadata, symbols: Iterable[Symbol]) -> None:
+        """Replace one file's symbol rows and metadata in a single transaction."""
+        symbol_rows = [self._symbol_row(symbol) for symbol in symbols]
+        with self._connect() as conn:
+            conn.execute("DELETE FROM symbols WHERE file_path = ?", (path,))
+            if symbol_rows:
+                self._upsert_symbol_rows(conn, symbol_rows)
+            self._upsert_file_metadata_row(conn, metadata)
 
     def list_symbols(self) -> list[Symbol]:
         """Return all cached symbols."""
@@ -290,6 +251,12 @@ class CacheManager:
         """Return the number of indexed files."""
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()
+            return int(row["count"] if row else 0)
+
+    def count_symbols(self) -> int:
+        """Return the number of cached symbols."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM symbols").fetchone()
             return int(row["count"] if row else 0)
 
     def list_file_paths(self) -> list[str]:
@@ -767,6 +734,70 @@ class CacheManager:
             body_hash=row["body_hash"],
             embedding_vector=vector,
             language=row["language"],
+        )
+
+    @staticmethod
+    def _symbol_row(symbol: Symbol) -> tuple[object, ...]:
+        """Normalize one symbol into the row payload used by upsert statements."""
+        return (
+            symbol.id,
+            symbol.name,
+            symbol.kind,
+            symbol.file_path,
+            symbol.start_line,
+            symbol.end_line,
+            symbol.signature,
+            symbol.docstring,
+            symbol.body_hash,
+            json.dumps(symbol.embedding_vector) if symbol.embedding_vector is not None else None,
+            symbol.language,
+        )
+
+    @staticmethod
+    def _upsert_symbol_rows(
+        conn: sqlite3.Connection,
+        symbol_rows: list[tuple[object, ...]],
+    ) -> None:
+        """Insert or update symbol rows with one executemany call."""
+        conn.executemany(
+            """
+            INSERT INTO symbols (
+                id, name, kind, file_path, start_line, end_line,
+                signature, docstring, body_hash, embedding_vector, language
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                kind = excluded.kind,
+                file_path = excluded.file_path,
+                start_line = excluded.start_line,
+                end_line = excluded.end_line,
+                signature = excluded.signature,
+                docstring = excluded.docstring,
+                body_hash = excluded.body_hash,
+                embedding_vector = excluded.embedding_vector,
+                language = excluded.language
+            """,
+            symbol_rows,
+        )
+
+    @staticmethod
+    def _upsert_file_metadata_row(conn: sqlite3.Connection, metadata: FileMetadata) -> None:
+        """Insert or update one file metadata row."""
+        conn.execute(
+            """
+            INSERT INTO files (path, language, content_hash, last_indexed)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                language = excluded.language,
+                content_hash = excluded.content_hash,
+                last_indexed = excluded.last_indexed
+            """,
+            (
+                metadata.path,
+                metadata.language,
+                metadata.content_hash,
+                metadata.last_indexed.isoformat(),
+            ),
         )
 
 
