@@ -551,7 +551,6 @@ def _index_metadata_digest(metadata: IndexMetadata | None) -> str | None:
         return None
     payload: dict[str, object] = {
         "version": metadata.version,
-        "last_updated": metadata.last_updated.isoformat(),
         "total_symbols": metadata.total_symbols,
         "indexed_files": metadata.indexed_files,
     }

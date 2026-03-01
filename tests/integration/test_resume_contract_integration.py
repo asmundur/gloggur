@@ -104,6 +104,41 @@ def test_resume_markers_persist_across_fresh_processes() -> None:
         assert metadata["last_success_tool_version_match"] is True
 
 
+def test_resume_fingerprint_stable_across_unchanged_reindex() -> None:
+    """Running index twice on unchanged files should preserve the exact same resume fingerprint."""
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_FALLBACK": "1",
+        }
+
+        # First index run
+        index_run_1 = _run_cli(["index", str(repo), "--json"], env)
+        assert index_run_1.returncode == 0, f"{index_run_1.stderr}\n{index_run_1.stdout}"
+        
+        status_1 = _run_cli(["status", "--json"], env)
+        assert status_1.returncode == 0, f"{status_1.stderr}\n{status_1.stdout}"
+        payload_1 = _parse_json_payload(status_1.stdout)
+        fingerprint_1 = payload_1["expected_resume_fingerprint"]
+
+        # Second index run (unchanged files, so should just re-verify)
+        index_run_2 = _run_cli(["index", str(repo), "--json"], env)
+        assert index_run_2.returncode == 0, f"{index_run_2.stderr}\n{index_run_2.stdout}"
+        
+        status_2 = _run_cli(["status", "--json"], env)
+        assert status_2.returncode == 0, f"{status_2.stderr}\n{status_2.stdout}"
+        payload_2 = _parse_json_payload(status_2.stdout)
+        fingerprint_2 = payload_2["expected_resume_fingerprint"]
+
+        # Fingerprint should be identical
+        assert fingerprint_1 == fingerprint_2
+
+
 def test_resume_schema_version_mismatch_emits_machine_reason_codes() -> None:
     """Schema-version drift should force deterministic machine-readable reindex decisions."""
     source = TestFixtures.create_sample_python_file()
