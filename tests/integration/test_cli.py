@@ -215,6 +215,131 @@ def test_cli_search_fail_on_ungrounded_returns_nonzero_with_validation_payload()
         assert payload["failure_codes"] == ["search_grounding_validation_failed"]
 
 
+def test_cli_guidance_uses_ingested_coverage_for_constraining_tests() -> None:
+    """Coverage ingest should feed guidance test-to-code linkage and untested warnings."""
+    runner = CliRunner()
+    source = """
+def covered_target(x):
+    return x + 1
+
+def untested_with_invariant(x):
+    assert x > 0
+    return x
+"""
+    test_source = """
+from service import covered_target
+
+def test_calls_covered_target():
+    assert covered_target(1) == 2
+"""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"service.py": source, "test_service.py": test_source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        service_path = str(repo / "service.py")
+        search_service_result = runner.invoke(
+            cli,
+            [
+                "search",
+                "target",
+                "--json",
+                "--file",
+                service_path,
+                "--kind",
+                "function",
+                "--top-k",
+                "10",
+            ],
+            env=env,
+        )
+        assert search_service_result.exit_code == 0, search_service_result.output
+        service_payload = _parse_json_output(search_service_result.output)
+        service_results = service_payload["results"]
+        assert isinstance(service_results, list)
+
+        covered_symbol = next(
+            result for result in service_results if result.get("symbol") == "covered_target"
+        )
+        untested_symbol = next(
+            result
+            for result in service_results
+            if result.get("symbol") == "untested_with_invariant"
+        )
+        covered_symbol_id = covered_symbol["symbol_id"]
+        untested_symbol_id = untested_symbol["symbol_id"]
+        covered_line = int(covered_symbol["line"])
+
+        test_path = str(repo / "test_service.py")
+        search_test_result = runner.invoke(
+            cli,
+            [
+                "search",
+                "test_calls_covered_target",
+                "--json",
+                "--file",
+                test_path,
+                "--kind",
+                "function",
+                "--top-k",
+                "10",
+            ],
+            env=env,
+        )
+        assert search_test_result.exit_code == 0, search_test_result.output
+        test_payload = _parse_json_output(search_test_result.output)
+        test_results = test_payload["results"]
+        assert isinstance(test_results, list)
+        test_symbol = next(
+            result for result in test_results if result.get("symbol") == "test_calls_covered_target"
+        )
+        test_symbol_id = test_symbol["symbol_id"]
+
+        coverage_payload = {test_symbol_id: {service_path: [covered_line]}}
+        coverage_file = repo / "gloggur-coverage.json"
+        coverage_file.write_text(json.dumps(coverage_payload), encoding="utf8")
+
+        ingest_result = runner.invoke(
+            cli,
+            ["coverage", "ingest", str(coverage_file), "--json"],
+            env=env,
+        )
+        assert ingest_result.exit_code == 0, ingest_result.output
+        ingest_payload = _parse_json_output(ingest_result.output)
+        assert ingest_payload["tests_processed"] == 1
+        assert ingest_payload["files_affected"] == 1
+        assert int(ingest_payload["symbols_updated"]) >= 1
+
+        guidance_result = runner.invoke(
+            cli,
+            ["guidance", covered_symbol_id, "--json"],
+            env=env,
+        )
+        assert guidance_result.exit_code == 0, guidance_result.output
+        guidance_payload = _parse_json_output(guidance_result.output)
+        constraining_tests = guidance_payload["constraining_tests"]
+        assert isinstance(constraining_tests, list)
+        linkage = next(t for t in constraining_tests if t["test_symbol_id"] == test_symbol_id)
+        assert linkage["constraint_strength"] == "strong"
+        assert guidance_payload["untested_behaviors"] == []
+
+        untested_guidance_result = runner.invoke(
+            cli,
+            ["guidance", untested_symbol_id, "--json"],
+            env=env,
+        )
+        assert untested_guidance_result.exit_code == 0, untested_guidance_result.output
+        untested_guidance_payload = _parse_json_output(untested_guidance_result.output)
+        untested_behaviors = untested_guidance_payload["untested_behaviors"]
+        assert isinstance(untested_behaviors, list)
+        assert any("no dynamic test coverage" in warning for warning in untested_behaviors)
+        assert any("strict invariants" in warning for warning in untested_behaviors)
+
+
 def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
     """Status/search should require reindex on model change; index should self-rebuild."""
     runner = CliRunner()

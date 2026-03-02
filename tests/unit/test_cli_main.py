@@ -407,6 +407,60 @@ def test_cli_failure_catalog_includes_artifact_uploader_codes() -> None:
         assert guidance
 
 
+def test_coverage_ingest_invalid_json_returns_coverage_file_invalid(tmp_path: Path) -> None:
+    """Malformed coverage JSON should fail closed with stable coverage_file_invalid code."""
+    runner = CliRunner()
+    coverage_file = tmp_path / "broken-coverage.json"
+    coverage_file.write_text('{"test_func": ', encoding="utf8")
+    env = {"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")}
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["coverage", "ingest", str(coverage_file), "--json"],
+        env=env,
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "coverage_file_invalid"
+
+
+def test_coverage_import_python_missing_line_data_returns_coverage_sqlite_invalid(
+    tmp_path: Path,
+) -> None:
+    """coverage import-python should fail closed when required sqlite tables are missing."""
+    runner = CliRunner()
+    coverage_db = tmp_path / "coverage.db"
+    output_file = tmp_path / "gloggur-coverage.json"
+    env = {"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")}
+
+    with sqlite3.connect(coverage_db) as conn:
+        conn.execute("CREATE TABLE context (id INTEGER PRIMARY KEY, context TEXT)")
+        conn.execute("CREATE TABLE file (id INTEGER PRIMARY KEY, path TEXT)")
+        conn.commit()
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "coverage",
+            "import-python",
+            str(coverage_db),
+            "--output",
+            str(output_file),
+            "--json",
+        ],
+        env=env,
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "coverage_sqlite_invalid"
+
+
 def test_resolve_artifact_destination_rejects_unsupported_scheme() -> None:
     """Artifact destination parser should fail closed for non-file URI schemes."""
     with pytest.raises(cli_main.CLIContractError) as exc_info:

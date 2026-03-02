@@ -152,3 +152,67 @@ def test_guidance_queries() -> None:
     untested_behaviors_func = res_untested_func["untested_behaviors"]
     assert isinstance(untested_behaviors_func, list)
     assert len(untested_behaviors_func) == 2 # no coverage + strict invariants
+
+
+def test_get_constraining_tests_symbol_not_found_returns_error() -> None:
+    """Missing symbol should return deterministic error payload."""
+    guidance = AgentGuidance(MockHybridSearch([]))  # type: ignore[arg-type]
+    payload = guidance.get_constraining_tests("missing:symbol")
+    assert payload["error"] == "Symbol not found: missing:symbol"
+
+
+def test_get_untested_behaviors_symbol_not_found_returns_error() -> None:
+    """Missing symbol should return deterministic error payload."""
+    guidance = AgentGuidance(MockHybridSearch([]))  # type: ignore[arg-type]
+    payload = guidance.get_untested_behaviors("missing:symbol")
+    assert payload["error"] == "Symbol not found: missing:symbol"
+
+
+def test_generate_agent_context_symbol_not_found_returns_error() -> None:
+    """Missing symbol should return deterministic error payload."""
+    guidance = AgentGuidance(MockHybridSearch([]))  # type: ignore[arg-type]
+    payload = guidance.generate_agent_context("missing:symbol")
+    assert payload["error"] == "Symbol not found: missing:symbol"
+
+
+def test_get_constraining_tests_missing_test_symbol_defaults_to_moderate() -> None:
+    """Missing linked test symbol should degrade strength to moderate without failure."""
+    sym_target = Symbol(
+        id="service.py:1:covered_target",
+        name="covered_target",
+        kind="function",
+        file_path="service.py",
+        start_line=1,
+        end_line=3,
+        body_hash="hash_target",
+        covered_by=["test_service.py:1:test_calls_covered_target"],
+    )
+    guidance = AgentGuidance(MockHybridSearch([sym_target]))  # type: ignore[arg-type]
+
+    payload = guidance.get_constraining_tests(sym_target.id)
+    constraining_tests = payload["constraining_tests"]
+    assert isinstance(constraining_tests, list)
+    assert len(constraining_tests) == 1
+    assert constraining_tests[0]["constraint_strength"] == "moderate"
+
+
+def test_get_untested_behaviors_no_coverage_no_invariants_emits_single_warning() -> None:
+    """Without coverage and invariants, guidance should emit only the baseline warning."""
+    sym = Symbol(
+        id="service.py:10:dark_path",
+        name="dark_path",
+        kind="function",
+        file_path="service.py",
+        start_line=10,
+        end_line=13,
+        body_hash="hash_dark",
+        covered_by=[],
+        invariants=[],
+    )
+    guidance = AgentGuidance(MockHybridSearch([sym]))  # type: ignore[arg-type]
+
+    payload = guidance.get_untested_behaviors(sym.id)
+    untested_behaviors = payload["untested_behaviors"]
+    assert isinstance(untested_behaviors, list)
+    assert len(untested_behaviors) == 1
+    assert "no dynamic test coverage" in untested_behaviors[0]
