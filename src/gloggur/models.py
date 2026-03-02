@@ -24,6 +24,9 @@ class Symbol(BaseModel):
     body_hash: str
     embedding_vector: list[float] | None = None
     language: str | None = None
+    invariants: list[str] = Field(default_factory=list)
+    is_serialization_boundary: bool = False
+    implicit_contract: str | None = None
 
 
 class FileMetadata(BaseModel):

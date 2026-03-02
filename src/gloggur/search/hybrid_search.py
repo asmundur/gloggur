@@ -60,6 +60,59 @@ class HybridSearch:
             "metadata": {"total_results": len(results), "search_time_ms": duration_ms},
         }
 
+    def get_semantic_neighborhood(
+        self,
+        symbol_id: str,
+        radius: int = 5,
+        top_k: int = 5,
+    ) -> dict[str, object]:
+        """Get structural and semantic neighbors for a given symbol."""
+        start = time.time()
+
+        symbol = self.metadata_store.get_symbol(symbol_id)
+        if not symbol:
+            return {"error": f"Symbol not found: {symbol_id}"}
+
+        # 1. Structural neighbors (same file)
+        structural: list[dict[str, object]] = []
+        file_symbols = self.metadata_store.filter_symbols(file_path=symbol.file_path)
+        for s in file_symbols:
+            if s.id == symbol_id:
+                continue
+            # Calculate distance in lines
+            line_distance = min(
+                abs(s.start_line - symbol.end_line), abs(symbol.start_line - s.end_line)
+            )
+            # If they overlap or enclose, distance is 0
+            if s.start_line <= symbol.end_line and s.end_line >= symbol.start_line:
+                line_distance = 0
+
+            if line_distance <= radius * 10:  # heuristic radius multiplier for lines
+                structural.append(self._serialize_result(s, 1.0))
+
+        # 2. Semantic neighbors (vector search)
+        semantic: list[dict[str, object]] = []
+        if symbol.embedding_vector:
+            # We use unfiltered search to find conceptually related symbols across the codebase
+            vector_results = self._search_unfiltered(symbol.embedding_vector, top_k=top_k + 1)
+            for res in vector_results:
+                if res["symbol_id"] != symbol_id:
+                    semantic.append(res)
+                    if len(semantic) >= top_k:
+                        break
+
+        duration_ms = int((time.time() - start) * 1000)
+        return {
+            "symbol_id": symbol_id,
+            "structural_neighbors": structural,
+            "semantic_neighbors": semantic,
+            "metadata": {
+                "structural_count": len(structural),
+                "semantic_count": len(semantic),
+                "compute_time_ms": duration_ms,
+            },
+        }
+
     def _search_unfiltered(self, query_vector: list[float], top_k: int) -> list[dict[str, object]]:
         """Search via vector index without any filters."""
         hits = self.vector_store.search(query_vector, k=top_k * 2)

@@ -113,6 +113,13 @@ class TreeSitterParser(Parser):
             return None
         signature = self._extract_signature(node, source)
         docstring = self._extract_docstring(node, source)
+        invariants = self._extract_invariants(node, source)
+        is_serialization_boundary = self._detect_serialization(node, name, source)
+
+        implicit_contract = None
+        if kind == "function" and name.startswith("test_"):
+            implicit_contract = name[5:].replace("_", " ").strip()
+
         body = source[node.start_byte : node.end_byte]
         body_hash = hashlib.sha256(body.encode("utf8")).hexdigest()
         symbol_id = f"{path}:{node.start_point[0]}:{name}"
@@ -127,6 +134,9 @@ class TreeSitterParser(Parser):
             docstring=docstring,
             body_hash=body_hash,
             language=self.language,
+            invariants=invariants,
+            is_serialization_boundary=is_serialization_boundary,
+            implicit_contract=implicit_contract,
         )
 
     def _symbol_kind(self, node: Node, source: str) -> str | None:
@@ -205,6 +215,42 @@ class TreeSitterParser(Parser):
         yield node
         for child in node.children:
             yield from self._walk(child)
+
+    def _extract_invariants(self, node: Node, source: str) -> list[str]:
+        """Extract invariant comparisons from assert statements."""
+        invariants = []
+        for child in self._walk(node):
+            if child.type == "assert_statement":
+                text = source[child.start_byte : child.end_byte].strip()
+                if text.startswith("assert "):
+                    text = text[7:].strip()
+                invariants.append(text)
+        return invariants
+
+    def _detect_serialization(self, node: Node, name: str, source: str) -> bool:
+        """Heuristically identify if this symbol acts as a serialization boundary."""
+        name_lower = name.lower()
+        keywords = [
+            "serialize",
+            "deserialize",
+            "to_dict",
+            "from_dict",
+            "to_json",
+            "from_json",
+            "parse",
+        ]
+        if any(k in name_lower for k in keywords):
+            return True
+
+        for child in self._walk(node):
+            if child.type == "call" or child.type == "call_expression":
+                # Find the function being called, typically the first child
+                if child.named_child_count > 0:
+                    func_node = child.named_children[0]
+                    text = source[func_node.start_byte : func_node.end_byte]
+                    if "json.dump" in text or "json.load" in text:
+                        return True
+        return False
 
     @staticmethod
     def _strip_quotes(value: str) -> str:

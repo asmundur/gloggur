@@ -3765,5 +3765,46 @@ def clear_cache(config_path: str | None, as_json: bool, profile_filter: str | No
     )
 
 
+@cli.command("guidance")
+@click.argument("symbol_id", type=str)
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--embedding-provider", type=str, default=None)
+@_with_io_failure_handling
+def guidance(
+    symbol_id: str,
+    config_path: str | None,
+    as_json: bool,
+    embedding_provider: str | None,
+) -> None:
+    """Generate agent-consumable context for a given symbol."""
+    from gloggur.search.guidance import AgentGuidance
+
+    resolved_config_path = _normalize_config_path(config_path)
+    config = _load_config(resolved_config_path)
+    config, cache_manager, vector_store = _create_runtime(
+        config_path=resolved_config_path,
+        embedding_provider=embedding_provider,
+        rebuild_on_profile_change=False,
+        write_locked=False,
+    )
+    embedding = _create_embedding_provider_for_command(
+        config,
+        require_provider=True,
+    )
+    if embedding is None:
+        raise click.exceptions.Exit(1)
+    metadata_store = MetadataStore(MetadataStoreConfig(config.cache_dir))
+    searcher = HybridSearch(embedding, vector_store, metadata_store)
+    guidance_layer = AgentGuidance(searcher)
+
+    payload = guidance_layer.generate_agent_context(symbol_id)
+    if "error" in payload:
+        click.echo(payload["error"], err=True)
+        raise click.exceptions.Exit(1)
+
+    _emit(payload, as_json)
+
+
 if __name__ == "__main__":
     cli()
