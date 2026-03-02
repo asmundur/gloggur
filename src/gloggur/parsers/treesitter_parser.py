@@ -22,7 +22,7 @@ class LanguageSpec:
 
 
 _LANGUAGE_SPECS: dict[str, LanguageSpec] = {
-    "python": LanguageSpec("python", ["function_definition"], ["class_definition"], []),
+    "python": LanguageSpec("python", ["function_definition", "decorated_definition"], ["class_definition"], []),
     "javascript": LanguageSpec(
         "javascript",
         ["function_declaration", "method_definition", "generator_function_declaration"],
@@ -100,7 +100,7 @@ class TreeSitterParser(Parser):
 
     def _symbol_from_node(self, node: Node, path: str, source: str) -> Symbol | None:
         """Convert a matching AST node into a Symbol with metadata."""
-        kind = self._symbol_kind(node)
+        kind = self._symbol_kind(node, source)
         if not kind:
             return None
         name = self._extract_name(node, source)
@@ -124,9 +124,15 @@ class TreeSitterParser(Parser):
             language=self.language,
         )
 
-    def _symbol_kind(self, node: Node) -> str | None:
+    def _symbol_kind(self, node: Node, source: str) -> str | None:
         """Classify a node as function, class, or interface."""
         if node.type in self.spec.function_nodes:
+            if node.type == "decorated_definition":
+                for child in node.children:
+                    if child.type == "decorator":
+                        text = source[child.start_byte : child.end_byte]
+                        if "fixture" in text:
+                            return "fixture"
             return "function"
         if node.type in self.spec.class_nodes:
             return "class"
@@ -136,6 +142,13 @@ class TreeSitterParser(Parser):
 
     def _extract_name(self, node: Node, source: str) -> str | None:
         """Extract the symbol name from a node."""
+        if node.type == "decorated_definition":
+            for child in node.children:
+                if child.type in self.spec.function_nodes and child.type != "decorated_definition":
+                    return self._extract_name(child, source)
+                if child.type in self.spec.class_nodes:
+                    return self._extract_name(child, source)
+
         for child in node.children:
             if child.type in {"identifier", "type_identifier", "name", "property_identifier"}:
                 return source[child.start_byte : child.end_byte]
@@ -143,12 +156,26 @@ class TreeSitterParser(Parser):
 
     def _extract_signature(self, node: Node, source: str) -> str | None:
         """Extract the first-line signature for a symbol."""
+        if node.type == "decorated_definition":
+            for child in node.children:
+                if child.type in self.spec.function_nodes and child.type != "decorated_definition":
+                    return self._extract_signature(child, source)
+                if child.type in self.spec.class_nodes:
+                    return self._extract_signature(child, source)
+
         text = source[node.start_byte : node.end_byte]
         first_line = text.splitlines()[0] if text else ""
         return first_line.strip() or None
 
     def _extract_docstring(self, node: Node, source: str) -> str | None:
         """Extract a docstring or nearby comment for a symbol."""
+        if node.type == "decorated_definition":
+            for child in node.children:
+                if child.type in self.spec.function_nodes and child.type != "decorated_definition":
+                    return self._extract_docstring(child, source)
+                if child.type in self.spec.class_nodes:
+                    return self._extract_docstring(child, source)
+
         if self.language == "python":
             body = None
             for child in node.named_children:

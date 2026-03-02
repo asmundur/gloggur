@@ -46,3 +46,29 @@ def test_parse_file_returns_parsed_file() -> None:
     assert parsed.language == "python"
     assert parsed.source == source
     assert parsed.symbols
+
+def test_treesitter_parser_extracts_python_fixtures() -> None:
+    """Tree-sitter parser should extract Python fixtures."""
+    source = """
+import pytest
+
+@pytest.fixture
+def sample_fixture() -> int:
+    return 42
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    yield "session"
+"""
+    parser = TreeSitterParser("python")
+    symbols = parser.extract_symbols("sample.py", source)
+
+    names = {symbol.name for symbol in symbols}
+    assert "sample_fixture" in names
+    assert "session_fixture" in names
+
+    sample = next(symbol for symbol in symbols if symbol.name == "sample_fixture")
+    session = next(symbol for symbol in symbols if symbol.name == "session_fixture")
+
+    assert sample.kind == "fixture"
+    assert session.kind == "fixture"
