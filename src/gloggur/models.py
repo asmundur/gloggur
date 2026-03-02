@@ -25,6 +25,8 @@ class Symbol(BaseModel):
     embedding_vector: list[float] | None = None
     language: str | None = None
     invariants: list[str] = Field(default_factory=list)
+    calls: list[str] = Field(default_factory=list)
+    covered_by: list[str] = Field(default_factory=list)
     is_serialization_boundary: bool = False
     implicit_contract: str | None = None
 

@@ -17,7 +17,7 @@ INDEX_PROFILE_KEY = "index_profile"
 LAST_SUCCESS_RESUME_FINGERPRINT_KEY = "last_success_resume_fingerprint"
 LAST_SUCCESS_RESUME_AT_KEY = "last_success_resume_at"
 LAST_SUCCESS_TOOL_VERSION_KEY = "last_success_tool_version"
-CACHE_SCHEMA_VERSION = "2"
+CACHE_SCHEMA_VERSION = "3"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 SQLITE_JOURNAL_MODE = "WAL"
@@ -39,6 +39,11 @@ REQUIRED_COLUMNS = {
         "body_hash",
         "embedding_vector",
         "language",
+        "invariants",
+        "calls",
+        "covered_by",
+        "is_serialization_boundary",
+        "implicit_contract",
     },
     "metadata": {"key", "value"},
     "audits": {"symbol_id", "warnings"},
@@ -166,7 +171,12 @@ class CacheManager:
                     docstring TEXT,
                     body_hash TEXT NOT NULL,
                     embedding_vector TEXT,
-                    language TEXT
+                    language TEXT,
+                    invariants TEXT,
+                    calls TEXT,
+                    covered_by TEXT,
+                    is_serialization_boundary INTEGER NOT NULL DEFAULT 0,
+                    implicit_contract TEXT
                 );
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
@@ -545,8 +555,7 @@ class CacheManager:
                     if missing_columns:
                         return _ResetPlan(
                             reason=(
-                                f"table '{table}' missing columns "
-                                f"({', '.join(missing_columns)})"
+                                f"table '{table}' missing columns ({', '.join(missing_columns)})"
                             )
                         )
 
@@ -727,6 +736,14 @@ class CacheManager:
     def _row_to_symbol(self, row: sqlite3.Row) -> Symbol:
         """Convert a database row into a Symbol."""
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
+        invariants = json.loads(row["invariants"]) if row["invariants"] else []
+        calls = json.loads(row["calls"]) if "calls" in row.keys() and row["calls"] else []
+        covered_by = (
+            json.loads(row["covered_by"])
+            if "covered_by" in row.keys() and row["covered_by"]
+            else []
+        )
+
         return Symbol(
             id=row["id"],
             name=row["name"],
@@ -739,6 +756,11 @@ class CacheManager:
             body_hash=row["body_hash"],
             embedding_vector=vector,
             language=row["language"],
+            invariants=invariants,
+            calls=calls,
+            covered_by=covered_by,
+            is_serialization_boundary=bool(row["is_serialization_boundary"]),
+            implicit_contract=row["implicit_contract"],
         )
 
     @staticmethod
@@ -756,6 +778,11 @@ class CacheManager:
             symbol.body_hash,
             json.dumps(symbol.embedding_vector) if symbol.embedding_vector is not None else None,
             symbol.language,
+            json.dumps(symbol.invariants),
+            json.dumps(symbol.calls),
+            json.dumps(symbol.covered_by),
+            int(symbol.is_serialization_boundary),
+            symbol.implicit_contract,
         )
 
     @staticmethod
@@ -768,8 +795,9 @@ class CacheManager:
             """
             INSERT INTO symbols (
                 id, name, kind, file_path, start_line, end_line,
-                signature, docstring, body_hash, embedding_vector, language
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                signature, docstring, body_hash, embedding_vector, language,
+                invariants, calls, covered_by, is_serialization_boundary, implicit_contract
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -780,7 +808,12 @@ class CacheManager:
                 docstring = excluded.docstring,
                 body_hash = excluded.body_hash,
                 embedding_vector = excluded.embedding_vector,
-                language = excluded.language
+                language = excluded.language,
+                invariants = excluded.invariants,
+                calls = excluded.calls,
+                covered_by = excluded.covered_by,
+                is_serialization_boundary = excluded.is_serialization_boundary,
+                implicit_contract = excluded.implicit_contract
             """,
             symbol_rows,
         )

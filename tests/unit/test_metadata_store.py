@@ -22,7 +22,12 @@ def _seed_symbols(db_path: str) -> None:
             docstring TEXT,
             body_hash TEXT NOT NULL,
             embedding_vector TEXT,
-            language TEXT
+            language TEXT,
+            invariants TEXT,
+            calls TEXT,
+            covered_by TEXT,
+            is_serialization_boundary INTEGER NOT NULL DEFAULT 0,
+            implicit_contract TEXT
         );
         """
     )
@@ -30,8 +35,9 @@ def _seed_symbols(db_path: str) -> None:
         """
         INSERT INTO symbols (
             id, name, kind, file_path, start_line, end_line,
-            signature, docstring, body_hash, embedding_vector, language
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            signature, docstring, body_hash, embedding_vector, language,
+            invariants, calls, covered_by, is_serialization_boundary, implicit_contract
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sym-1",
@@ -45,14 +51,20 @@ def _seed_symbols(db_path: str) -> None:
             "hash-1",
             json.dumps([0.1, 0.2]),
             "python",
+            "[]",
+            "[]",
+            "[]",
+            0,
+            None,
         ),
     )
     conn.execute(
         """
         INSERT INTO symbols (
             id, name, kind, file_path, start_line, end_line,
-            signature, docstring, body_hash, embedding_vector, language
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            signature, docstring, body_hash, embedding_vector, language,
+            invariants, calls, covered_by, is_serialization_boundary, implicit_contract
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sym-2",
@@ -66,6 +78,11 @@ def _seed_symbols(db_path: str) -> None:
             "hash-2",
             None,
             "python",
+            "[]",
+            "[]",
+            "[]",
+            0,
+            None,
         ),
     )
     conn.commit()

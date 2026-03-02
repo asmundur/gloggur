@@ -114,6 +114,7 @@ class TreeSitterParser(Parser):
         signature = self._extract_signature(node, source)
         docstring = self._extract_docstring(node, source)
         invariants = self._extract_invariants(node, source)
+        calls = self._extract_call_graph(node, source)
         is_serialization_boundary = self._detect_serialization(node, name, source)
 
         implicit_contract = None
@@ -135,6 +136,7 @@ class TreeSitterParser(Parser):
             body_hash=body_hash,
             language=self.language,
             invariants=invariants,
+            calls=calls,
             is_serialization_boundary=is_serialization_boundary,
             implicit_contract=implicit_contract,
         )
@@ -226,6 +228,18 @@ class TreeSitterParser(Parser):
                     text = text[7:].strip()
                 invariants.append(text)
         return invariants
+
+    def _extract_call_graph(self, node: Node, source: str) -> list[str]:
+        """Extract static function calls made within this node's body."""
+        calls: list[str] = []
+        for child in self._walk(node):
+            if child.type in {"call", "call_expression"}:
+                if child.named_child_count > 0:
+                    func_node = child.named_children[0]
+                    text = source[func_node.start_byte : func_node.end_byte]
+                    calls.append(text)
+        # Preserve order but remove duplicates
+        return list(dict.fromkeys(calls))
 
     def _detect_serialization(self, node: Node, name: str, source: str) -> bool:
         """Heuristically identify if this symbol acts as a serialization boundary."""

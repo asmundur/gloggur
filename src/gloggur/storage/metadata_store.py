@@ -118,6 +118,14 @@ class MetadataStore:
         import json
 
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
+        invariants = json.loads(row["invariants"]) if row["invariants"] else []
+        calls = json.loads(row["calls"]) if "calls" in row.keys() and row["calls"] else []
+        covered_by = (
+            json.loads(row["covered_by"])
+            if "covered_by" in row.keys() and row["covered_by"]
+            else []
+        )
+
         return Symbol(
             id=row["id"],
             name=row["name"],
@@ -130,4 +138,9 @@ class MetadataStore:
             body_hash=row["body_hash"],
             embedding_vector=vector,
             language=row["language"],
+            invariants=invariants,
+            calls=calls,
+            covered_by=covered_by,
+            is_serialization_boundary=bool(row["is_serialization_boundary"]),
+            implicit_contract=row["implicit_contract"],
         )

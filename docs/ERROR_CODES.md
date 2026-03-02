@@ -116,6 +116,21 @@ Fields:
   - Meaning: destination points inside the source cache tree.
   - Retryability: retry after changing destination.
   - Operator action: publish outside the source cache directory.
+- `coverage_file_missing`
+  - Command(s): `coverage ingest`.
+  - Meaning: The coverage JSON file does not exist on disk.
+  - Retryability: retry after providing a valid path.
+  - Operator action: provide an existing `gloggur-coverage.json` file.
+- `coverage_file_invalid`
+  - Command(s): `coverage ingest`.
+  - Meaning: The provided file is not valid JSON or does not match the coverage schema.
+  - Retryability: retry after fixing the file format.
+  - Operator action: fix the file contents to match the gloggur coverage schema.
+- `coverage_sqlite_invalid`
+  - Command(s): `coverage import-python`.
+  - Meaning: The provided SQLite file is not readable or missing required tables.
+  - Retryability: retry after correcting the SQLite database or generating a new one.
+  - Operator action: make sure tests evaluate `coverage run`.
 - `artifact_uploader_command_invalid`
   - Command(s): `artifact publish`.
   - Meaning: uploader command template is malformed or uses unsupported placeholders.

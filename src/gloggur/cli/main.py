@@ -45,6 +45,7 @@ from gloggur.indexer.concurrency import cache_write_lock
 from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
 from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
 from gloggur.models import AuditFileMetadata, IndexMetadata
+from gloggur.parsers.coverage import CoverageIngester
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.evidence import (
     build_evidence_trace,
@@ -64,7 +65,12 @@ from gloggur.watch.service import (
 
 @click.group()
 def cli() -> None:
-    """Gloggur CLI for indexing, search, and docstring inspection."""
+    """Gloggur CLI for indexing, search, coverage, and docstring inspection."""
+
+
+@cli.group()
+def coverage() -> None:
+    """Manage dynamic coverage mappings (test code to production capabilities)."""
 
 
 INSPECT_PAYLOAD_SCHEMA_VERSION = "1"
@@ -124,6 +130,15 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     ],
     "artifact_source_uninitialized": [
         "Run `gloggur index . --json` before publishing so metadata and vectors are present.",
+    ],
+    "coverage_file_missing": [
+        "Set path to a valid coverage file that exists on disk.",
+    ],
+    "coverage_file_invalid": [
+        "Coverage JSON schema is malformed or invalid.",
+    ],
+    "coverage_sqlite_invalid": [
+        "Coverage SQLite schema is missing or unreadable.",
     ],
     "artifact_destination_unsupported": [
         "Use a local path or file:// URI for destination in this command variant.",
@@ -439,8 +454,7 @@ def _load_config(config_path: str | None) -> GloggurConfig:
             operation="read gloggur config",
             path=error_path,
             probable_cause=(
-                "The gloggur config file is malformed or uses an unsupported "
-                "top-level structure."
+                "The gloggur config file is malformed or uses an unsupported top-level structure."
             ),
             remediation=[
                 f"Fix config syntax and top-level mapping structure in {error_path}.",
@@ -493,7 +507,7 @@ def _profile_reindex_reason(
             return "cached embedding profile is unknown"
         return None
     if cached_profile != expected_profile:
-        return "embedding profile changed " f"(cached={cached_profile}, current={expected_profile})"
+        return f"embedding profile changed (cached={cached_profile}, current={expected_profile})"
     return None
 
 
@@ -534,8 +548,7 @@ def _tool_version_reindex_reason(
     if last_success_tool_version == current_tool_version:
         return None
     return (
-        "tool version changed "
-        f"(cached={last_success_tool_version}, current={current_tool_version})"
+        f"tool version changed (cached={last_success_tool_version}, current={current_tool_version})"
     )
 
 
@@ -1132,7 +1145,7 @@ def _build_status_payload(
         reset_label = "cache schema rebuilt"
         if "cache corruption detected" in cache.last_reset_reason:
             reset_label = "cache corruption recovered"
-        reindex_reason = f"{reset_label} " f"({cache.last_reset_reason})"
+        reindex_reason = f"{reset_label} ({cache.last_reset_reason})"
     needs_reindex = metadata is None or reindex_reason is not None
     resume_contract = _build_resume_contract(
         metadata=metadata,
@@ -2281,8 +2294,7 @@ def _resolve_allow_tool_version_drift(
         env_enabled = False
     else:
         raise CLIContractError(
-            "GLOGGUR_ALLOW_TOOL_VERSION_DRIFT must be one of: "
-            "1, true, yes, on, 0, false, no, off.",
+            "GLOGGUR_ALLOW_TOOL_VERSION_DRIFT must be one of: 1, true, yes, on, 0, false, no, off.",
             error_code="allow_tool_version_drift_env_invalid",
         )
     return cli_flag_enabled or env_enabled
@@ -3804,6 +3816,160 @@ def guidance(
         raise click.exceptions.Exit(1)
 
     _emit(payload, as_json)
+
+
+@coverage.command("ingest")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to gloggur configuration file.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output results in JSON format.")
+@_with_io_failure_handling
+def coverage_ingest(file: str, config_path: str | None, as_json: bool) -> None:
+    """Ingest a generic gloggur-coverage.json mapping and apply to index."""
+    start_time = time.time()
+    config = _load_config(config_path)
+
+    metadata = MetadataStore(MetadataStoreConfig(cache_dir=config.cache_dir))
+    ingester = CoverageIngester(metadata)
+
+    try:
+        report = ingester.ingest_json(file)
+    except ValueError as exc:
+        raise CLIContractError(
+            f"Coverage schema error: {exc}",
+            error_code="coverage_file_invalid",
+        ) from exc
+
+    # Apply to cache
+    symbols_to_update = report.get("symbols_to_update", [])
+    if symbols_to_update:
+        cache = CacheManager(CacheConfig(cache_dir=config.cache_dir))
+        with cache_write_lock(config.cache_dir):
+            cache.upsert_symbols(symbols_to_update)
+
+    duration_ms = int((time.time() - start_time) * 1000)
+    payload = {
+        "tests_processed": report.get("tests_processed", 0),
+        "files_affected": report.get("files_affected", 0),
+        "symbols_updated": len(symbols_to_update),
+        "duration_ms": duration_ms,
+    }
+
+    if as_json:
+        _emit(payload, as_json=True)
+    else:
+        click.echo("Coverage ingestion complete:")
+        click.echo(f"  Tests mapped:    {payload['tests_processed']}")
+        click.echo(f"  Files affected:  {payload['files_affected']}")
+        click.echo(f"  Symbols updated: {payload['symbols_updated']}")
+        click.echo(f"  Duration:        {duration_ms}ms")
+
+
+@coverage.command("import-python")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Path to save the resulting gloggur-coverage.json file.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output results in JSON format.")
+@_with_io_failure_handling
+def coverage_import_python(file: str, output: str, as_json: bool) -> None:
+    """Convert a Python coverage.py SQLite database into gloggur-coverage.json."""
+    import sqlite3
+
+    start_time = time.time()
+
+    contexts: dict[str, dict[str, list[int]]] = {}
+    try:
+        with sqlite3.connect(f"file:{file}?mode=ro", uri=True) as conn:
+            # Query test contexts mappings
+            # Coverage.py schema usually stores contexts in the context table
+            # and line executions in line_map or lines.
+
+            # Note: coverage.py schema can be complex. We'll extract a simplified
+            # mapping assuming specific context formats.
+
+            context_map = {}
+            for row in conn.execute("SELECT id, context FROM context"):
+                if row[1]:  # Ensure not empty string context (which is global)
+                    context_map[row[0]] = row[1]
+
+            if not context_map:
+                click.echo("Warning: No dynamic contexts found in coverage database.", err=True)
+                click.echo(
+                    "Make sure tests were run with `coverage run --contexts=test`.", err=True
+                )
+
+            # Map file paths
+            file_map = {}
+            for row in conn.execute("SELECT id, path FROM file"):
+                file_map[row[0]] = row[1]
+
+            # Get line executions per context
+            # .coverage schema (version 7+): line_data table (file_id, context_id, line)
+            try:
+                for row in conn.execute("SELECT file_id, context_id, line FROM line_data"):
+                    file_id, context_id, line = row
+
+                    ctx_name = context_map.get(context_id)
+                    if not ctx_name:
+                        continue
+
+                    # Clean pytest context names (e.g. 'test_module.py::test_func' -> 'test_func')
+                    ctx_parts = ctx_name.split("::")
+                    test_symbol_name = ctx_parts[-1] if len(ctx_parts) > 1 else ctx_name
+
+                    file_path = file_map.get(file_id)
+                    if not file_path:
+                        continue
+
+                    if test_symbol_name not in contexts:
+                        contexts[test_symbol_name] = {}
+
+                    if file_path not in contexts[test_symbol_name]:
+                        contexts[test_symbol_name][file_path] = []
+
+                    contexts[test_symbol_name][file_path].append(line)
+            except sqlite3.OperationalError as exc:
+                raise CLIContractError(
+                    "Missing 'line_data' table. Coverage file might not be "
+                    "from coverage.py version 7+.",
+                    error_code="coverage_sqlite_invalid",
+                ) from exc
+
+    except sqlite3.Error as exc:
+        raise CLIContractError(
+            f"SQLite error reading coverage db: {exc}", error_code="coverage_sqlite_invalid"
+        ) from exc
+
+    try:
+        with open(output, "w", encoding="utf-8") as f:
+            json.dump(contexts, f, indent=2)
+    except OSError as exc:
+        raise wrap_io_error(exc, operation="write JSON coverage file", path=output) from exc
+
+    duration_ms = int((time.time() - start_time) * 1000)
+    payload = {
+        "tests_extracted": len(contexts),
+        "output_file": output,
+        "duration_ms": duration_ms,
+    }
+
+    if as_json:
+        _emit(payload, as_json=True)
+    else:
+        click.echo("Python coverage import complete:")
+        click.echo(f"  Tests extracted: {len(contexts)}")
+        click.echo(f"  Written to:      {output}")
+        click.echo(f"  Duration:        {duration_ms}ms")
 
 
 if __name__ == "__main__":
