@@ -26,6 +26,40 @@ def _wait_for_path(path: Path, *, timeout: float) -> None:
     raise AssertionError(f"Timed out waiting for {path}")
 
 
+def _tail_text(value: str, *, lines: int = 20) -> str:
+    chunks = value.splitlines()
+    if not chunks:
+        return "<empty>"
+    return "\n".join(chunks[-lines:])
+
+
+def _wait_for_path_or_process_exit(
+    path: Path,
+    proc: subprocess.Popen[str],
+    *,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        return_code = proc.poll()
+        if return_code is not None:
+            stdout, stderr = proc.communicate(timeout=5)
+            raise AssertionError(
+                "Process exited before readiness sentinel was created "
+                f"(path={path}, timeout={timeout:.1f}s, returncode={return_code}). "
+                f"stdout_tail:\n{_tail_text(stdout)}\n"
+                f"stderr_tail:\n{_tail_text(stderr)}"
+            )
+        time.sleep(0.01)
+
+    raise AssertionError(
+        "Timed out waiting for readiness sentinel "
+        f"(path={path}, timeout={timeout:.1f}s, process_still_running={proc.poll() is None})"
+    )
+
+
 def _parse_json_payload(output: str) -> dict[str, object]:
     start = output.find("{")
     if start == -1:
@@ -259,7 +293,7 @@ def test_clear_cache_during_index_run_fails_fast_and_index_completes_cleanly() -
             env=index_env,
         )
         try:
-            _wait_for_path(ready_path, timeout=2.0)
+            _wait_for_path_or_process_exit(ready_path, index_proc, timeout=8.0)
             blocked_env = {
                 **os.environ,
                 "GLOGGUR_CACHE_DIR": cache_dir,
