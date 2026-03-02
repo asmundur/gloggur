@@ -22,7 +22,12 @@ class LanguageSpec:
 
 
 _LANGUAGE_SPECS: dict[str, LanguageSpec] = {
-    "python": LanguageSpec("python", ["function_definition", "decorated_definition"], ["class_definition"], []),
+    "python": LanguageSpec(
+        "python",
+        ["function_definition", "decorated_definition"],
+        ["class_definition"],
+        [],
+    ),
     "javascript": LanguageSpec(
         "javascript",
         ["function_declaration", "method_definition", "generator_function_declaration"],
