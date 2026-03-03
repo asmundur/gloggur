@@ -144,6 +144,8 @@ class PreparedFileIndex:
     source: str
     symbols: list[Symbol]
     previous_symbol_ids: list[str]
+    previous_metadata: FileMetadata | None
+    previous_symbols: list[Symbol]
     symbols_added: int
     symbols_updated: int
     symbols_removed: int
@@ -395,10 +397,12 @@ class Indexer:
 
         content_hash = self._hash_content(source)
         existing = self.cache.get_file_metadata(path)
+        previous_symbols: list[Symbol] = []
         existing_symbols_by_id: dict[str, Symbol] = {}
         if existing:
+            previous_symbols = self.cache.list_symbols_for_file(path)
             existing_symbols_by_id = {
-                symbol.id: symbol for symbol in self.cache.list_symbols_for_file(path)
+                symbol.id: symbol for symbol in previous_symbols
             }
         if existing and existing.content_hash == content_hash:
             return None, FileIndexOutcome(status="unchanged")
@@ -442,6 +446,8 @@ class Indexer:
             source=source,
             symbols=symbols,
             previous_symbol_ids=previous_symbol_ids,
+            previous_metadata=existing.model_copy(deep=True) if existing else None,
+            previous_symbols=[symbol.model_copy(deep=True) for symbol in previous_symbols],
             symbols_added=symbols_added,
             symbols_updated=symbols_updated,
             symbols_removed=symbols_removed,
@@ -450,20 +456,59 @@ class Indexer:
 
     def _persist_prepared_file(self, prepared: PreparedFileIndex) -> None:
         """Persist one prepared file into cache and vector store."""
-        if self.vector_store and prepared.previous_symbol_ids:
-            self.vector_store.remove_ids(prepared.previous_symbol_ids)
-        self.cache.replace_file_index(
-            prepared.path,
-            FileMetadata(
-                path=prepared.path,
-                language=prepared.language,
-                content_hash=prepared.content_hash,
-                symbols=[symbol.id for symbol in prepared.symbols],
-            ),
-            prepared.symbols,
+        next_symbol_ids = [symbol.id for symbol in prepared.symbols]
+        try:
+            if self.vector_store and prepared.previous_symbol_ids:
+                self.vector_store.remove_ids(prepared.previous_symbol_ids)
+            self.cache.replace_file_index(
+                prepared.path,
+                FileMetadata(
+                    path=prepared.path,
+                    language=prepared.language,
+                    content_hash=prepared.content_hash,
+                    symbols=next_symbol_ids,
+                ),
+                prepared.symbols,
+            )
+            if self.vector_store and prepared.symbols:
+                self.vector_store.upsert_vectors(prepared.symbols)
+        except Exception as persist_exc:
+            try:
+                self._rollback_persisted_file(prepared, next_symbol_ids)
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    "file persist failed and rollback did not complete "
+                    f"(persist={type(persist_exc).__name__}: {persist_exc}; "
+                    f"rollback={type(rollback_exc).__name__}: {rollback_exc})"
+                ) from persist_exc
+            raise
+
+    def _rollback_persisted_file(
+        self,
+        prepared: PreparedFileIndex,
+        next_symbol_ids: list[str],
+    ) -> None:
+        """Best-effort restore of file-local cache/vector state after persist failure."""
+        if prepared.previous_metadata is None:
+            self.cache.delete_symbols_for_file(prepared.path)
+            self.cache.delete_file_metadata(prepared.path)
+        else:
+            self.cache.replace_file_index(
+                prepared.path,
+                prepared.previous_metadata,
+                prepared.previous_symbols,
+            )
+
+        if not self.vector_store:
+            return
+        rollback_symbol_ids = {symbol_id for symbol_id in next_symbol_ids if symbol_id}
+        rollback_symbol_ids.update(
+            symbol.id for symbol in prepared.previous_symbols if symbol.id
         )
-        if self.vector_store and prepared.symbols:
-            self.vector_store.upsert_vectors(prepared.symbols)
+        if rollback_symbol_ids:
+            self.vector_store.remove_ids(sorted(rollback_symbol_ids))
+        if prepared.previous_symbols:
+            self.vector_store.upsert_vectors(prepared.previous_symbols)
 
     def index_file(self, path: str) -> int | None:
         """Index a file and return symbol count when indexed, else None."""

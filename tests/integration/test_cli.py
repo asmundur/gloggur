@@ -625,6 +625,56 @@ def test_cli_index_reports_vector_metadata_mismatch_on_tampered_vector_map() -> 
         assert "Indexing completed with file-level failures." in str(error["detail"])
 
 
+def test_cli_index_transient_vector_upsert_failure_is_not_sticky(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient vector upsert failures should not leave sticky mismatch state across reruns."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        monkeypatch.setattr(cli_main.VectorStore, "_check_faiss", staticmethod(lambda: False))
+        original_upsert = cli_main.VectorStore.upsert_vectors
+        fail_state = {"triggered": False}
+
+        def _fail_once(self: object, symbols: list[object]) -> None:
+            if not fail_state["triggered"]:
+                fail_state["triggered"] = True
+                raise RuntimeError("simulated transient vector upsert failure")
+            original_upsert(self, symbols)
+
+        monkeypatch.setattr(cli_main.VectorStore, "upsert_vectors", _fail_once)
+
+        first_index = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert first_index.exit_code == 1, first_index.output
+        first_payload = _parse_json_output(first_index.output)
+        assert int(first_payload["indexed_symbols"]) == 0
+        reasons = first_payload["failed_reasons"]
+        assert isinstance(reasons, dict)
+        assert reasons == {"storage_error": 1}
+        assert "vector_metadata_mismatch" not in reasons
+
+        cache = CacheManager(CacheConfig(cache_dir))
+        sample_path = str(repo / "sample.py")
+        assert cache.get_file_metadata(sample_path) is None
+        assert cache.list_symbols_for_file(sample_path) == []
+
+        second_index = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert second_index.exit_code == 0, second_index.output
+        second_payload = _parse_json_output(second_index.output)
+        assert int(second_payload["failed"]) == 0
+        assert int(second_payload["indexed_symbols"]) > 0
+
+        status_result = runner.invoke(cli, ["status", "--json"], env=env)
+        assert status_result.exit_code == 0, status_result.output
+        status_payload = _parse_json_output(status_result.output)
+        assert status_payload["resume_decision"] == "resume_ok"
+
+
 def test_cli_single_file_index_fails_closed_on_tampered_vector_map() -> None:
     """Single-file index should not report success when vectors.json drifts from cache symbols."""
     runner = CliRunner()

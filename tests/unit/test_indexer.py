@@ -192,6 +192,84 @@ def test_indexer_surfaces_stale_cleanup_failures_with_deterministic_reason_code(
         assert guidance["stale_cleanup_error"]
 
 
+def test_indexer_rolls_back_file_state_after_transient_vector_upsert_failure() -> None:
+    """Transient vector persistence failures should not leave sticky cache/vector divergence."""
+
+    class FakeEmbeddingProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            size = float(len(text))
+            return [size, size + 1.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_text(text) for text in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    class FlakyVectorStore:
+        def __init__(self) -> None:
+            self._ids: set[str] = set()
+            self._fail_once = True
+
+        def remove_ids(self, symbol_ids: list[str]) -> None:
+            for symbol_id in symbol_ids:
+                self._ids.discard(symbol_id)
+
+        def upsert_vectors(self, symbols: list[object]) -> None:
+            if self._fail_once:
+                self._fail_once = False
+                raise RuntimeError("simulated transient vector upsert failure")
+            for symbol in symbols:
+                symbol_id = getattr(symbol, "id", None)
+                if isinstance(symbol_id, str):
+                    self._ids.add(symbol_id)
+
+        def list_symbol_ids(self) -> list[str]:
+            return sorted(self._ids)
+
+        def save(self) -> None:
+            return
+
+    source = (
+        "def alpha(value: int) -> int:\n"
+        "    return value + 1\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        vector_store = FlakyVectorStore()
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=FakeEmbeddingProvider(),
+            vector_store=vector_store,
+        )
+
+        first = indexer.index_repository(str(repo))
+
+        assert first.failed == 1
+        assert first.failed_reasons == {"storage_error": 1}
+        assert first.indexed_symbols == 0
+        sample_path = str(repo / "sample.py")
+        assert cache.get_file_metadata(sample_path) is None
+        assert cache.list_symbols_for_file(sample_path) == []
+        assert cache.count_symbols() == 0
+        assert vector_store.list_symbol_ids() == []
+
+        second = indexer.index_repository(str(repo))
+
+        assert second.failed == 0
+        assert second.indexed_files == 1
+        assert second.indexed_symbols == 1
+        metadata = cache.get_file_metadata(sample_path)
+        assert metadata is not None
+        assert cache.count_symbols() == 1
+        assert vector_store.list_symbol_ids() == metadata.symbols
+
+
 def test_indexer_detects_vector_metadata_mismatch_under_symbol_removal() -> None:
     """Vector/cache divergence should fail closed with a stable mismatch reason code."""
 
