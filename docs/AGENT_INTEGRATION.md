@@ -132,6 +132,10 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```
    Inspection skips unchanged files by default; add `--force` to reinspect everything.
 
+Subject repo coverage note:
+- For subject repo analysis, test/coverage collection should run in the subject repo's own environment/toolchain (its own venv/runner), not in this Gloggur repo environment.
+- After coverage is produced there, run `gloggur coverage import ...` from the subject repo cwd (or pass explicit coverage artifact paths).
+
 Pytest defaults for this repo:
 
 - tests run in parallel (`-n auto --dist=loadscope`)

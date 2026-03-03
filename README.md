@@ -127,6 +127,10 @@ See `docs/ADAPTERS.md` for adapter config and entry-point groups.
 
 Generic coverage import (adapter-driven, compat with existing `import-python`):
 
+For subject repo analysis, test/coverage collection should run in the subject
+repo's own environment/toolchain (its own venv/runner), not in this Gloggur
+repo environment.
+
 ```bash
 gloggur coverage import .coverage --importer python --output gloggur-coverage.json --json
 gloggur coverage import gloggur-coverage.json --importer json --output gloggur-coverage.json --json
