@@ -67,11 +67,32 @@ def test_wrapper_returns_deterministic_json_for_missing_package() -> None:
 
     assert completed.returncode == 4, completed.stderr
     payload = _parse_json_stdout(completed.stdout)
-    assert payload["operation"] == "preflight"
+    assert payload["ok"] is False
+    assert payload["stage"] == "bootstrap"
     assert payload["error_code"] == "missing_package"
-    assert isinstance(payload["message"], str)
-    assert isinstance(payload["remediation"], list)
-    assert isinstance(payload["detected_environment"], dict)
+    compatibility = payload.get("compatibility")
+    assert isinstance(compatibility, dict)
+    assert isinstance(compatibility.get("message"), str)
+    assert isinstance(compatibility.get("remediation"), list)
+    assert isinstance(compatibility.get("detected_environment"), dict)
+
+
+def test_wrapper_unknown_command_returns_dispatch_json_envelope() -> None:
+    env = os.environ.copy()
+    env.pop("GLOGGUR_PREFLIGHT_DRY_RUN", None)
+    env["GLOGGUR_PREFLIGHT_VENV_PYTHON"] = str(_repo_root() / ".missing-venv" / "bin" / "python")
+    env["GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS"] = sys.executable
+    env["GLOGGUR_PREFLIGHT_PROBE_MODULE"] = "gloggur.bootstrap_launcher"
+    env.pop("GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS", None)
+
+    completed = _run_wrapper(["definitely-unknown-command", "--json"], env=env)
+    payload = _parse_json_stdout(completed.stdout)
+
+    assert completed.returncode != 0
+    assert payload["ok"] is False
+    assert payload["stage"] == "dispatch"
+    assert payload["error_code"] == "cli_usage_error"
+    assert "\n" not in completed.stdout.strip()
 
 
 def test_wrapper_returns_human_readable_stderr_without_json() -> None:
@@ -104,7 +125,8 @@ def test_wrapper_exit_code_mapping_for_missing_venv_is_stable() -> None:
 
     assert completed.returncode == 2, completed.stderr
     payload = _parse_json_stdout(completed.stdout)
-    assert payload["operation"] == "preflight"
+    assert payload["ok"] is False
+    assert payload["stage"] == "bootstrap"
     assert payload["error_code"] == "missing_venv"
 
 
@@ -123,8 +145,30 @@ def test_wrapper_exit_code_mapping_for_broken_environment_is_stable() -> None:
 
     assert completed.returncode == 5, completed.stderr
     payload = _parse_json_stdout(completed.stdout)
-    assert payload["operation"] == "preflight"
+    assert payload["ok"] is False
+    assert payload["stage"] == "bootstrap"
     assert payload["error_code"] == "broken_environment"
+
+
+def test_wrapper_strict_bootstrap_mode_fails_when_optional_bootstrap_capabilities_are_degraded() -> (
+    None
+):
+    env = os.environ.copy()
+    env["GLOGGUR_PREFLIGHT_DRY_RUN"] = "1"
+    env["GLOGGUR_PREFLIGHT_VENV_PYTHON"] = sys.executable
+    env["GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS"] = sys.executable
+    env["GLOGGUR_PREFLIGHT_PROBE_MODULE"] = "gloggur.bootstrap_launcher"
+    env["GLOGGUR_BOOTSTRAP_STRICT"] = "1"
+    env.pop("BOOTSTRAP_GLOGGUR_LOG_FILE", None)
+    env.pop("BOOTSTRAP_GLOGGUR_STATE_FILE", None)
+
+    completed = _run_wrapper(["status", "--json"], env=env)
+    payload = _parse_json_stdout(completed.stdout)
+
+    assert completed.returncode == 1
+    assert payload["ok"] is False
+    assert payload["stage"] == "bootstrap"
+    assert payload["error_code"] == "bootstrap_capability_degraded"
 
 
 def test_wrapper_returns_missing_python_when_no_interpreter_available(tmp_path: Path) -> None:
@@ -157,7 +201,8 @@ def test_wrapper_returns_missing_python_when_no_interpreter_available(tmp_path: 
 
     assert completed.returncode == 3
     payload = _parse_json_stdout(completed.stdout)
-    assert payload["operation"] == "preflight"
+    assert payload["ok"] is False
+    assert payload["stage"] == "bootstrap"
     assert payload["error_code"] == "missing_python"
 
 
@@ -193,7 +238,9 @@ def test_wrapper_preserves_caller_cwd_when_requested(tmp_path: Path) -> None:
 
     assert completed.returncode == 0, completed.stderr
     payload = _parse_json_stdout(completed.stdout)
-    expected_workspace_hash = hashlib.sha256(os.path.abspath(str(workspace)).encode("utf8")).hexdigest()
+    expected_workspace_hash = hashlib.sha256(
+        os.path.abspath(str(workspace)).encode("utf8")
+    ).hexdigest()
     assert payload.get("workspace_path_hash") == expected_workspace_hash
 
 

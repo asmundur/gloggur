@@ -267,24 +267,12 @@ done
 emit_launch_target_missing() {
   local install_root="$1"
   local launcher_path="$2"
+  local error_code="$3"
+  local message="$4"
   if [[ $is_json -eq 1 ]]; then
-    printf '{\n'
-    printf '  "operation": "wrapper",\n'
-    printf '  "error": true,\n'
-    printf '  "error_code": "wrapper_launch_target_missing",\n'
-    printf '  "message": "Unable to locate executable scripts/gloggur launcher from install root.",\n'
-    printf '  "remediation": [\n'
-    printf '    "Set GLOGGUR_INSTALL_ROOT to a gloggur checkout with scripts/gloggur.",\n'
-    printf '    "Run scripts/bootstrap_gloggur_env.sh in that checkout to repair local tooling."\n'
-    printf '  ],\n'
-    printf '  "detected_environment": {\n'
-    printf '    "cwd": "%s",\n' "$(pwd -P)"
-    printf '    "install_root": "%s",\n' "$install_root"
-    printf '    "launcher_path": "%s"\n' "$launcher_path"
-    printf '  }\n'
-    printf '}\n'
+    printf '{"ok":false,"error_code":"%s","error":"%s","stage":"dispatch","compatibility":{"operation":"wrapper","error":true,"error_code":"%s","message":"%s","remediation":["Set GLOGGUR_INSTALL_ROOT to a gloggur checkout with scripts/gloggur.","Run scripts/bootstrap_gloggur_env.sh in that checkout to repair local tooling."],"detected_environment":{"cwd":"%s","install_root":"%s","launcher_path":"%s"}}}\n' "$error_code" "$message" "$error_code" "$message" "$(pwd -P)" "$install_root" "$launcher_path"
   else
-    echo "gloggur wrapper failed (wrapper_launch_target_missing): launcher not found at ${launcher_path}" >&2
+    echo "gloggur wrapper failed (${error_code}): ${message}" >&2
     echo "Set GLOGGUR_INSTALL_ROOT to a gloggur checkout and rerun scripts/bootstrap_gloggur_env.sh." >&2
   fi
 }
@@ -293,7 +281,20 @@ DEFAULT_INSTALL_ROOT="__GLOGGUR_INSTALL_ROOT__"
 INSTALL_ROOT="${GLOGGUR_INSTALL_ROOT:-$DEFAULT_INSTALL_ROOT}"
 LAUNCHER="${INSTALL_ROOT}/scripts/gloggur"
 if [[ ! -x "$LAUNCHER" ]]; then
-  emit_launch_target_missing "$INSTALL_ROOT" "$LAUNCHER"
+  emit_launch_target_missing \
+    "$INSTALL_ROOT" \
+    "$LAUNCHER" \
+    "wrapper_launch_target_missing" \
+    "Unable to locate executable scripts/gloggur launcher from install root."
+  exit 1
+fi
+
+if [[ ! -f "${INSTALL_ROOT}/pyproject.toml" || ! -f "${INSTALL_ROOT}/src/gloggur/cli/main.py" ]]; then
+  emit_launch_target_missing \
+    "$INSTALL_ROOT" \
+    "$LAUNCHER" \
+    "wrapper_install_root_invalid" \
+    "Install root does not appear to be a valid gloggur checkout."
   exit 1
 fi
 

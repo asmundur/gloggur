@@ -24,30 +24,15 @@ emit_missing_python() {
   local python3_path="${1:-}"
   local python_path="${2:-}"
   if [[ $is_json -eq 1 ]]; then
-    printf '{\n'
-    printf '  "operation": "preflight",\n'
-    printf '  "error_code": "missing_python",\n'
-    printf '  "message": "No usable Python interpreter was found for gloggur preflight.",\n'
-    printf '  "remediation": [\n'
-    printf '    "Install Python 3.10+ and ensure python3 is available on PATH.",\n'
-    printf '    "Run %s/scripts/bootstrap_gloggur_env.sh to create/repair .venv and install dependencies.",\n' "$REPO_ROOT"
-    printf '    "After bootstrap succeeds, run python scripts/check_startup_readiness.py --format json."\n'
-    printf '  ],\n'
-    printf '  "detected_environment": {\n'
-    printf '    "repo_root": "%s",\n' "$REPO_ROOT"
-    printf '    "venv_python": "%s",\n' "$VENV_PYTHON"
+    local python3_json="null"
+    local python_json="null"
     if [[ -n "$python3_path" ]]; then
-      printf '    "python3": "%s",\n' "$python3_path"
-    else
-      printf '    "python3": null,\n'
+      python3_json="\"${python3_path}\""
     fi
     if [[ -n "$python_path" ]]; then
-      printf '    "python": "%s"\n' "$python_path"
-    else
-      printf '    "python": null\n'
+      python_json="\"${python_path}\""
     fi
-    printf '  }\n'
-    printf '}\n'
+    printf '{"ok":false,"error_code":"missing_python","error":"No usable Python interpreter was found for gloggur preflight.","stage":"bootstrap","compatibility":{"operation":"preflight","error_code":"missing_python","message":"No usable Python interpreter was found for gloggur preflight.","remediation":["Install Python 3.10+ and ensure python3 is available on PATH.","Run %s/scripts/bootstrap_gloggur_env.sh to create/repair .venv and install dependencies.","After bootstrap succeeds, run python scripts/check_startup_readiness.py --format json."],"detected_environment":{"repo_root":"%s","venv_python":"%s","python3":%s,"python":%s}}}\n' "$REPO_ROOT" "$REPO_ROOT" "$VENV_PYTHON" "$python3_json" "$python_json"
   else
     >&2 echo "gloggur preflight failed (missing_python): No usable Python interpreter was found."
     >&2 echo "Install Python 3.10+ and run ${REPO_ROOT}/scripts/bootstrap_gloggur_env.sh."

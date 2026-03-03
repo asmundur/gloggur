@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+
+import pytest
 
 from gloggur import bootstrap_launcher
 
@@ -305,9 +309,76 @@ def test_failure_payload_contains_stable_fields(
     )
     payload = bootstrap_launcher.build_failure_payload(plan, preflight_ms=12)
 
-    assert payload["operation"] == "preflight"
+    assert payload["ok"] is False
+    assert payload["stage"] == "bootstrap"
     assert payload["error_code"] == "missing_package"
-    assert isinstance(payload["message"], str)
-    assert isinstance(payload["remediation"], list)
-    assert payload["preflight_ms"] == 12
-    assert "detected_environment" in payload
+    compatibility = payload.get("compatibility")
+    assert isinstance(compatibility, dict)
+    assert isinstance(compatibility.get("message"), str)
+    assert isinstance(compatibility.get("remediation"), list)
+    assert compatibility.get("preflight_ms") == 12
+    assert "detected_environment" in compatibility
+
+
+def test_resolve_bootstrap_status_defaults_to_degraded_optional_capabilities() -> None:
+    status = bootstrap_launcher.resolve_bootstrap_status({})
+    assert status.log_enabled is False
+    assert status.state_enabled is False
+    assert status.strict_mode is False
+    assert any("BOOTSTRAP_GLOGGUR_LOG_FILE is unset" in reason for reason in status.degraded_reason)
+    assert any(
+        "BOOTSTRAP_GLOGGUR_STATE_FILE is unset" in reason for reason in status.degraded_reason
+    )
+
+
+def test_resolve_bootstrap_status_marks_capabilities_enabled_when_paths_are_writable(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "bootstrap.log"
+    state_path = tmp_path / "bootstrap.state"
+    status = bootstrap_launcher.resolve_bootstrap_status(
+        {
+            "BOOTSTRAP_GLOGGUR_LOG_FILE": str(log_path),
+            "BOOTSTRAP_GLOGGUR_STATE_FILE": str(state_path),
+        }
+    )
+    assert status.log_enabled is True
+    assert status.state_enabled is True
+    assert status.degraded_reason == []
+
+
+def test_resolve_bootstrap_status_degrades_when_paths_are_unwritable(
+    tmp_path: Path,
+) -> None:
+    readonly = tmp_path / "readonly"
+    readonly.mkdir(parents=True, exist_ok=True)
+    readonly.chmod(0o555)
+    if os.access(readonly, os.W_OK):
+        pytest.skip("Environment does not enforce read-only permissions for this test.")
+
+    status = bootstrap_launcher.resolve_bootstrap_status(
+        {
+            "BOOTSTRAP_GLOGGUR_LOG_FILE": str(readonly / "bootstrap.log"),
+            "BOOTSTRAP_GLOGGUR_STATE_FILE": str(readonly / "bootstrap.state"),
+        }
+    )
+    assert status.log_enabled is False
+    assert status.state_enabled is False
+    assert len(status.degraded_reason) == 2
+
+
+def test_main_strict_mode_fails_on_degraded_optional_bootstrap_status(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("GLOGGUR_BOOTSTRAP_STRICT", "1")
+    monkeypatch.delenv("BOOTSTRAP_GLOGGUR_LOG_FILE", raising=False)
+    monkeypatch.delenv("BOOTSTRAP_GLOGGUR_STATE_FILE", raising=False)
+
+    exit_code = bootstrap_launcher.main(["status", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert payload["stage"] == "bootstrap"
+    assert payload["error_code"] == "bootstrap_capability_degraded"

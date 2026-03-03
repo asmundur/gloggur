@@ -884,9 +884,9 @@ def test_persist_last_success_resume_state_no_change_reindex_is_idempotent() -> 
 
     # Second call: identical state (no content change).  Nothing must be rewritten.
     _persist_last_success_resume_state(config, cache)
-    assert writes == [], (
-        f"Unchanged re-index must not rewrite any stored state, got writes: {writes}"
-    )
+    assert (
+        writes == []
+    ), f"Unchanged re-index must not rewrite any stored state, got writes: {writes}"
     assert cache._fingerprint == first_fp, "expected_resume_fingerprint must be stable"
     assert cache._at == first_at, "last_success_resume_at must not advance on unchanged re-index"
 
@@ -1128,8 +1128,7 @@ def test_core_commands_surface_cache_recovery_failure_non_zero(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
 
@@ -1350,7 +1349,50 @@ def _parse_json_output(output: str) -> dict[str, object]:
         raise ValueError(f"No JSON payload found in output: {output!r}")
     decoder = json.JSONDecoder()
     payload, _ = decoder.raw_decode(output[start:])
+    if (
+        isinstance(payload, dict)
+        and payload.get("ok") is False
+        and isinstance(payload.get("compatibility"), dict)
+    ):
+        compatibility = dict(payload["compatibility"])
+        compatibility["_envelope"] = payload
+        return compatibility
     return payload
+
+
+def test_cli_main_unknown_command_json_emits_dispatch_envelope(capsys) -> None:
+    exit_code = cli_main.main(["definitely-unknown-command", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.strip())
+    assert exit_code != 0
+    assert payload["ok"] is False
+    assert payload["error_code"] == "cli_usage_error"
+    assert payload["stage"] == "dispatch"
+    assert captured.err == ""
+
+
+def test_status_json_error_uses_single_envelope_object(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+
+    def _raise_connect(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise PermissionError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(cache_module.sqlite3, "connect", _raise_connect)
+    result = runner.invoke(
+        cli_main.cli,
+        ["status", "--json"],
+        env={"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")},
+    )
+    assert result.exit_code == 1
+    raw = result.output.strip()
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["stage"] == "dispatch"
+    assert "compatibility" in payload
+    assert raw.count("\n") == 0
 
 
 @pytest.mark.parametrize(
@@ -1447,8 +1489,7 @@ def test_index_json_reports_vector_store_write_failure(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a, b):\n"
-        "    return a + b\n",
+        "def add(a, b):\n" "    return a + b\n",
         encoding="utf8",
     )
 
@@ -1485,8 +1526,7 @@ def test_index_plain_progress_reports_done_over_total_for_all_embedding_provider
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
     seen_providers: list[str] = []
@@ -1687,13 +1727,11 @@ def test_index_json_reports_missing_embedding_provider_configuration(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
     config_path.write_text(
-        'embedding_provider: ""\n'
-        f"cache_dir: {cache_dir}\n",
+        'embedding_provider: ""\n' f"cache_dir: {cache_dir}\n",
         encoding="utf8",
     )
 
@@ -1727,8 +1765,7 @@ def test_search_json_reports_missing_embedding_provider_configuration(
     cache_dir = tmp_path / "cache"
     config_path = tmp_path / ".gloggur.yaml"
     config_path.write_text(
-        'embedding_provider: ""\n'
-        f"cache_dir: {cache_dir}\n",
+        'embedding_provider: ""\n' f"cache_dir: {cache_dir}\n",
         encoding="utf8",
     )
     cache = CacheManager(CacheConfig(str(cache_dir)))
@@ -2681,8 +2718,7 @@ def test_core_commands_wrap_malformed_config_as_structured_io_failure(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
     bad_config = tmp_path / "bad.gloggur.json"
@@ -2727,8 +2763,7 @@ def test_core_commands_wrap_non_mapping_config_payload_as_structured_io_failure(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
     bad_config = tmp_path / "bad.gloggur.yaml"
@@ -2767,8 +2802,7 @@ def test_core_commands_wrap_sqlite_database_error_as_structured_io_payload(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a, b):\n"
-        "    return a + b\n",
+        "def add(a, b):\n" "    return a + b\n",
         encoding="utf8",
     )
 
@@ -2851,8 +2885,7 @@ def test_core_commands_wrap_io_failure_categories_consistently(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a, b):\n"
-        "    return a + b\n",
+        "def add(a, b):\n" "    return a + b\n",
         encoding="utf8",
     )
 

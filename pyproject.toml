@@ -51,7 +51,7 @@ dev = [
 ]
 
 [project.scripts]
-gloggur = "gloggur.cli.main:cli"
+gloggur = "gloggur.cli.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from gloggur.cli.main import cli
+from gloggur.cli.main import main as cli_main
 
 
-def main() -> None:
+def main() -> int:
     """Run the gloggur CLI entrypoint."""
-    cli()
+    return cli_main()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

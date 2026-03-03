@@ -61,8 +61,23 @@ the watch runtime state is contradictory (`startup_status_probe_failed`,
 `scripts/gloggur` now runs a preflight check before launching the CLI:
 - prefers `.venv/bin/python` when healthy
 - otherwise falls back to system Python with repo-root `PYTHONPATH`
-- returns structured `--json` failures with `operation=preflight`
+- in `--json` mode returns one envelope object on failure:
+  - `ok=false`
+  - `error_code`
+  - `error`
+  - `stage` (`bootstrap|dispatch|search`)
+  - `compatibility` (legacy detailed payload)
 - is the canonical command for worktree-local agent/dev flows (no PATH assumptions)
+
+Bootstrap log/state env vars are optional by default:
+- `BOOTSTRAP_GLOGGUR_LOG_FILE`
+- `BOOTSTRAP_GLOGGUR_STATE_FILE`
+
+Enable strict bootstrap hard-fail behavior with:
+
+```bash
+export GLOGGUR_BOOTSTRAP_STRICT=1
+```
 
 `bd setup codex` also installs a global `gloggur` launcher on `PATH` that delegates
 to repo `scripts/gloggur` and preserves the caller working directory so external
@@ -82,6 +97,11 @@ scripts/bootstrap_gloggur_env.sh --seed-cache-from /path/to/other/workspace --se
 ```
 
 Use `copy` mode when symlink targets may be read-only in your execution environment.
+
+Workspace indexing contract:
+- gloggur indexes the current target workspace into `.gloggur-cache` by default
+- running from another cwd requires indexing that workspace first (`gloggur index <workspace> --json`)
+- alternatively set `GLOGGUR_CACHE_DIR` to a writable cache path for that workspace
 
 Offline-friendly full bootstrap from another workspace (venv + cache):
 
@@ -663,7 +683,8 @@ gloggur status --json
 ```
 
 If wrapper/bootstrap/preflight fails with `--json`, error payloads include:
-- `error_code`: `missing_venv`, `missing_python`, `missing_package`, `broken_environment`, `wrapper_launch_target_missing`
-- `message`
-- `remediation` steps
-- `detected_environment` details
+- `ok=false`
+- `error_code`: `missing_venv`, `missing_python`, `missing_package`, `broken_environment`, `wrapper_launch_target_missing`, `wrapper_install_root_invalid`
+- `error`
+- `stage` (`bootstrap|dispatch|search`)
+- `compatibility` details (`operation`, remediation guidance, detected environment payload)

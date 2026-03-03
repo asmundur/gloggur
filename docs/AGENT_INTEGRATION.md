@@ -59,15 +59,22 @@ instead of depending on ambient `PATH` launcher state.
 `scripts/gloggur` preflight behavior:
 - use repo `.venv` when healthy
 - fallback to system Python + repo `PYTHONPATH` when `.venv` is missing/broken
-- if startup is impossible, return deterministic JSON (`operation: preflight`) with:
-  - `error_code`: `missing_venv`, `missing_python`, `missing_package`, or `broken_environment`
-  - `remediation` guidance and detected runtime details
+- if startup is impossible and `--json` is enabled, emit one envelope object:
+  - `ok=false`
+  - `error_code` (`missing_venv`, `missing_python`, `missing_package`, `broken_environment`, etc.)
+  - `error`
+  - `stage` (`bootstrap|dispatch|search`)
+  - `compatibility` (legacy remediation/detected-environment payload)
+
+Optional bootstrap env vars no longer hard-fail when unset/unwritable:
+- `BOOTSTRAP_GLOGGUR_LOG_FILE`
+- `BOOTSTRAP_GLOGGUR_STATE_FILE`
+
+Set `GLOGGUR_BOOTSTRAP_STRICT=1` to enforce hard-fail behavior for degraded bootstrap capabilities.
 
 Global-wrapper launch failures under `--json` return deterministic payloads with:
-- `operation`: `wrapper`
-- `error`: `true`
-- `error_code`: `wrapper_launch_target_missing`
-- `message`, `remediation`, and `detected_environment`
+- top-level envelope fields above plus compatibility details
+- `error_code`: `wrapper_launch_target_missing` or `wrapper_install_root_invalid`
 
 ## Task tracking with Beads
 
@@ -174,6 +181,10 @@ Gloggur also auto-loads a repo-local `.env` file; exported process environment v
 Gloggur stores its cache in `.gloggur-cache`. This directory is **local-only** and should never be committed.
 `gloggur status --json` includes `schema_version` and `needs_reindex` so agents can detect stale cache state without manual cleanup.
 Watch mode writes runtime files (`watch_state.json`, `watch.pid`, `watch.log`) under `.gloggur-cache` by default.
+
+Cross-workspace note:
+- `gloggur search` operates on the current workspace cache context.
+- Before searching in a new workspace, run `gloggur index <workspace> --json` there (or set `GLOGGUR_CACHE_DIR` to that workspace cache).
 
 ## Concurrency contract
 

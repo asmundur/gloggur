@@ -13,7 +13,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -387,6 +387,51 @@ class CLIContractError(click.ClickException):
         }
 
 
+def _error_stage_for_command(
+    *,
+    command_name: str | None = None,
+    error_code: str | None = None,
+) -> str:
+    """Resolve normalized error stage for machine-readable envelopes."""
+    if command_name == "search":
+        return "search"
+    if error_code and error_code.startswith("search_"):
+        return "search"
+    return "dispatch"
+
+
+def _json_error_envelope(
+    *,
+    error_code: str,
+    error: str,
+    stage: str,
+    compatibility: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build top-level JSON error envelope for wrapper/CLI contracts."""
+    payload: dict[str, object] = {
+        "ok": False,
+        "error_code": error_code,
+        "error": error,
+        "stage": stage,
+    }
+    if compatibility is not None:
+        payload["compatibility"] = compatibility
+    return payload
+
+
+def _emit_json_error(payload: dict[str, object]) -> None:
+    """Emit a single-line JSON error payload."""
+    click.echo(json.dumps(payload, separators=(",", ":"), ensure_ascii=True))
+
+
+def _current_command_name() -> str | None:
+    """Return current click command name when available."""
+    context = click.get_current_context(silent=True)
+    if context is None:
+        return None
+    return context.info_name
+
+
 def _emit(payload: dict[str, object], as_json: bool) -> None:
     """Print payload as JSON or raw text."""
     if as_json:
@@ -414,15 +459,23 @@ def _with_io_failure_handling(
     def _wrapped(*args: object, **kwargs: object) -> Any:
         """Normalize CLI/runtime failures into deterministic non-zero command exits."""
         as_json = _resolve_as_json(kwargs)
+        command_name = _current_command_name()
         try:
             return callback(*args, **kwargs)
         except CLIContractError as exc:
             if as_json:
-                click.echo(
-                    f"CLI contract error [{exc.error_code}]: {exc.message}",
-                    err=True,
+                stage = _error_stage_for_command(
+                    command_name=command_name,
+                    error_code=exc.error_code,
                 )
-                _emit(exc.to_payload(), as_json=True)
+                _emit_json_error(
+                    _json_error_envelope(
+                        error_code=exc.error_code,
+                        error=exc.message,
+                        stage=stage,
+                        compatibility=exc.to_payload(),
+                    )
+                )
                 raise click.exceptions.Exit(exc.exit_code) from exc
             raise
         except click.ClickException as exc:
@@ -432,34 +485,55 @@ def _with_io_failure_handling(
                     error_code,
                     [DEFAULT_CLI_FAILURE_REMEDIATION],
                 )
-                click.echo(f"CLI usage error [{error_code}]: {exc.message}", err=True)
-                _emit(
-                    {
-                        "error": {
-                            "type": "cli_usage_error",
-                            "code": error_code,
-                            "detail": exc.message,
-                            "probable_cause": (
-                                "Command arguments/options were invalid for this CLI path."
-                            ),
-                            "remediation": guidance,
+                _emit_json_error(
+                    _json_error_envelope(
+                        error_code=error_code,
+                        error=exc.message,
+                        stage="dispatch",
+                        compatibility={
+                            "error": {
+                                "type": "cli_usage_error",
+                                "code": error_code,
+                                "detail": exc.message,
+                                "probable_cause": (
+                                    "Command arguments/options were invalid for this CLI path."
+                                ),
+                                "remediation": guidance,
+                            },
+                            "failure_codes": [error_code],
+                            "failure_guidance": {error_code: guidance},
                         },
-                        "failure_codes": [error_code],
-                        "failure_guidance": {error_code: guidance},
-                    },
-                    as_json=True,
+                    )
                 )
                 raise click.exceptions.Exit(exc.exit_code) from exc
             raise
         except StorageIOError as exc:
-            click.echo(format_io_error_message(exc), err=True)
             if as_json:
-                _emit(exc.to_payload(), as_json=True)
+                stage = _error_stage_for_command(command_name=command_name)
+                _emit_json_error(
+                    _json_error_envelope(
+                        error_code=exc.category,
+                        error=str(exc),
+                        stage=stage,
+                        compatibility=exc.to_payload(),
+                    )
+                )
+            else:
+                click.echo(format_io_error_message(exc), err=True)
             raise click.exceptions.Exit(1) from exc
         except EmbeddingProviderError as exc:
-            click.echo(format_embedding_error_message(exc), err=True)
             if as_json:
-                _emit(exc.to_payload(), as_json=True)
+                stage = _error_stage_for_command(command_name=command_name)
+                _emit_json_error(
+                    _json_error_envelope(
+                        error_code="embedding_provider_error",
+                        error=str(exc),
+                        stage=stage,
+                        compatibility=exc.to_payload(),
+                    )
+                )
+            else:
+                click.echo(format_embedding_error_message(exc), err=True)
             raise click.exceptions.Exit(1) from exc
 
     return _wrapped
@@ -2766,7 +2840,14 @@ def search(
         result["failure_codes"] = [error_code]
         result["failure_guidance"] = {error_code: guidance}
         if as_json:
-            _emit(result, as_json=True)
+            _emit_json_error(
+                _json_error_envelope(
+                    error_code=error_code,
+                    error="Grounding validation failed for search output.",
+                    stage="search",
+                    compatibility=result,
+                )
+            )
             raise click.exceptions.Exit(1)
         raise CLIContractError(
             "Grounding validation failed for search output.",
@@ -4063,5 +4144,58 @@ def coverage_import(file: str, output: str, importer_id: str, as_json: bool) -> 
     )
 
 
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the CLI with deterministic JSON error envelopes in --json mode."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    as_json = "--json" in args
+    try:
+        cli.main(args=args, prog_name="gloggur", standalone_mode=False)
+        return 0
+    except click.exceptions.Exit as exc:
+        return int(exc.exit_code or 0)
+    except click.ClickException as exc:
+        if as_json:
+            error_code = "cli_usage_error"
+            guidance = CLI_FAILURE_REMEDIATION.get(
+                error_code,
+                [DEFAULT_CLI_FAILURE_REMEDIATION],
+            )
+            _emit_json_error(
+                _json_error_envelope(
+                    error_code=error_code,
+                    error=exc.message,
+                    stage="dispatch",
+                    compatibility={
+                        "error": {
+                            "type": "cli_usage_error",
+                            "code": error_code,
+                            "detail": exc.message,
+                            "probable_cause": (
+                                "Command arguments/options were invalid for this CLI path."
+                            ),
+                            "remediation": guidance,
+                        },
+                        "failure_codes": [error_code],
+                        "failure_guidance": {error_code: guidance},
+                    },
+                )
+            )
+            return int(exc.exit_code or 1)
+        exc.show(file=sys.stderr)
+        return int(exc.exit_code or 1)
+    except Exception as exc:  # pragma: no cover - defensive guardrail
+        if as_json:
+            _emit_json_error(
+                _json_error_envelope(
+                    error_code="broken_environment",
+                    error="Unexpected CLI runtime failure.",
+                    stage="dispatch",
+                    compatibility={"exception": repr(exc)},
+                )
+            )
+            return 1
+        raise
+
+
 if __name__ == "__main__":
-    cli()
+    raise SystemExit(main())

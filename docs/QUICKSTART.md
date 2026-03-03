@@ -15,6 +15,11 @@ If `status --json` returns `"resume_decision": "reindex_required"`, run:
 scripts/gloggur index . --json
 ```
 
+Workspace note:
+- cache/state defaults to `.gloggur-cache` in the current workspace
+- when working from a different cwd/repo, run `gloggur index <that-workspace> --json` first
+- or set `GLOGGUR_CACHE_DIR` explicitly
+
 ## Provider Setup
 
 Local provider is the default and requires a working local sentence-transformers model:
@@ -75,6 +80,12 @@ scripts/gloggur watch stop --json
 | `watch_mode_conflict` | Both `--foreground` and `--daemon` were passed. | Use exactly one watch mode flag. |
 | `watch_path_missing` | Configured watch path does not exist. | Run `scripts/gloggur watch init <existing-path> --json`. |
 | `search_grounding_validation_failed` | Grounding validation blocked ungrounded search output. | Relax thresholds or improve query/evidence scope before retry. |
+
+For `--json` failures, the top-level contract is:
+- `ok=false`
+- `error_code`
+- `error`
+- `stage` (`bootstrap|dispatch|search`)
 
 ## Command Reference
 

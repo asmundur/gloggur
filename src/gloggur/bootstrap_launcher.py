@@ -7,10 +7,10 @@ all probes fail, it emits a structured JSON or human-readable failure payload
 with an actionable error code and remediation steps, then exits non-zero.
 
 Exit codes (see ``EXIT_CODES``):
-  2  missing_venv       – repository virtualenv missing and no healthy fallback
-  3  missing_python     – no usable Python interpreter found on PATH
-  4  missing_package    – interpreter found but gloggur dependencies absent
-  5  broken_environment – other runtime/import failure
+  2  missing_venv       - repository virtualenv missing and no healthy fallback
+  3  missing_python     - no usable Python interpreter found on PATH
+  4  missing_package    - interpreter found but gloggur dependencies absent
+  5  broken_environment - other runtime/import failure
 """
 
 from __future__ import annotations
@@ -29,6 +29,8 @@ PROBE_MODULE_DEFAULT = "gloggur.cli.main"
 VENV_EXEC_MODULE = "gloggur.cli.main"
 SYSTEM_EXEC_MODULE = "gloggur"
 CHECK_OPERATION = "preflight"
+BOOTSTRAP_STAGE = "bootstrap"
+BOOTSTRAP_STRICT_ENV = "GLOGGUR_BOOTSTRAP_STRICT"
 
 EXIT_CODES = {
     "missing_venv": 2,
@@ -80,6 +82,18 @@ class LaunchPlan:
     remediation: list[str] | None = None
 
 
+@dataclass
+class BootstrapStatus:
+    """Runtime status for optional bootstrap capabilities."""
+
+    log_enabled: bool
+    state_enabled: bool
+    degraded_reason: list[str]
+    strict_mode: bool
+    log_path: str | None = None
+    state_path: str | None = None
+
+
 def _is_truthy(value: str | None) -> bool:
     """Return ``True`` for environment-variable strings that represent a truthy boolean."""
     if value is None:
@@ -90,6 +104,87 @@ def _is_truthy(value: str | None) -> bool:
 def _is_json_mode(args: Sequence[str]) -> bool:
     """Return ``True`` when ``--json`` is present in the argument list."""
     return "--json" in args
+
+
+def _resolve_optional_bootstrap_path(raw_value: str | None) -> str | None:
+    """Resolve optional bootstrap file paths from environment values."""
+    if raw_value is None:
+        return None
+    value = raw_value.strip()
+    if not value:
+        return None
+    return os.path.abspath(os.path.expanduser(value))
+
+
+def _check_optional_bootstrap_file(path: str | None, env_name: str) -> tuple[bool, str | None]:
+    """Validate best-effort write capability for optional bootstrap files."""
+    if path is None:
+        return False, f"{env_name} is unset"
+    parent = os.path.dirname(path) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as exc:
+        return False, f"{env_name} parent is unavailable ({type(exc).__name__}: {exc})"
+    try:
+        with open(path, "a", encoding="utf8"):
+            pass
+    except OSError as exc:
+        return False, f"{env_name} is not writable ({type(exc).__name__}: {exc})"
+    return True, None
+
+
+def resolve_bootstrap_status(env: dict[str, str] | None = None) -> BootstrapStatus:
+    """Resolve optional bootstrap capability status from environment variables."""
+    runtime_env = dict(os.environ if env is None else env)
+    strict_mode = _is_truthy(runtime_env.get(BOOTSTRAP_STRICT_ENV))
+    log_path = _resolve_optional_bootstrap_path(runtime_env.get("BOOTSTRAP_GLOGGUR_LOG_FILE"))
+    state_path = _resolve_optional_bootstrap_path(runtime_env.get("BOOTSTRAP_GLOGGUR_STATE_FILE"))
+
+    log_enabled, log_reason = _check_optional_bootstrap_file(log_path, "BOOTSTRAP_GLOGGUR_LOG_FILE")
+    state_enabled, state_reason = _check_optional_bootstrap_file(
+        state_path,
+        "BOOTSTRAP_GLOGGUR_STATE_FILE",
+    )
+    degraded_reason = [reason for reason in (log_reason, state_reason) if reason]
+    return BootstrapStatus(
+        log_enabled=log_enabled,
+        state_enabled=state_enabled,
+        degraded_reason=degraded_reason,
+        strict_mode=strict_mode,
+        log_path=log_path,
+        state_path=state_path,
+    )
+
+
+def _bootstrap_status_payload(status: BootstrapStatus) -> dict[str, object]:
+    """Serialize bootstrap status into a stable diagnostics object."""
+    return {
+        "log_enabled": status.log_enabled,
+        "state_enabled": status.state_enabled,
+        "degraded_reason": list(status.degraded_reason),
+        "strict_mode": status.strict_mode,
+        "log_path": status.log_path,
+        "state_path": status.state_path,
+    }
+
+
+def _error_envelope(
+    *,
+    error_code: str,
+    error: str,
+    stage: str,
+    compatibility: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return the normalized top-level JSON failure envelope."""
+    payload: dict[str, object] = {
+        "ok": False,
+        "error_code": error_code,
+        "error": error,
+        "stage": stage,
+    }
+    if compatibility:
+        payload["compatibility"] = compatibility
+    return payload
 
 
 def _repo_root() -> str:
@@ -458,16 +553,17 @@ def _serialize_probes(probes: Sequence[CandidateProbe]) -> list[dict[str, object
     return [asdict(probe) for probe in probes]
 
 
-def build_failure_payload(plan: LaunchPlan, preflight_ms: int) -> dict[str, object]:
-    """Build the structured JSON/human-readable failure payload for a failed ``LaunchPlan``.
-
-    Includes error code, message, remediation steps, detected environment details,
-    and the duration of the preflight check in milliseconds.
-    """
+def build_failure_payload(
+    plan: LaunchPlan,
+    *,
+    preflight_ms: int,
+    bootstrap_status: BootstrapStatus | None = None,
+) -> dict[str, object]:
+    """Build structured failure payload for a failed ``LaunchPlan``."""
     assert not plan.ready
     venv_python = _resolve_venv_python(plan.repo_root, plan.env)
     system_candidates = _resolve_system_candidates(plan.env)
-    return {
+    compatibility_payload: dict[str, object] = {
         "operation": CHECK_OPERATION,
         "error_code": plan.error_code,
         "message": plan.message,
@@ -482,16 +578,26 @@ def build_failure_payload(plan: LaunchPlan, preflight_ms: int) -> dict[str, obje
         },
         "preflight_ms": preflight_ms,
     }
+    if bootstrap_status is not None:
+        compatibility_payload["bootstrap_status"] = _bootstrap_status_payload(bootstrap_status)
+
+    return _error_envelope(
+        error_code=str(plan.error_code),
+        error=str(plan.message),
+        stage=BOOTSTRAP_STAGE,
+        compatibility=compatibility_payload,
+    )
 
 
-def build_ready_payload(plan: LaunchPlan, preflight_ms: int) -> dict[str, object]:
-    """Build the structured JSON/human-readable success payload for a ready ``LaunchPlan``.
-
-    Includes the selected candidate type, interpreter path, module, and
-    detected environment details for downstream diagnostics.
-    """
+def build_ready_payload(
+    plan: LaunchPlan,
+    *,
+    preflight_ms: int,
+    bootstrap_status: BootstrapStatus | None = None,
+) -> dict[str, object]:
+    """Build the structured success payload for a ready ``LaunchPlan``."""
     assert plan.ready
-    return {
+    payload: dict[str, object] = {
         "operation": CHECK_OPERATION,
         "ready": True,
         "selected_candidate": plan.candidate_type,
@@ -505,12 +611,49 @@ def build_ready_payload(plan: LaunchPlan, preflight_ms: int) -> dict[str, object
             "probes": _serialize_probes(plan.probes),
         },
     }
+    if bootstrap_status is not None:
+        payload["bootstrap_status"] = _bootstrap_status_payload(bootstrap_status)
+    return payload
+
+
+def build_bootstrap_degraded_payload(
+    *,
+    status: BootstrapStatus,
+    repo_root: str,
+    preflight_ms: int,
+) -> dict[str, object]:
+    """Build strict-mode bootstrap failure payload when optional capabilities degrade."""
+    message = "Bootstrap capability degradation detected in strict mode."
+    compatibility_payload = {
+        "operation": CHECK_OPERATION,
+        "error_code": "bootstrap_capability_degraded",
+        "message": message,
+        "remediation": [
+            (
+                "Unset BOOTSTRAP_GLOGGUR_LOG_FILE/BOOTSTRAP_GLOGGUR_STATE_FILE "
+                "to disable optional writes."
+            ),
+            "Or set writable bootstrap paths and rerun the command.",
+            "Set GLOGGUR_BOOTSTRAP_STRICT=0 to allow degraded bootstrap execution.",
+        ],
+        "detected_environment": {
+            "repo_root": repo_root,
+            "bootstrap_status": _bootstrap_status_payload(status),
+        },
+        "preflight_ms": preflight_ms,
+    }
+    return _error_envelope(
+        error_code="bootstrap_capability_degraded",
+        error=message,
+        stage=BOOTSTRAP_STAGE,
+        compatibility=compatibility_payload,
+    )
 
 
 def _emit(payload: dict[str, object], as_json: bool) -> None:
     """Print ``payload`` as JSON to stdout or as a human-readable summary to stderr."""
     if as_json:
-        print(json.dumps(payload, indent=2))
+        print(json.dumps(payload, separators=(",", ":"), ensure_ascii=True))
         return
 
     if payload.get("ready") is True:
@@ -521,12 +664,19 @@ def _emit(payload: dict[str, object], as_json: bool) -> None:
         )
         return
 
+    compatibility = payload.get("compatibility")
+    remediation: list[str] = []
+    if isinstance(compatibility, dict):
+        raw_remediation = compatibility.get("remediation", [])
+        if isinstance(raw_remediation, list):
+            remediation = [str(step) for step in raw_remediation]
+
     print(
-        f"gloggur preflight failed ({payload.get('error_code')}): {payload.get('message')}",
+        f"gloggur preflight failed ({payload.get('error_code')}): {payload.get('error')}",
         file=sys.stderr,
     )
     print("Remediation:", file=sys.stderr)
-    for index, step in enumerate(payload.get("remediation", []), start=1):
+    for index, step in enumerate(remediation, start=1):
         print(f"{index}. {step}", file=sys.stderr)
 
 
@@ -543,32 +693,44 @@ def _execute(plan: LaunchPlan) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Entry point for the gloggur preflight bootstrap launcher.
-
-    Builds a launch plan, emits a ready or failure payload, and either execs
-    into the selected interpreter or returns a non-zero exit code.  Dry-run
-    mode (``GLOGGUR_PREFLIGHT_DRY_RUN=1``) emits the ready payload without
-    execing, which is useful for testing and diagnostics.
-    """
+    """Entry point for the gloggur preflight bootstrap launcher."""
     args = list(sys.argv[1:] if argv is None else argv)
     as_json = _is_json_mode(args)
     started = time.perf_counter()
+    status = resolve_bootstrap_status()
+    if status.strict_mode and status.degraded_reason:
+        preflight_ms = int((time.perf_counter() - started) * 1000)
+        _emit(
+            build_bootstrap_degraded_payload(
+                status=status,
+                repo_root=_repo_root(),
+                preflight_ms=preflight_ms,
+            ),
+            as_json=as_json,
+        )
+        return 1
 
     try:
         plan = build_launch_plan(args=args)
     except Exception as exc:  # pragma: no cover - defensive path
         preflight_ms = int((time.perf_counter() - started) * 1000)
-        payload = {
-            "operation": CHECK_OPERATION,
-            "error_code": "broken_environment",
-            "message": "Unexpected error while running gloggur preflight.",
-            "remediation": _remediation_steps("broken_environment", _repo_root()),
-            "detected_environment": {
-                "repo_root": _repo_root(),
-                "exception": repr(exc),
+        payload = _error_envelope(
+            error_code="broken_environment",
+            error="Unexpected error while running gloggur preflight.",
+            stage=BOOTSTRAP_STAGE,
+            compatibility={
+                "operation": CHECK_OPERATION,
+                "error_code": "broken_environment",
+                "message": "Unexpected error while running gloggur preflight.",
+                "remediation": _remediation_steps("broken_environment", _repo_root()),
+                "detected_environment": {
+                    "repo_root": _repo_root(),
+                    "exception": repr(exc),
+                    "bootstrap_status": _bootstrap_status_payload(status),
+                },
+                "preflight_ms": preflight_ms,
             },
-            "preflight_ms": preflight_ms,
-        }
+        )
         _emit(payload, as_json=as_json)
         return EXIT_CODES["broken_environment"]
 
@@ -576,12 +738,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     dry_run = _is_truthy(os.environ.get("GLOGGUR_PREFLIGHT_DRY_RUN"))
     if plan.ready:
         if dry_run:
-            _emit(build_ready_payload(plan, preflight_ms=preflight_ms), as_json=as_json)
+            _emit(
+                build_ready_payload(plan, preflight_ms=preflight_ms, bootstrap_status=status),
+                as_json=as_json,
+            )
             return 0
         _execute(plan)
         return 0
 
-    payload = build_failure_payload(plan, preflight_ms=preflight_ms)
+    payload = build_failure_payload(
+        plan,
+        preflight_ms=preflight_ms,
+        bootstrap_status=status,
+    )
     _emit(payload, as_json=as_json)
     return EXIT_CODES.get(str(plan.error_code), EXIT_CODES["broken_environment"])
 
