@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from gloggur.config import GloggurConfig
-from gloggur.embeddings.local import LocalEmbeddingProvider
+from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.indexer import Indexer
 from gloggur.parsers.registry import ParserRegistry
@@ -34,7 +34,7 @@ def test_hybrid_search_returns_ranked_results() -> None:
         _write_fallback_marker(cache_dir)
         config = GloggurConfig(cache_dir=cache_dir, local_embedding_model="local")
         cache = CacheManager(CacheConfig(cache_dir))
-        embedding = LocalEmbeddingProvider("local", cache_dir=cache_dir)
+        embedding = DeterministicTestEmbeddingProvider()
         vector_store = VectorStore(VectorStoreConfig(cache_dir))
         indexer = Indexer(
             config=config,
@@ -69,7 +69,7 @@ def func_c(): return 3
         _write_fallback_marker(cache_dir)
         config = GloggurConfig(cache_dir=cache_dir, local_embedding_model="local")
         cache = CacheManager(CacheConfig(cache_dir))
-        embedding = LocalEmbeddingProvider("local", cache_dir=cache_dir)
+        embedding = DeterministicTestEmbeddingProvider()
         vector_store = VectorStore(VectorStoreConfig(cache_dir))
         metadata_store = MetadataStore(MetadataStoreConfig(cache_dir))
 

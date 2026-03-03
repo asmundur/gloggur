@@ -3,9 +3,10 @@ from __future__ import annotations
 import tempfile
 
 from gloggur.config import GloggurConfig
-from gloggur.embeddings.local import LocalEmbeddingProvider
+from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.indexer import Indexer
+from gloggur.models import Symbol
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.search.guidance import AgentGuidance
 from gloggur.search.hybrid_search import HybridSearch
@@ -13,7 +14,7 @@ from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 from scripts.verification.fixtures import TestFixtures
 from tests.unit.test_search import _write_fallback_marker
-from gloggur.models import Symbol
+
 
 def test_agent_guidance_generates_context() -> None:
     """AgentGuidance should generate a valid context payload."""
@@ -27,7 +28,7 @@ def func_b(): return 2
         _write_fallback_marker(cache_dir)
         config = GloggurConfig(cache_dir=cache_dir, local_embedding_model="local")
         cache = CacheManager(CacheConfig(cache_dir))
-        embedding = LocalEmbeddingProvider("local", cache_dir=cache_dir)
+        embedding = DeterministicTestEmbeddingProvider()
         vector_store = VectorStore(VectorStoreConfig(cache_dir))
         metadata_store = MetadataStore(MetadataStoreConfig(cache_dir))
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from gloggur.config import GloggurConfig
-from gloggur.embeddings.local import LocalEmbeddingProvider
+from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 from gloggur.watch.service import BatchResult, WatchService, load_watch_state
@@ -33,7 +33,7 @@ def _build_watch_service(
     )
     cache = CacheManager(CacheConfig(cache_dir))
     vector_store = VectorStore(VectorStoreConfig(cache_dir))
-    embedding = LocalEmbeddingProvider("local", cache_dir=cache_dir)
+    embedding = DeterministicTestEmbeddingProvider()
     service = WatchService(
         config=config,
         embedding_provider=embedding,

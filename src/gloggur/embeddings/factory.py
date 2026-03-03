@@ -3,6 +3,7 @@ from __future__ import annotations
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.local import LocalEmbeddingProvider
+from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 
 try:
     from gloggur.embeddings.openai import OpenAIEmbeddingProvider
@@ -43,4 +44,6 @@ def create_embedding_provider(config: GloggurConfig) -> EmbeddingProvider:
             model=config.gemini_embedding_model,
             api_key=config.gemini_api_key,
         )
+    if provider == "test":
+        return DeterministicTestEmbeddingProvider()
     raise ValueError(f"Unknown embedding provider: {provider}")

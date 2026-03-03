@@ -69,6 +69,8 @@ class GloggurConfig:
             model = self.openai_embedding_model
         elif provider == "gemini":
             model = self.gemini_embedding_model
+        elif provider == "test":
+            model = self.local_embedding_model
         else:
             model = "unknown"
         return f"{provider}:{model}"

@@ -351,10 +351,12 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
 
         env_model_a = {
             "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
             "GLOGGUR_LOCAL_MODEL": "model-a",
         }
         env_model_b = {
             "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
             "GLOGGUR_LOCAL_MODEL": "model-b",
         }
 
@@ -365,8 +367,8 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_before.exit_code == 0
         status_before_payload = _parse_json_output(status_before.output)
         assert status_before_payload["needs_reindex"] is False
-        assert status_before_payload["expected_index_profile"] == "local:model-a"
-        assert status_before_payload["cached_index_profile"] == "local:model-a"
+        assert status_before_payload["expected_index_profile"] == "test:model-a"
+        assert status_before_payload["cached_index_profile"] == "test:model-a"
         assert status_before_payload["resume_decision"] == "resume_ok"
         assert status_before_payload["resume_reason_codes"] == []
         assert status_before_payload["resume_fingerprint_match"] is True
@@ -387,13 +389,16 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_changed.exit_code == 0
         status_changed_payload = _parse_json_output(status_changed.output)
         assert status_changed_payload["needs_reindex"] is True
-        assert status_changed_payload["expected_index_profile"] == "local:model-b"
-        assert status_changed_payload["cached_index_profile"] == "local:model-a"
+        assert status_changed_payload["expected_index_profile"] == "test:model-b"
+        assert status_changed_payload["cached_index_profile"] == "test:model-a"
         assert "embedding profile changed" in str(status_changed_payload["reindex_reason"])
         assert status_changed_payload["resume_decision"] == "reindex_required"
         assert status_changed_payload["resume_reason_codes"] == ["embedding_profile_changed"]
         assert status_changed_payload["resume_fingerprint_match"] is False
-        assert status_changed_payload["last_success_resume_fingerprint"] == first_success_fingerprint
+        assert (
+            status_changed_payload["last_success_resume_fingerprint"]
+            == first_success_fingerprint
+        )
         assert status_changed_payload["last_success_resume_fingerprint_match"] is False
         assert status_changed_payload["last_success_tool_version_match"] is True
 
@@ -427,8 +432,8 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_after.exit_code == 0
         status_after_payload = _parse_json_output(status_after.output)
         assert status_after_payload["needs_reindex"] is False
-        assert status_after_payload["expected_index_profile"] == "local:model-b"
-        assert status_after_payload["cached_index_profile"] == "local:model-b"
+        assert status_after_payload["expected_index_profile"] == "test:model-b"
+        assert status_after_payload["cached_index_profile"] == "test:model-b"
         assert status_after_payload["resume_decision"] == "resume_ok"
         assert status_after_payload["resume_reason_codes"] == []
         assert status_after_payload["resume_fingerprint_match"] is True
@@ -436,7 +441,10 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
             "expected_resume_fingerprint"
         ]
         assert status_after_payload["last_success_resume_fingerprint_match"] is True
-        assert status_after_payload["last_success_tool_version"] == status_after_payload["tool_version"]
+        assert (
+            status_after_payload["last_success_tool_version"]
+            == status_after_payload["tool_version"]
+        )
         assert status_after_payload["last_success_tool_version_match"] is True
         assert status_after_payload["last_success_resume_fingerprint"] != first_success_fingerprint
 

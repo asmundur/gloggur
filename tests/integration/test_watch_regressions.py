@@ -4,12 +4,12 @@ import json
 import tempfile
 from pathlib import Path
 
-from click.testing import CliRunner
 import pytest
+from click.testing import CliRunner
 
 from gloggur.cli.main import cli
 from gloggur.config import GloggurConfig
-from gloggur.embeddings.local import LocalEmbeddingProvider
+from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 from gloggur.watch.service import WatchService
@@ -45,11 +45,12 @@ def _build_watch_service(repo: Path, cache_dir: str) -> WatchService:
     config = GloggurConfig(
         cache_dir=cache_dir,
         watch_path=str(repo),
+        embedding_provider="test",
         local_embedding_model="local",
     )
     cache = CacheManager(CacheConfig(cache_dir))
     vector_store = VectorStore(VectorStoreConfig(cache_dir))
-    embedding = LocalEmbeddingProvider("local", cache_dir=cache_dir)
+    embedding = DeterministicTestEmbeddingProvider()
     return WatchService(
         config=config,
         embedding_provider=embedding,
@@ -71,7 +72,11 @@ def test_watch_delete_removes_stale_search_hits(monkeypatch: pytest.MonkeyPatch)
         target = repo / "legacy.py"
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir, "GLOGGUR_LOCAL_MODEL": "local"}
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+            "GLOGGUR_LOCAL_MODEL": "local",
+        }
 
         _invoke_json(runner, ["index", str(repo), "--json"], env)
         before = _invoke_json(
@@ -131,7 +136,11 @@ def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -
         new_path = repo / "module_renamed.py"
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir, "GLOGGUR_LOCAL_MODEL": "local"}
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+            "GLOGGUR_LOCAL_MODEL": "local",
+        }
 
         _invoke_json(runner, ["index", str(repo), "--json"], env)
         before = _invoke_json(
@@ -178,7 +187,7 @@ def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -
 def test_watch_rename_change_only_batch_prunes_ghost_old_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Watch should not report success while stale old-path rows survive a rename change-only batch."""
+    """Watch should not report success while stale old-path rows survive rename batches."""
     monkeypatch.setattr(VectorStore, "_check_faiss", staticmethod(lambda: False))
     runner = CliRunner()
     old_source = (
@@ -197,7 +206,11 @@ def test_watch_rename_change_only_batch_prunes_ghost_old_path(
         new_path = repo / "module_renamed.py"
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir, "GLOGGUR_LOCAL_MODEL": "local"}
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+            "GLOGGUR_LOCAL_MODEL": "local",
+        }
 
         _invoke_json(runner, ["index", str(repo), "--json"], env)
         before = _invoke_json(

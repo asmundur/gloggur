@@ -85,3 +85,10 @@ def test_create_embedding_provider_unknown() -> None:
     config = GloggurConfig(embedding_provider="unknown")
     with pytest.raises(ValueError, match="Unknown embedding provider"):
         factory.create_embedding_provider(config)
+
+
+def test_create_embedding_provider_test() -> None:
+    """Factory returns deterministic test embedding provider."""
+    config = GloggurConfig(embedding_provider="test")
+    provider = factory.create_embedding_provider(config)
+    assert provider.provider == "test"

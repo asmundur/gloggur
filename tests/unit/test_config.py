@@ -87,10 +87,12 @@ def test_embedding_profile_uses_active_provider_model() -> None:
     local = GloggurConfig(embedding_provider="local", local_embedding_model="local-a")
     openai = GloggurConfig(embedding_provider="openai", openai_embedding_model="openai-a")
     gemini = GloggurConfig(embedding_provider="gemini", gemini_embedding_model="gemini-a")
+    test = GloggurConfig(embedding_provider="test", local_embedding_model="test-a")
 
     assert local.embedding_profile() == "local:local-a"
     assert openai.embedding_profile() == "openai:openai-a"
     assert gemini.embedding_profile() == "gemini:gemini-a"
+    assert test.embedding_profile() == "test:test-a"
 
 
 def test_load_env_reads_dotenv_when_process_env_unset(tmp_path, monkeypatch) -> None:
