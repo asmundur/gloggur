@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -175,6 +176,25 @@ def test_wrapper_executes_status_via_system_fallback_when_venv_missing(tmp_path:
     payload = _parse_json_stdout(completed.stdout)
     assert "cache_dir" in payload
     assert payload.get("operation") != "preflight"
+
+
+def test_wrapper_preserves_caller_cwd_when_requested(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.pop("GLOGGUR_PREFLIGHT_DRY_RUN", None)
+    env["GLOGGUR_PREFLIGHT_VENV_PYTHON"] = str(_repo_root() / ".missing-venv" / "bin" / "python")
+    env["GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS"] = sys.executable
+    env["GLOGGUR_PREFLIGHT_PROBE_MODULE"] = "gloggur.bootstrap_launcher"
+    env.pop("GLOGGUR_PREFLIGHT_REQUIRED_IMPORTS", None)
+    env["GLOGGUR_RUN_FROM_CALLER_CWD"] = "1"
+    workspace = tmp_path / "external-workspace"
+    workspace.mkdir()
+
+    completed = _run_wrapper(["status", "--json"], env=env, cwd=workspace)
+
+    assert completed.returncode == 0, completed.stderr
+    payload = _parse_json_stdout(completed.stdout)
+    expected_workspace_hash = hashlib.sha256(os.path.abspath(str(workspace)).encode("utf8")).hexdigest()
+    assert payload.get("workspace_path_hash") == expected_workspace_hash
 
 
 def test_wrapper_reports_soft_preflight_timing_on_warm_path() -> None:

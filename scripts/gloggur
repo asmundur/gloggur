@@ -55,6 +55,12 @@ emit_missing_python() {
   fi
 }
 
+is_truthy() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
+}
+
 choose_python() {
   local python3_path=""
   local python_path=""
@@ -79,7 +85,9 @@ choose_python() {
   fi
 }
 
-cd "$REPO_ROOT"
+if ! is_truthy "${GLOGGUR_RUN_FROM_CALLER_CWD:-0}"; then
+  cd "$REPO_ROOT"
+fi
 PYTHON_BIN=""
 choose_python || exit 3
 exec "$PYTHON_BIN" -m gloggur.bootstrap_launcher "$@"

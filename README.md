@@ -64,6 +64,10 @@ the watch runtime state is contradictory (`startup_status_probe_failed`,
 - returns structured `--json` failures with `operation=preflight`
 - is the canonical command for worktree-local agent/dev flows (no PATH assumptions)
 
+`bd setup codex` also installs a global `gloggur` launcher on `PATH` that delegates
+to repo `scripts/gloggur` and preserves the caller working directory so external
+repos can run `gloggur` directly.
+
 Optional fast cache hydration from another workspace:
 
 ```bash
@@ -638,15 +642,21 @@ scripts/gloggur status --json
 .venv/bin/pytest
 ```
 
-If you want bare `gloggur` on PATH in a local shell session, activate `.venv` first:
+If `bd setup codex` has already installed the global wrapper, you can run:
+
+```bash
+gloggur status --json
+```
+
+Otherwise, activate `.venv` first for a shell-local `gloggur` command:
 
 ```bash
 source .venv/bin/activate
 gloggur status --json
 ```
 
-If bootstrap/preflight fails with `--json`, error payloads include:
-- `error_code`: `missing_venv`, `missing_python`, `missing_package`, `broken_environment`
+If wrapper/bootstrap/preflight fails with `--json`, error payloads include:
+- `error_code`: `missing_venv`, `missing_python`, `missing_package`, `broken_environment`, `wrapper_launch_target_missing`
 - `message`
 - `remediation` steps
 - `detected_environment` details

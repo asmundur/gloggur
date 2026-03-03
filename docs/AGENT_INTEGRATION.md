@@ -46,12 +46,22 @@ Agent wrapper entrypoint:
 scripts/gloggur <command> --json
 ```
 
+When `bd setup codex` is installed, the global `gloggur` launcher also works from
+external repositories by delegating to repo `scripts/gloggur` while preserving the
+caller working directory.
+
 `scripts/gloggur` preflight behavior:
 - use repo `.venv` when healthy
 - fallback to system Python + repo `PYTHONPATH` when `.venv` is missing/broken
 - if startup is impossible, return deterministic JSON (`operation: preflight`) with:
   - `error_code`: `missing_venv`, `missing_python`, `missing_package`, or `broken_environment`
   - `remediation` guidance and detected runtime details
+
+Global-wrapper launch failures under `--json` return deterministic payloads with:
+- `operation`: `wrapper`
+- `error`: `true`
+- `error_code`: `wrapper_launch_target_missing`
+- `message`, `remediation`, and `detected_environment`
 
 ## Task tracking with Beads
 
