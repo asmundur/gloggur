@@ -184,7 +184,7 @@ def test_concurrent_index_runs_keep_cache_consistent() -> None:
             assert isinstance(error, dict)
             assert error["operation"] == "acquire cache write lock"
             assert "timed out" in str(error["detail"])
-            assert "IO failure [unknown_io_error]" in stderr
+            assert stderr == ""
 
         assert successful_runs >= 1
 

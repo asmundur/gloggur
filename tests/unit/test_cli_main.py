@@ -1371,7 +1371,7 @@ def test_cli_main_unknown_command_json_emits_dispatch_envelope(capsys) -> None:
     assert captured.err == ""
 
 
-def test_status_json_error_uses_single_envelope_object(
+def test_status_json_error_emits_single_structured_object(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1389,9 +1389,9 @@ def test_status_json_error_uses_single_envelope_object(
     assert result.exit_code == 1
     raw = result.output.strip()
     payload = json.loads(raw)
-    assert payload["ok"] is False
-    assert payload["stage"] == "dispatch"
-    assert "compatibility" in payload
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "io_failure"
     assert raw.count("\n") == 0
 
 

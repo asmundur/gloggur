@@ -387,19 +387,6 @@ class CLIContractError(click.ClickException):
         }
 
 
-def _error_stage_for_command(
-    *,
-    command_name: str | None = None,
-    error_code: str | None = None,
-) -> str:
-    """Resolve normalized error stage for machine-readable envelopes."""
-    if command_name == "search":
-        return "search"
-    if error_code and error_code.startswith("search_"):
-        return "search"
-    return "dispatch"
-
-
 def _json_error_envelope(
     *,
     error_code: str,
@@ -422,14 +409,6 @@ def _json_error_envelope(
 def _emit_json_error(payload: dict[str, object]) -> None:
     """Emit a single-line JSON error payload."""
     click.echo(json.dumps(payload, separators=(",", ":"), ensure_ascii=True))
-
-
-def _current_command_name() -> str | None:
-    """Return current click command name when available."""
-    context = click.get_current_context(silent=True)
-    if context is None:
-        return None
-    return context.info_name
 
 
 def _emit(payload: dict[str, object], as_json: bool) -> None:
@@ -459,23 +438,11 @@ def _with_io_failure_handling(
     def _wrapped(*args: object, **kwargs: object) -> Any:
         """Normalize CLI/runtime failures into deterministic non-zero command exits."""
         as_json = _resolve_as_json(kwargs)
-        command_name = _current_command_name()
         try:
             return callback(*args, **kwargs)
         except CLIContractError as exc:
             if as_json:
-                stage = _error_stage_for_command(
-                    command_name=command_name,
-                    error_code=exc.error_code,
-                )
-                _emit_json_error(
-                    _json_error_envelope(
-                        error_code=exc.error_code,
-                        error=exc.message,
-                        stage=stage,
-                        compatibility=exc.to_payload(),
-                    )
-                )
+                _emit_json_error(exc.to_payload())
                 raise click.exceptions.Exit(exc.exit_code) from exc
             raise
         except click.ClickException as exc:
@@ -486,52 +453,31 @@ def _with_io_failure_handling(
                     [DEFAULT_CLI_FAILURE_REMEDIATION],
                 )
                 _emit_json_error(
-                    _json_error_envelope(
-                        error_code=error_code,
-                        error=exc.message,
-                        stage="dispatch",
-                        compatibility={
-                            "error": {
-                                "type": "cli_usage_error",
-                                "code": error_code,
-                                "detail": exc.message,
-                                "probable_cause": (
-                                    "Command arguments/options were invalid for this CLI path."
-                                ),
-                                "remediation": guidance,
-                            },
-                            "failure_codes": [error_code],
-                            "failure_guidance": {error_code: guidance},
+                    {
+                        "error": {
+                            "type": "cli_usage_error",
+                            "code": error_code,
+                            "detail": exc.message,
+                            "probable_cause": (
+                                "Command arguments/options were invalid for this CLI path."
+                            ),
+                            "remediation": guidance,
                         },
-                    )
+                        "failure_codes": [error_code],
+                        "failure_guidance": {error_code: guidance},
+                    }
                 )
                 raise click.exceptions.Exit(exc.exit_code) from exc
             raise
         except StorageIOError as exc:
             if as_json:
-                stage = _error_stage_for_command(command_name=command_name)
-                _emit_json_error(
-                    _json_error_envelope(
-                        error_code=exc.category,
-                        error=str(exc),
-                        stage=stage,
-                        compatibility=exc.to_payload(),
-                    )
-                )
+                _emit_json_error(exc.to_payload())
             else:
                 click.echo(format_io_error_message(exc), err=True)
             raise click.exceptions.Exit(1) from exc
         except EmbeddingProviderError as exc:
             if as_json:
-                stage = _error_stage_for_command(command_name=command_name)
-                _emit_json_error(
-                    _json_error_envelope(
-                        error_code="embedding_provider_error",
-                        error=str(exc),
-                        stage=stage,
-                        compatibility=exc.to_payload(),
-                    )
-                )
+                _emit_json_error(exc.to_payload())
             else:
                 click.echo(format_embedding_error_message(exc), err=True)
             raise click.exceptions.Exit(1) from exc
@@ -2840,14 +2786,7 @@ def search(
         result["failure_codes"] = [error_code]
         result["failure_guidance"] = {error_code: guidance}
         if as_json:
-            _emit_json_error(
-                _json_error_envelope(
-                    error_code=error_code,
-                    error="Grounding validation failed for search output.",
-                    stage="search",
-                    compatibility=result,
-                )
-            )
+            _emit(result, as_json=True)
             raise click.exceptions.Exit(1)
         raise CLIContractError(
             "Grounding validation failed for search output.",
@@ -4149,7 +4088,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     as_json = "--json" in args
     try:
-        cli.main(args=args, prog_name="gloggur", standalone_mode=False)
+        cli_exit_code = cli.main(args=args, prog_name="gloggur", standalone_mode=False)
+        if isinstance(cli_exit_code, int):
+            return cli_exit_code
         return 0
     except click.exceptions.Exit as exc:
         return int(exc.exit_code or 0)
