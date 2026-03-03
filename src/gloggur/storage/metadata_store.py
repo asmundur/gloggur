@@ -125,6 +125,48 @@ class MetadataStore:
             if "covered_by" in row.keys() and row["covered_by"]
             else []
         )
+        signals = json.loads(row["signals"]) if "signals" in row.keys() and row["signals"] else []
+        if not signals:
+            for expression in invariants:
+                signals.append(
+                    {
+                        "type": "code.invariant",
+                        "payload": {"expression": expression},
+                        "source": "legacy_projection",
+                    }
+                )
+            for target in calls:
+                signals.append(
+                    {
+                        "type": "code.call",
+                        "payload": {"target": target},
+                        "source": "legacy_projection",
+                    }
+                )
+            if bool(row["is_serialization_boundary"]):
+                signals.append(
+                    {
+                        "type": "boundary.serialization",
+                        "payload": {"detector": "legacy_projection"},
+                        "source": "legacy_projection",
+                    }
+                )
+            implicit_contract = row["implicit_contract"]
+            if implicit_contract:
+                signals.append(
+                    {
+                        "type": "test.implicit_contract",
+                        "payload": {"text": implicit_contract},
+                        "source": "legacy_projection",
+                    }
+                )
+        attributes = (
+            json.loads(row["attributes"])
+            if "attributes" in row.keys() and row["attributes"]
+            else {}
+        )
+        if not isinstance(attributes, dict):
+            attributes = {}
 
         return Symbol(
             id=row["id"],
@@ -143,4 +185,6 @@ class MetadataStore:
             covered_by=covered_by,
             is_serialization_boundary=bool(row["is_serialization_boundary"]),
             implicit_contract=row["implicit_contract"],
+            signals=signals,
+            attributes=attributes,
         )

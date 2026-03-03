@@ -9,7 +9,7 @@ import pytest
 
 import gloggur.indexer.cache as cache_module
 from gloggur.indexer.cache import CACHE_SCHEMA_VERSION, CacheConfig, CacheManager
-from gloggur.models import FileMetadata, IndexMetadata, Symbol
+from gloggur.models import FileMetadata, IndexMetadata, Signal, Symbol
 
 
 def _sample_symbol(symbol_id: str = "sample:1:add") -> Symbol:
@@ -26,6 +26,14 @@ def _sample_symbol(symbol_id: str = "sample:1:add") -> Symbol:
         body_hash="abc123",
         embedding_vector=[0.1, 0.2],
         language="python",
+        signals=[
+            Signal(
+                type="code.call",
+                payload={"target": "helper"},
+                source="test",
+            )
+        ],
+        attributes={"origin": "unit-test"},
     )
 
 
@@ -39,6 +47,8 @@ def test_cache_round_trip_symbols_metadata_and_warnings() -> None:
     symbols = cache.list_symbols()
     assert len(symbols) == 1
     assert symbols[0].id == symbol.id
+    assert symbols[0].signals[0].type == "code.call"
+    assert symbols[0].attributes == {"origin": "unit-test"}
 
     metadata = IndexMetadata(version="1", total_symbols=1, indexed_files=1)
     cache.set_index_metadata(metadata)
@@ -67,7 +77,12 @@ def test_cache_replace_file_index_replaces_symbol_rows_and_metadata() -> None:
 
     cache.replace_file_index(
         "sample.py",
-        FileMetadata(path="sample.py", language="python", content_hash="hash-a", symbols=[first.id]),
+        FileMetadata(
+            path="sample.py",
+            language="python",
+            content_hash="hash-a",
+            symbols=[first.id],
+        ),
         [first],
     )
     cache.replace_file_index(

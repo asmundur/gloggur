@@ -90,6 +90,21 @@ scripts/bootstrap_gloggur_env.sh \
 
 For a deterministic first-run path (install, provider setup, index/watch/search/inspect, troubleshooting codes), use `docs/QUICKSTART.md`.
 
+Adapter discovery:
+
+```bash
+gloggur adapters list --json
+```
+
+See `docs/ADAPTERS.md` for adapter config and entry-point groups.
+
+Generic coverage import (adapter-driven, compat with existing `import-python`):
+
+```bash
+gloggur coverage import .coverage --importer python --output gloggur-coverage.json --json
+gloggur coverage import gloggur-coverage.json --importer json --output gloggur-coverage.json --json
+```
+
 ## Task Tracking
 
 This repository now uses [Beads (`bd`)](https://github.com/steveyegge/beads) for new task tracking.
@@ -540,6 +555,8 @@ supported_extensions:
   - .rs
   - .go
   - .java
+parser_extension_map:
+  .pyi: python
 excluded_dirs:
   - .git
   - node_modules
@@ -549,6 +566,16 @@ excluded_dirs:
   - dist
   - build
   - htmlcov
+adapters:
+  parsers: {}
+  coverage_importers: {}
+  embedding_providers: {}
+  storage: {}
+  runtime: {}
+storage:
+  backend: sqlite_faiss
+runtime:
+  host: python_local
 ```
 
 Semantic threshold rationale:

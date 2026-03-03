@@ -46,6 +46,7 @@ class GloggurConfig:
     supported_extensions: list[str] = field(
         default_factory=lambda: [".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java"]
     )
+    parser_extension_map: dict[str, str] = field(default_factory=dict)
     excluded_dirs: list[str] = field(
         default_factory=lambda: [
             ".git",
@@ -58,6 +59,17 @@ class GloggurConfig:
             "htmlcov",
         ]
     )
+    adapters: dict[str, object] = field(
+        default_factory=lambda: {
+            "parsers": {},
+            "coverage_importers": {},
+            "embedding_providers": {},
+            "storage": {},
+            "runtime": {},
+        }
+    )
+    storage: dict[str, str] = field(default_factory=lambda: {"backend": "sqlite_faiss"})
+    runtime: dict[str, str] = field(default_factory=lambda: {"host": "python_local"})
     index_version: str = "1"
 
     def embedding_profile(self) -> str:
@@ -74,6 +86,31 @@ class GloggurConfig:
         else:
             model = "unknown"
         return f"{provider}:{model}"
+
+    def adapter_module_override(self, category: str, adapter_id: str) -> str | None:
+        """Return optional module-path override for one adapter category/id pair."""
+        category_map = self.adapters.get(category) if isinstance(self.adapters, dict) else None
+        if not isinstance(category_map, dict):
+            return None
+        value = category_map.get(adapter_id)
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    def storage_backend(self) -> str:
+        """Return configured storage backend id with compatibility default."""
+        value = self.storage.get("backend") if isinstance(self.storage, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "sqlite_faiss"
+
+    def runtime_host(self) -> str:
+        """Return configured runtime host id with compatibility default."""
+        value = self.runtime.get("host") if isinstance(self.runtime, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "python_local"
 
     @classmethod
     def load(
@@ -191,4 +228,8 @@ class GloggurConfig:
                 pass
         if _env_value("GLOGGUR_CACHE_DIR"):
             data["cache_dir"] = _env_value("GLOGGUR_CACHE_DIR")
+        if _env_value("GLOGGUR_STORAGE_BACKEND"):
+            data["storage"] = {"backend": _env_value("GLOGGUR_STORAGE_BACKEND")}
+        if _env_value("GLOGGUR_RUNTIME_HOST"):
+            data["runtime"] = {"host": _env_value("GLOGGUR_RUNTIME_HOST")}
         return data

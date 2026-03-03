@@ -19,10 +19,10 @@ from gloggur.cli.main import (
     INSPECT_PAYLOAD_SCHEMA_BUMP_POLICY,
     _build_inspect_failure_contract,
     _build_inspect_warning_summary,
-    _load_cached_inspect_reports,
     _build_resume_contract,
     _compute_retrieval_confidence,
     _inspect_path_class,
+    _load_cached_inspect_reports,
     _metadata_reindex_reason,
     _next_retry_top_k,
     _persist_last_success_resume_state,
@@ -476,6 +476,61 @@ def test_coverage_import_python_missing_line_data_returns_coverage_sqlite_invali
     assert error["code"] == "coverage_sqlite_invalid"
 
 
+def test_coverage_import_json_adapter_round_trips_context_map(tmp_path: Path) -> None:
+    """coverage import should support generic JSON context maps via adapter registry."""
+    runner = CliRunner()
+    source_file = tmp_path / "contexts.json"
+    output_file = tmp_path / "gloggur-coverage.json"
+    source_payload = {
+        "test_alpha": {"a.py": [1, 2, 3]},
+        "test_beta": {"b.py": [10]},
+    }
+    source_file.write_text(json.dumps(source_payload), encoding="utf8")
+    env = {"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")}
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "coverage",
+            "import",
+            str(source_file),
+            "--importer",
+            "json",
+            "--output",
+            str(output_file),
+            "--json",
+        ],
+        env=env,
+    )
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["tests_extracted"] == 2
+    assert output_file.exists()
+    written = json.loads(output_file.read_text(encoding="utf8"))
+    assert written == source_payload
+
+
+def test_adapters_list_reports_discoverable_categories(tmp_path: Path) -> None:
+    """adapters list should return machine-readable adapter categories and active defaults."""
+    runner = CliRunner()
+    env = {"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")}
+    result = runner.invoke(
+        cli_main.cli,
+        ["adapters", "list", "--json"],
+        env=env,
+    )
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["active"]["embedding_provider"] == "local"
+    available = payload["available"]
+    assert "parsers" in available
+    assert "coverage_importers" in available
+    assert "embedding_providers" in available
+    assert "storage_backends" in available
+    assert "runtime_hosts" in available
+
+
 def test_resolve_artifact_destination_rejects_unsupported_scheme() -> None:
     """Artifact destination parser should fail closed for non-file URI schemes."""
     with pytest.raises(cli_main.CLIContractError) as exc_info:
@@ -768,7 +823,6 @@ def test_persist_last_success_resume_state_no_change_reindex_is_idempotent() -> 
     run — including runs where no indexed content changed.  This caused last_success_resume_at
     to drift even when the resume fingerprint was stable.
     """
-    from gloggur.cli.main import GLOGGUR_VERSION
 
     writes: list[tuple[str, str]] = []
 

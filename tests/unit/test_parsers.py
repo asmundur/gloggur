@@ -16,6 +16,14 @@ def test_parser_registry_supports_known_extensions() -> None:
     assert isinstance(entry.parser, TreeSitterParser)
 
 
+def test_parser_registry_supports_extension_overrides() -> None:
+    """Registry should allow extension -> adapter overrides from config."""
+    registry = ParserRegistry(extension_map={".pyi": "python"})
+    entry = registry.get_parser_for_path("sample.pyi")
+    assert entry is not None
+    assert entry.language == "python"
+
+
 def test_treesitter_parser_extracts_python_symbols() -> None:
     """Tree-sitter parser should extract Python symbols."""
     source = TestFixtures.create_sample_python_file()
@@ -145,3 +153,54 @@ def regular_function():
     assert logged_in_sym.implicit_contract == "when logged in shows dashboard"
     assert creation_fails_sym.implicit_contract == "user creation fails on duplicate email"
     assert regular_sym.implicit_contract is None
+
+
+def test_treesitter_parser_projects_signals_to_legacy_fields() -> None:
+    """Parser should emit normalized signals while preserving legacy field projections."""
+    source = """
+import json
+
+def test_contract():
+    assert 1 == 1
+    return json.loads("{}")
+"""
+    parser = TreeSitterParser("python")
+    symbols = parser.extract_symbols("test_source.py", source)
+    target = next(s for s in symbols if s.name == "test_contract")
+    signal_types = [signal.type for signal in target.signals]
+
+    assert "code.invariant" in signal_types
+    assert "code.call" in signal_types
+    assert "boundary.serialization" in signal_types
+    assert "test.implicit_contract" in signal_types
+    assert target.implicit_contract == "contract"
+    assert target.is_serialization_boundary is True
+
+
+def test_treesitter_parser_does_not_apply_python_test_heuristics_to_typescript() -> None:
+    """Non-Python parsing should not emit Python test contract signals."""
+    source = """
+function test_when_user_logs_in() {
+  return 1;
+}
+"""
+    parser = TreeSitterParser("typescript")
+    symbols = parser.extract_symbols("sample.ts", source)
+    target = next(s for s in symbols if s.name == "test_when_user_logs_in")
+    assert target.implicit_contract is None
+
+
+def test_treesitter_parser_go_symbols_parse_without_python_test_projection() -> None:
+    """Go parser should extract symbols without Python-specific implicit contracts."""
+    source = """
+package main
+
+func test_when_user_logs_in() int {
+    return 1
+}
+"""
+    parser = TreeSitterParser("go")
+    symbols = parser.extract_symbols("sample.go", source)
+    target = next(s for s in symbols if s.name == "test_when_user_logs_in")
+    assert target.kind == "function"
+    assert target.implicit_contract is None

@@ -146,7 +146,10 @@ class WatchService:
         self.config = config
         self.cache = cache or CacheManager(CacheConfig(config.cache_dir))
         self.vector_store = vector_store or VectorStore(VectorStoreConfig(config.cache_dir))
-        self.parser_registry = parser_registry or ParserRegistry()
+        self.parser_registry = parser_registry or ParserRegistry(
+            extension_map=config.parser_extension_map,
+            adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+        )
         self.indexer = Indexer(
             config=config,
             cache=self.cache,

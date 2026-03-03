@@ -26,15 +26,21 @@ import click
 import yaml
 
 from gloggur import __version__ as GLOGGUR_VERSION
+from gloggur.adapters.registry import AdapterResolutionError
 from gloggur.audit.docstring_audit import DocstringAuditReport, audit_docstrings
 from gloggur.config import GloggurConfig
+from gloggur.coverage_importers import (
+    CoverageImportError,
+    create_coverage_importer,
+    list_coverage_importers,
+)
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import (
     EmbeddingProviderError,
     format_embedding_error_message,
     wrap_embedding_error,
 )
-from gloggur.embeddings.factory import create_embedding_provider
+from gloggur.embeddings.factory import create_embedding_provider, list_embedding_provider_adapters
 from gloggur.indexer.cache import (
     CACHE_SCHEMA_VERSION,
     CacheConfig,
@@ -47,16 +53,17 @@ from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io
 from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.coverage import CoverageIngester
 from gloggur.parsers.registry import ParserRegistry
+from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
 from gloggur.search.evidence import (
     build_evidence_trace,
     validate_evidence_trace,
 )
 from gloggur.search.hybrid_search import HybridSearch
+from gloggur.storage.backends import create_storage_backend, list_storage_backends
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 from gloggur.watch.service import (
     DEFAULT_WATCH_FAILURE_REMEDIATION,
-    WatchService,
     is_process_running,
     load_watch_state,
     utc_now_iso,
@@ -71,6 +78,34 @@ def cli() -> None:
 @cli.group()
 def coverage() -> None:
     """Manage dynamic coverage mappings (test code to production capabilities)."""
+
+
+@cli.group()
+def adapters() -> None:
+    """Inspect adapter registry state and discoverability."""
+
+
+@adapters.command("list")
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def adapters_list(config_path: str | None, as_json: bool) -> None:
+    """List discoverable adapters across parser/coverage/embedding/storage/runtime."""
+    config = _load_config(config_path)
+    payload = {
+        "active": {
+            "embedding_provider": config.embedding_provider,
+            "storage_backend": config.storage_backend(),
+            "runtime_host": config.runtime_host(),
+        },
+        "available": {
+            "parsers": ParserRegistry.available_adapters(),
+            "coverage_importers": list_coverage_importers(),
+            "embedding_providers": list_embedding_provider_adapters(),
+            "storage_backends": list_storage_backends(),
+            "runtime_hosts": list_runtime_hosts(),
+        },
+    }
+    _emit(payload, as_json=as_json)
 
 
 INSPECT_PAYLOAD_SCHEMA_VERSION = "1"
@@ -1033,12 +1068,38 @@ def _watch_starting_state_payload(*, watch_path: str, pid: int) -> dict[str, obj
     }
 
 
+def _uses_default_storage_backend(config: GloggurConfig) -> bool:
+    """Return True when storage should use the built-in sqlite/faiss classes."""
+    backend_id = config.storage_backend()
+    override = config.adapter_module_override("storage", backend_id)
+    return backend_id == "sqlite_faiss" and not override
+
+
+def _create_vector_store(config: GloggurConfig, *, load_existing: bool = True):
+    """Create vector backend with legacy-compatible default class behavior."""
+    if _uses_default_storage_backend(config):
+        vector_config = VectorStoreConfig(config.cache_dir)
+        if load_existing:
+            return VectorStore(vector_config)
+        return VectorStore(vector_config, load_existing=False)
+    storage_backend = create_storage_backend(config)
+    return storage_backend.create_vector_store(config.cache_dir, load_existing=load_existing)
+
+
+def _create_metadata_store(config: GloggurConfig):
+    """Create metadata backend with legacy-compatible default class behavior."""
+    if _uses_default_storage_backend(config):
+        return MetadataStore(MetadataStoreConfig(config.cache_dir))
+    storage_backend = create_storage_backend(config)
+    return storage_backend.create_metadata_store(config.cache_dir)
+
+
 def _create_runtime(
     config_path: str | None,
     embedding_provider: str | None = None,
     rebuild_on_profile_change: bool = False,
     write_locked: bool = False,
-) -> tuple[GloggurConfig, CacheManager, VectorStore]:
+) -> tuple[GloggurConfig, CacheManager, object]:
     """Create config/cache/vector runtime and apply profile rebuild logic."""
     resolved_config_path = _normalize_config_path(config_path)
     config = _load_config(resolved_config_path)
@@ -1048,7 +1109,7 @@ def _create_runtime(
     config = _normalize_watch_paths(config, resolved_config_path)
     expected_profile = config.embedding_profile()
     cache = _create_cache_manager(config.cache_dir)
-    vector_store = VectorStore(VectorStoreConfig(config.cache_dir))
+    vector_store = _create_vector_store(config)
     if cache.last_reset_reason:
         vector_store.clear()
     metadata_present = cache.get_index_metadata() is not None
@@ -2069,7 +2130,10 @@ def index(
         indexer = Indexer(
             config=config,
             cache=cache,
-            parser_registry=ParserRegistry(),
+            parser_registry=ParserRegistry(
+                extension_map=config.parser_extension_map,
+                adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+            ),
             embedding_provider=embedding,
             vector_store=vector_store,
         )
@@ -2584,7 +2648,7 @@ def search(
         config,
         require_provider=True,
     )
-    metadata_store = MetadataStore(MetadataStoreConfig(config.cache_dir))
+    metadata_store = _create_metadata_store(config)
     searcher = HybridSearch(embedding, vector_store, metadata_store)
     filters = {}
     if kind:
@@ -2870,7 +2934,10 @@ def inspect(
     """Run docstring inspection and emit warnings/reports."""
     config = _load_config(config_path)
     cache = _create_cache_manager(config.cache_dir)
-    parser_registry = ParserRegistry()
+    parser_registry = ParserRegistry(
+        extension_map=config.parser_extension_map,
+        adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+    )
     embedding = _create_embedding_provider_for_command(config)
     symbols = []
     code_texts: dict[str, str] = {}
@@ -3443,11 +3510,17 @@ def watch_start(
         return
 
     embedding = _create_embedding_provider_for_command(config)
-    service = WatchService(
+    runtime_host = create_runtime_host(config)
+    parser_registry = ParserRegistry(
+        extension_map=config.parser_extension_map,
+        adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+    )
+    service = runtime_host.build_watch_service(
         config=config,
         embedding_provider=embedding,
         cache=cache,
         vector_store=vector_store,
+        parser_registry=parser_registry,
     )
 
     if mode == "daemon":
@@ -3761,10 +3834,7 @@ def clear_cache(config_path: str | None, as_json: bool, profile_filter: str | No
             )
             return
         cache.clear()
-        vector_store = VectorStore(
-            VectorStoreConfig(config.cache_dir),
-            load_existing=False,
-        )
+        vector_store = _create_vector_store(config, load_existing=False)
         vector_store.clear()
     _emit(
         {
@@ -3806,7 +3876,7 @@ def guidance(
     )
     if embedding is None:
         raise click.exceptions.Exit(1)
-    metadata_store = MetadataStore(MetadataStoreConfig(config.cache_dir))
+    metadata_store = _create_metadata_store(config)
     searcher = HybridSearch(embedding, vector_store, metadata_store)
     guidance_layer = AgentGuidance(searcher)
 
@@ -3834,7 +3904,7 @@ def coverage_ingest(file: str, config_path: str | None, as_json: bool) -> None:
     start_time = time.time()
     config = _load_config(config_path)
 
-    metadata = MetadataStore(MetadataStoreConfig(cache_dir=config.cache_dir))
+    metadata = _create_metadata_store(config)
     ingester = CoverageIngester(metadata)
 
     try:
@@ -3883,79 +3953,41 @@ def coverage_ingest(file: str, config_path: str | None, as_json: bool) -> None:
 @_with_io_failure_handling
 def coverage_import_python(file: str, output: str, as_json: bool) -> None:
     """Convert a Python coverage.py SQLite database into gloggur-coverage.json."""
-    import sqlite3
+    _run_coverage_import(
+        file=file,
+        output=output,
+        importer_id="python",
+        as_json=as_json,
+    )
 
+
+def _run_coverage_import(
+    *,
+    file: str,
+    output: str,
+    importer_id: str,
+    as_json: bool,
+) -> None:
+    """Run coverage import through adapter registry and emit deterministic payloads."""
     start_time = time.time()
-
-    contexts: dict[str, dict[str, list[int]]] = {}
+    config = _load_config(None)
     try:
-        conn = sqlite3.connect(f"file:{file}?mode=ro", uri=True)
-        try:
-            # Query test contexts mappings
-            # Coverage.py schema usually stores contexts in the context table
-            # and line executions in line_map or lines.
-
-            # Note: coverage.py schema can be complex. We'll extract a simplified
-            # mapping assuming specific context formats.
-
-            context_map = {}
-            for row in conn.execute("SELECT id, context FROM context"):
-                if row[1]:  # Ensure not empty string context (which is global)
-                    context_map[row[0]] = row[1]
-
-            if not context_map:
-                click.echo("Warning: No dynamic contexts found in coverage database.", err=True)
-                click.echo(
-                    "Make sure tests were run with `coverage run --contexts=test`.", err=True
-                )
-
-            # Map file paths
-            file_map = {}
-            for row in conn.execute("SELECT id, path FROM file"):
-                file_map[row[0]] = row[1]
-
-            # Get line executions per context
-            # .coverage schema (version 7+): line_data table (file_id, context_id, line)
-            try:
-                for row in conn.execute("SELECT file_id, context_id, line FROM line_data"):
-                    file_id, context_id, line = row
-
-                    ctx_name = context_map.get(context_id)
-                    if not ctx_name:
-                        continue
-
-                    # Clean pytest context names (e.g. 'test_module.py::test_func' -> 'test_func')
-                    ctx_parts = ctx_name.split("::")
-                    test_symbol_name = ctx_parts[-1] if len(ctx_parts) > 1 else ctx_name
-
-                    file_path = file_map.get(file_id)
-                    if not file_path:
-                        continue
-
-                    if test_symbol_name not in contexts:
-                        contexts[test_symbol_name] = {}
-
-                    if file_path not in contexts[test_symbol_name]:
-                        contexts[test_symbol_name][file_path] = []
-
-                    contexts[test_symbol_name][file_path].append(line)
-            except sqlite3.OperationalError as exc:
-                raise CLIContractError(
-                    "Missing 'line_data' table. Coverage file might not be "
-                    "from coverage.py version 7+.",
-                    error_code="coverage_sqlite_invalid",
-                ) from exc
-        finally:
-            conn.close()
-
-    except sqlite3.Error as exc:
+        importer = create_coverage_importer(config, importer_id)
+        contexts = importer.import_contexts(file)
+    except CoverageImportError as exc:
         raise CLIContractError(
-            f"SQLite error reading coverage db: {exc}", error_code="coverage_sqlite_invalid"
+            str(exc),
+            error_code=exc.error_code,
+        ) from exc
+    except AdapterResolutionError as exc:
+        raise CLIContractError(
+            f"Unknown coverage importer: {importer_id}",
+            error_code="coverage_file_invalid",
         ) from exc
 
     try:
-        with open(output, "w", encoding="utf-8") as f:
-            json.dump(contexts, f, indent=2)
+        with open(output, "w", encoding="utf8") as handle:
+            json.dump(contexts, handle, indent=2)
     except OSError as exc:
         raise wrap_io_error(exc, operation="write JSON coverage file", path=output) from exc
 
@@ -3969,10 +4001,39 @@ def coverage_import_python(file: str, output: str, as_json: bool) -> None:
     if as_json:
         _emit(payload, as_json=True)
     else:
-        click.echo("Python coverage import complete:")
+        click.echo("Coverage import complete:")
         click.echo(f"  Tests extracted: {len(contexts)}")
         click.echo(f"  Written to:      {output}")
         click.echo(f"  Duration:        {duration_ms}ms")
+
+
+@coverage.command("import")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--output",
+    "-o",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Path to save the resulting gloggur-coverage.json file.",
+)
+@click.option(
+    "--importer",
+    "importer_id",
+    type=str,
+    default="python",
+    show_default=True,
+    help="Coverage importer adapter id.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output results in JSON format.")
+@_with_io_failure_handling
+def coverage_import(file: str, output: str, importer_id: str, as_json: bool) -> None:
+    """Convert external coverage formats into gloggur-coverage.json via adapter."""
+    _run_coverage_import(
+        file=file,
+        output=output,
+        importer_id=importer_id,
+        as_json=as_json,
+    )
 
 
 if __name__ == "__main__":

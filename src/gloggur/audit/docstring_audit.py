@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import math
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from gloggur.audit.code_cleaners import prepare_code_text
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.models import Symbol
 
@@ -166,7 +166,11 @@ def _compute_semantic_scores(
         code_text = code_texts.get(symbol.id)
         if not code_text:
             continue
-        cleaned = _prepare_code_text(code_text, symbol.language, symbol.docstring, max_chars)
+        cleaned = prepare_code_text(
+            code_text,
+            language=symbol.language,
+            max_chars=max_chars,
+        )
         if not cleaned:
             continue
         cleaned_len = len(cleaned.strip())
@@ -192,35 +196,6 @@ def _compute_semantic_scores(
         code_vector = vectors[2 * idx + 1]
         scores[symbol_id] = _cosine_similarity(doc_vector, code_vector)
     return scores, skip_reasons
-
-
-def _prepare_code_text(
-    code_text: str,
-    language: str | None,
-    docstring: str | None,
-    max_chars: int,
-) -> str:
-    """Prepare code text for similarity scoring (strip docstring, trim)."""
-    text = code_text
-    if language == "python" and docstring:
-        text = _strip_python_docstring(text)
-    text = text.strip()
-    if max_chars > 0 and len(text) > max_chars:
-        text = text[:max_chars]
-    return text
-
-
-def _strip_python_docstring(code_text: str) -> str:
-    """Remove the first Python docstring from a code snippet."""
-    lines = code_text.splitlines()
-    if len(lines) <= 1:
-        return code_text
-    header = lines[0]
-    body = "\n".join(lines[1:])
-    body = re.sub(r"^\s*(?P<quote>\"\"\"|''')(?:.|\n)*?(?P=quote)\s*", "", body, count=1)
-    body = re.sub(r"^\s*(?P<quote>\"|')(?:.|\n)*?(?P=quote)\s*", "", body, count=1)
-    combined = "\n".join([header, body]).strip()
-    return combined
 
 
 def _cosine_similarity(vector_a: Iterable[float], vector_b: Iterable[float]) -> float:

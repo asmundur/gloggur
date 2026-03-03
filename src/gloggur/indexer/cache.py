@@ -17,7 +17,7 @@ INDEX_PROFILE_KEY = "index_profile"
 LAST_SUCCESS_RESUME_FINGERPRINT_KEY = "last_success_resume_fingerprint"
 LAST_SUCCESS_RESUME_AT_KEY = "last_success_resume_at"
 LAST_SUCCESS_TOOL_VERSION_KEY = "last_success_tool_version"
-CACHE_SCHEMA_VERSION = "3"
+CACHE_SCHEMA_VERSION = "4"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 SQLITE_JOURNAL_MODE = "WAL"
@@ -44,6 +44,8 @@ REQUIRED_COLUMNS = {
         "covered_by",
         "is_serialization_boundary",
         "implicit_contract",
+        "signals",
+        "attributes",
     },
     "metadata": {"key", "value"},
     "audits": {"symbol_id", "warnings"},
@@ -176,7 +178,9 @@ class CacheManager:
                     calls TEXT,
                     covered_by TEXT,
                     is_serialization_boundary INTEGER NOT NULL DEFAULT 0,
-                    implicit_contract TEXT
+                    implicit_contract TEXT,
+                    signals TEXT,
+                    attributes TEXT
                 );
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
@@ -743,6 +747,14 @@ class CacheManager:
             if "covered_by" in row.keys() and row["covered_by"]
             else []
         )
+        signals = json.loads(row["signals"]) if "signals" in row.keys() and row["signals"] else []
+        attributes = (
+            json.loads(row["attributes"])
+            if "attributes" in row.keys() and row["attributes"]
+            else {}
+        )
+        if not isinstance(attributes, dict):
+            attributes = {}
 
         return Symbol(
             id=row["id"],
@@ -761,6 +773,8 @@ class CacheManager:
             covered_by=covered_by,
             is_serialization_boundary=bool(row["is_serialization_boundary"]),
             implicit_contract=row["implicit_contract"],
+            signals=signals,
+            attributes=attributes,
         )
 
     @staticmethod
@@ -783,6 +797,8 @@ class CacheManager:
             json.dumps(symbol.covered_by),
             int(symbol.is_serialization_boundary),
             symbol.implicit_contract,
+            json.dumps([signal.model_dump() for signal in symbol.signals]),
+            json.dumps(symbol.attributes),
         )
 
     @staticmethod
@@ -796,8 +812,9 @@ class CacheManager:
             INSERT INTO symbols (
                 id, name, kind, file_path, start_line, end_line,
                 signature, docstring, body_hash, embedding_vector, language,
-                invariants, calls, covered_by, is_serialization_boundary, implicit_contract
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                invariants, calls, covered_by, is_serialization_boundary, implicit_contract,
+                signals, attributes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
@@ -813,7 +830,9 @@ class CacheManager:
                 calls = excluded.calls,
                 covered_by = excluded.covered_by,
                 is_serialization_boundary = excluded.is_serialization_boundary,
-                implicit_contract = excluded.implicit_contract
+                implicit_contract = excluded.implicit_contract,
+                signals = excluded.signals,
+                attributes = excluded.attributes
             """,
             symbol_rows,
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -8,6 +9,15 @@ from pydantic import BaseModel, Field
 def _utc_now() -> datetime:
     """Return current UTC time for metadata defaults."""
     return datetime.now(timezone.utc)
+
+
+class Signal(BaseModel):
+    """Normalized parser/analysis signal attached to a symbol."""
+
+    type: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    source: str | None = None
+    confidence: float | None = None
 
 
 class Symbol(BaseModel):
@@ -29,6 +39,8 @@ class Symbol(BaseModel):
     covered_by: list[str] = Field(default_factory=list)
     is_serialization_boundary: bool = False
     implicit_contract: str | None = None
+    signals: list[Signal] = Field(default_factory=list)
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
 
 class FileMetadata(BaseModel):

@@ -164,7 +164,10 @@ class Indexer:
 
         self.config = config
         self.cache = cache or CacheManager(CacheConfig(config.cache_dir))
-        self.parser_registry = parser_registry or ParserRegistry()
+        self.parser_registry = parser_registry or ParserRegistry(
+            extension_map=config.parser_extension_map,
+            adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+        )
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self._progress_callback: Callable[[int, int], None] | None = None
