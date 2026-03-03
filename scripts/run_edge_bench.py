@@ -97,7 +97,10 @@ def _build_phase_report(
 def _new_runner(cache_dir: str, timeout: float = 120.0) -> CommandRunner:
     """Create a command runner with an isolated cache directory."""
     return CommandRunner(
-        env={"GLOGGUR_CACHE_DIR": cache_dir, "GLOGGUR_LOCAL_FALLBACK": "1"},
+        env={
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        },
         default_timeout=timeout,
     )
 

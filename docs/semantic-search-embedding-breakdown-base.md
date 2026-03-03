@@ -10,9 +10,8 @@ Source file: `src/gloggur/embeddings/base.py`
 - `provider_module`: `gloggur.embeddings.local`
 - `model_name`: `microsoft/codebert-base`
 - `embedding_dimension`: `256`
-- `fallback_mode`: `True`
-- `fallback_marker`: `.gloggur-cache/.local_embedding_fallback`
-- `fallback_marker_exists`: `True`
+- `legacy_local_fallback_supported`: `False`
+- `recommended_test_provider`: `GLOGGUR_EMBEDDING_PROVIDER=test`
 
 ## Chunking Rule
 

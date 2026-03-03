@@ -51,6 +51,11 @@ Fields:
   - Meaning: `GLOGGUR_ALLOW_TOOL_VERSION_DRIFT` has an unsupported value.
   - Retryability: retry after fixing or unsetting the env var.
   - Operator action: use `1/0`, `true/false`, `yes/no`, or `on/off`.
+- `local_fallback_env_unsupported`
+  - Command(s): commands that load gloggur config (for example `status`, `index`, `search`, `inspect`, `adapters list`).
+  - Meaning: deprecated `GLOGGUR_LOCAL_FALLBACK` env is set to a non-empty value.
+  - Retryability: retry after removing the legacy env var.
+  - Operator action: unset `GLOGGUR_LOCAL_FALLBACK`; use `GLOGGUR_EMBEDDING_PROVIDER=test` for deterministic test-only embeddings.
 - `search_top_k_invalid`
   - Command(s): `search`.
   - Meaning: `--top-k` is less than 1.

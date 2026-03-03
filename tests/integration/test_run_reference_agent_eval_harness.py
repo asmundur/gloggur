@@ -13,7 +13,7 @@ def _run_reference_agent(args: list[str], *, timeout: float = 240.0) -> subproce
     return subprocess.run(
         command,
         cwd=str(repo_root),
-        env={**os.environ, "GLOGGUR_LOCAL_FALLBACK": "1"},
+        env={**os.environ, "GLOGGUR_EMBEDDING_PROVIDER": "test"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -61,4 +61,3 @@ def test_reference_agent_eval_fails_nonzero_below_threshold() -> None:
     assert float(summary["pass_rate"]) < float(summary["required_pass_rate"])
     failure = payload["failure"]
     assert failure["code"] == "agent_eval_threshold_failed"
-

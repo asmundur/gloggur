@@ -91,6 +91,14 @@ def adapters() -> None:
 @click.option("--json", "as_json", is_flag=True, default=False)
 def adapters_list(config_path: str | None, as_json: bool) -> None:
     """List discoverable adapters across parser/coverage/embedding/storage/runtime."""
+    _with_io_failure_handling(_adapters_list_impl)(
+        config_path=config_path,
+        as_json=as_json,
+    )
+
+
+def _adapters_list_impl(config_path: str | None, as_json: bool) -> None:
+    """List discoverable adapters across parser/coverage/embedding/storage/runtime."""
     config = _load_config(config_path)
     payload = {
         "active": {
@@ -156,6 +164,11 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "allow_tool_version_drift_env_invalid": [
         "Set GLOGGUR_ALLOW_TOOL_VERSION_DRIFT to one of: 1, true, yes, on, 0, false, no, off.",
         "Or unset GLOGGUR_ALLOW_TOOL_VERSION_DRIFT to rely on CLI flags only.",
+    ],
+    "local_fallback_env_unsupported": [
+        "Unset GLOGGUR_LOCAL_FALLBACK; deterministic local fallback embeddings "
+        "are no longer supported.",
+        "For deterministic test-only embeddings, set GLOGGUR_EMBEDDING_PROVIDER=test.",
     ],
     "artifact_source_missing": [
         "Set --source to an existing cache directory or run "
@@ -496,6 +509,7 @@ def _load_config(config_path: str | None) -> GloggurConfig:
             if os.path.exists(candidate):
                 error_path = os.path.abspath(candidate)
                 break
+    _validate_legacy_local_fallback_env()
     try:
         return GloggurConfig.load(path=load_path)
     except OSError as exc:
@@ -2399,8 +2413,7 @@ def _resolve_allow_tool_version_drift(
     cli_flag_enabled: bool,
 ) -> bool:
     """Resolve tool-version drift override from CLI flag + env with strict validation."""
-    env_values = GloggurConfig._load_dotenv()
-    env_values.update(os.environ)
+    env_values = _merged_env_values()
     raw_value = env_values.get("GLOGGUR_ALLOW_TOOL_VERSION_DRIFT")
     if raw_value is None or raw_value.strip() == "":
         return cli_flag_enabled
@@ -2415,6 +2428,25 @@ def _resolve_allow_tool_version_drift(
             error_code="allow_tool_version_drift_env_invalid",
         )
     return cli_flag_enabled or env_enabled
+
+
+def _merged_env_values() -> dict[str, str]:
+    """Return merged dotenv + process environment values with process env precedence."""
+    env_values = GloggurConfig._load_dotenv()
+    env_values.update(os.environ)
+    return env_values
+
+
+def _validate_legacy_local_fallback_env() -> None:
+    """Fail closed when legacy local fallback env is configured."""
+    raw_value = _merged_env_values().get("GLOGGUR_LOCAL_FALLBACK")
+    if raw_value is None or raw_value.strip() == "":
+        return
+    raise CLIContractError(
+        "GLOGGUR_LOCAL_FALLBACK is no longer supported. "
+        "Use GLOGGUR_EMBEDDING_PROVIDER=test for deterministic test-only embeddings.",
+        error_code="local_fallback_env_unsupported",
+    )
 
 
 def _extract_similarity_scores(results: object) -> list[float]:

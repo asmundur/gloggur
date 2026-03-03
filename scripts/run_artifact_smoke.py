@@ -219,7 +219,6 @@ class ArtifactSmokeHarness:
             )
         self._source_cache_dir = self._workspace_dir / "source-cache"
         self._source_cache_dir.mkdir(parents=True, exist_ok=True)
-        (self._source_cache_dir / ".local_embedding_fallback").touch(exist_ok=True)
         self._restored_cache_dir = self._workspace_dir / "restored-cache"
         self._artifacts_dir = self._workspace_dir / "artifacts"
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -236,7 +235,7 @@ class ArtifactSmokeHarness:
         """Build deterministic environment for artifact smoke commands."""
         env = dict(os.environ)
         env["GLOGGUR_CACHE_DIR"] = str(cache_dir)
-        env["GLOGGUR_LOCAL_FALLBACK"] = "1"
+        env["GLOGGUR_EMBEDDING_PROVIDER"] = "test"
         return env
 
     def _run_cli_json(

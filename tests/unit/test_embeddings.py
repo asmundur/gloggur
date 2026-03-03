@@ -15,11 +15,10 @@ def test_local_embedding_legacy_fallback_controls_are_ignored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Legacy fallback env/marker should not enable hash-vector behavior."""
+    """Legacy fallback marker should not enable hash-vector behavior."""
     marker = tmp_path / ".local_embedding_fallback"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch(exist_ok=True)
-    monkeypatch.setenv("GLOGGUR_LOCAL_FALLBACK", "1")
 
     class FakeVector:
         def __init__(self, values: list[float]) -> None:

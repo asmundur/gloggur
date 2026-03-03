@@ -290,6 +290,7 @@ class PackagingSmokeHarness:
         pythonpath_entries.extend(self._outer_site_packages())
         return {
             "PYTHONPATH": os.pathsep.join(pythonpath_entries),
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         }
 
     def _run_command(
@@ -569,14 +570,12 @@ class PackagingSmokeHarness:
         """Verify installed CLI executes status JSON in isolated environment."""
         cache_dir = self.runtime_dir / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        (cache_dir / ".local_embedding_fallback").touch(exist_ok=True)
         gloggur_bin = self._venv_bin("gloggur")
         completed = self._run_command(
             [str(gloggur_bin), "status", "--json"],
             spec=spec,
             env={
                 "GLOGGUR_CACHE_DIR": str(cache_dir),
-                "GLOGGUR_LOCAL_FALLBACK": "1",
                 **self._packaging_env(include_venv_site_packages=True),
             },
             cwd=self.runtime_dir,

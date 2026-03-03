@@ -16,7 +16,7 @@ def _run_packaging(args: list[str], *, timeout: float = 240.0) -> subprocess.Com
     return subprocess.run(
         command,
         cwd=str(repo_root),
-        env={**os.environ, "GLOGGUR_LOCAL_FALLBACK": "1"},
+        env={**os.environ, "GLOGGUR_EMBEDDING_PROVIDER": "test"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

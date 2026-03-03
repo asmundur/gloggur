@@ -361,7 +361,12 @@ def test_load_cached_inspect_reports_rehydrates_cached_reports(tmp_path: Path) -
 
 def test_cli_failure_catalog_includes_watch_preflight_codes() -> None:
     """Watch preflight failure codes should stay documented in the CLI failure catalog."""
-    for code in ("watch_mode_conflict", "watch_path_missing", "watch_mode_invalid"):
+    for code in (
+        "watch_mode_conflict",
+        "watch_path_missing",
+        "watch_mode_invalid",
+        "local_fallback_env_unsupported",
+    ):
         assert code in CLI_FAILURE_REMEDIATION
         guidance = CLI_FAILURE_REMEDIATION[code]
         assert isinstance(guidance, list)
@@ -1008,6 +1013,68 @@ def test_resolve_allow_tool_version_drift_rejects_invalid_env_value(
         cli_main._resolve_allow_tool_version_drift(cli_flag_enabled=False)
 
     assert error.value.error_code == "allow_tool_version_drift_env_invalid"
+
+
+def test_validate_legacy_local_fallback_env_rejects_non_empty_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy fallback env should fail loud with a stable contract code."""
+    monkeypatch.setattr(cli_main.GloggurConfig, "_load_dotenv", lambda _path=".env": {})
+    monkeypatch.setenv("GLOGGUR_LOCAL_FALLBACK", "1")
+
+    with pytest.raises(cli_main.CLIContractError) as error:
+        cli_main._validate_legacy_local_fallback_env()
+
+    assert error.value.error_code == "local_fallback_env_unsupported"
+
+
+def test_validate_legacy_local_fallback_env_allows_blank_or_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset or blank legacy fallback env should not trigger contract failure."""
+    monkeypatch.setattr(cli_main.GloggurConfig, "_load_dotenv", lambda _path=".env": {})
+    monkeypatch.delenv("GLOGGUR_LOCAL_FALLBACK", raising=False)
+    cli_main._validate_legacy_local_fallback_env()
+    monkeypatch.setenv("GLOGGUR_LOCAL_FALLBACK", " ")
+    cli_main._validate_legacy_local_fallback_env()
+
+
+def test_status_json_rejects_legacy_local_fallback_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """status --json should fail closed when legacy fallback env is configured."""
+    runner = CliRunner()
+    monkeypatch.setattr(cli_main.GloggurConfig, "_load_dotenv", lambda _path=".env": {})
+    result = runner.invoke(
+        cli_main.cli,
+        ["status", "--json"],
+        env={"GLOGGUR_LOCAL_FALLBACK": "1"},
+    )
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "local_fallback_env_unsupported"
+    assert payload["failure_codes"] == ["local_fallback_env_unsupported"]
+
+
+def test_adapters_list_json_rejects_legacy_local_fallback_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """adapters list --json should use structured contract handling for legacy fallback env."""
+    runner = CliRunner()
+    monkeypatch.setattr(cli_main.GloggurConfig, "_load_dotenv", lambda _path=".env": {})
+    result = runner.invoke(
+        cli_main.cli,
+        ["adapters", "list", "--json"],
+        env={"GLOGGUR_LOCAL_FALLBACK": "1"},
+    )
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "local_fallback_env_unsupported"
+    assert payload["failure_codes"] == ["local_fallback_env_unsupported"]
 
 
 def test_status_json_rejects_invalid_tool_version_drift_env_var(
@@ -2823,7 +2890,7 @@ def test_core_commands_wrap_sqlite_database_error_as_structured_io_payload(
         args_map[command],
         env={
             "GLOGGUR_CACHE_DIR": str(tmp_path / "cache"),
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         },
     )
 
@@ -2905,7 +2972,7 @@ def test_core_commands_wrap_io_failure_categories_consistently(
         args_map[command],
         env={
             "GLOGGUR_CACHE_DIR": str(tmp_path / "cache"),
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         },
     )
 

@@ -514,7 +514,6 @@ class ReferenceAgentHarness:
             _build_fixture_repo(self._repo_dir)
         self._cache_dir = self._workspace_dir / "cache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        (self._cache_dir / ".local_embedding_fallback").touch(exist_ok=True)
 
     def _cleanup(self) -> None:
         if self._workspace_dir is None:
@@ -526,7 +525,7 @@ class ReferenceAgentHarness:
     def _env(self) -> Dict[str, str]:
         env = dict(os.environ)
         env["GLOGGUR_CACHE_DIR"] = str(self.cache_dir)
-        env["GLOGGUR_LOCAL_FALLBACK"] = "1"
+        env["GLOGGUR_EMBEDDING_PROVIDER"] = "test"
         return env
 
     def _run_cli_json(

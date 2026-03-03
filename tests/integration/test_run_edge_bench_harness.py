@@ -13,7 +13,7 @@ def _run_edge_bench(args: list[str], *, timeout: float = 180.0) -> subprocess.Co
     return subprocess.run(
         command,
         cwd=str(repo_root),
-        env={**os.environ, "GLOGGUR_LOCAL_FALLBACK": "1"},
+        env={**os.environ, "GLOGGUR_EMBEDDING_PROVIDER": "test"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

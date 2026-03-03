@@ -17,7 +17,7 @@ def _run_artifact_smoke(
     return subprocess.run(
         command,
         cwd=str(repo_root),
-        env={**os.environ, "GLOGGUR_LOCAL_FALLBACK": "1"},
+        env={**os.environ, "GLOGGUR_EMBEDDING_PROVIDER": "test"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

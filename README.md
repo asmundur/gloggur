@@ -353,6 +353,9 @@ gloggur search "query" --json
 ```
 
 Accepted env values are strict: `1|true|yes|on|0|false|no|off` (case-insensitive). Invalid values fail non-zero with `allow_tool_version_drift_env_invalid`.
+Legacy `GLOGGUR_LOCAL_FALLBACK` is no longer supported; when set to a non-empty
+value, commands fail with `local_fallback_env_unsupported`. Use
+`GLOGGUR_EMBEDDING_PROVIDER=test` for deterministic test-only embeddings.
 
 When this override is used, JSON output remains explicit and machine-readable:
 - `tool_version_drift_detected: true`
@@ -474,6 +477,11 @@ python scripts/run_suite.py
 python scripts/run_provider_probe.py  # Embedding providers
 python scripts/run_edge_bench.py  # Edge cases & performance
 ```
+
+Verification harness scripts in this repository (`run_smoke.py`,
+`run_packaging_smoke.py`, `run_artifact_smoke.py`, `run_edge_bench.py`,
+`run_reference_agent_eval.py`, `run_quickstart_smoke.py`) force
+`GLOGGUR_EMBEDDING_PROVIDER=test` for deterministic offline execution.
 
 `scripts/run_smoke.py` fails fast with deterministic stage codes:
 `smoke_index_failed`, `smoke_watch_incremental_failed`, `smoke_resume_status_failed`,

@@ -25,6 +25,7 @@ def test_error_catalog_contract_passes_when_required_headings_and_codes_exist(
                 "`watch_path_missing`",
                 "`watch_mode_invalid`",
                 "`allow_tool_version_drift_env_invalid`",
+                "`local_fallback_env_unsupported`",
                 "`artifact_source_missing`",
                 "`artifact_source_not_directory`",
                 "`artifact_source_uninitialized`",

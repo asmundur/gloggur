@@ -76,8 +76,7 @@ def _base_env(repo_root: Path) -> Dict[str, str]:
     env["PYTHONPATH"] = (
         str(source_root) if not existing_path else f"{source_root}{os.pathsep}{existing_path}"
     )
-    env.setdefault("GLOGGUR_EMBEDDING_PROVIDER", "local")
-    env.setdefault("GLOGGUR_LOCAL_FALLBACK", "1")
+    env.setdefault("GLOGGUR_EMBEDDING_PROVIDER", "test")
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 

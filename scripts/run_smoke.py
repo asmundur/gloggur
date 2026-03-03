@@ -212,7 +212,6 @@ class SmokeHarness:
             )
         self._cache_dir = self._workspace_dir / "cache"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        (self._cache_dir / ".local_embedding_fallback").touch(exist_ok=True)
         self._runtime_dir = self._workspace_dir / "runtime"
         self._runtime_dir.mkdir(parents=True, exist_ok=True)
         self._watch_config = self._workspace_dir / ".gloggur.yaml"
@@ -229,7 +228,7 @@ class SmokeHarness:
         """Build deterministic environment for smoke commands."""
         env = dict(os.environ)
         env["GLOGGUR_CACHE_DIR"] = str(self.cache_dir)
-        env["GLOGGUR_LOCAL_FALLBACK"] = "1"
+        env["GLOGGUR_EMBEDDING_PROVIDER"] = "test"
         env["WATCHFILES_FORCE_POLLING"] = "1"
         env["WATCHFILES_POLL_DELAY_MS"] = "50"
         env["GLOGGUR_WATCH_STATE_FILE"] = str(self.runtime_dir / "watch_state.json")

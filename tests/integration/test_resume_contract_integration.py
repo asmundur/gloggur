@@ -63,7 +63,7 @@ def test_resume_markers_persist_across_fresh_processes() -> None:
         env = {
             **os.environ,
             "GLOGGUR_CACHE_DIR": cache_dir,
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         }
 
         index_run = _run_cli(["index", str(repo), "--json"], env)
@@ -114,7 +114,7 @@ def test_resume_fingerprint_stable_across_unchanged_reindex() -> None:
         env = {
             **os.environ,
             "GLOGGUR_CACHE_DIR": cache_dir,
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         }
 
         # First index run
@@ -149,7 +149,7 @@ def test_resume_schema_version_mismatch_emits_machine_reason_codes() -> None:
         env = {
             **os.environ,
             "GLOGGUR_CACHE_DIR": cache_dir,
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         }
 
         index_run = _run_cli(["index", str(repo), "--json"], env)
@@ -187,7 +187,7 @@ def test_resume_requires_reindex_when_last_success_tool_version_is_tampered() ->
         env = {
             **os.environ,
             "GLOGGUR_CACHE_DIR": cache_dir,
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         }
 
         index_run = _run_cli(["index", str(repo), "--json"], env)
@@ -224,7 +224,7 @@ def test_resume_allows_explicit_tool_version_drift_override() -> None:
         env = {
             **os.environ,
             "GLOGGUR_CACHE_DIR": cache_dir,
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         }
 
         index_run = _run_cli(["index", str(repo), "--json"], env)
@@ -272,7 +272,7 @@ def test_resume_allows_tool_version_drift_override_from_env_var() -> None:
         env = {
             **os.environ,
             "GLOGGUR_CACHE_DIR": cache_dir,
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
             "GLOGGUR_ALLOW_TOOL_VERSION_DRIFT": "true",
         }
 

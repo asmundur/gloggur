@@ -27,15 +27,12 @@ This behavior comes from:
 
 - `embedding_profile`: `local:microsoft/codebert-base`
 - provider class: `LocalEmbeddingProvider`
-- runtime mode: deterministic fallback (`_use_fallback=True`)
-- fallback marker: `.gloggur-cache/.local_embedding_fallback` (present)
+- runtime mode: direct model embeddings (`SentenceTransformer.encode`)
+- legacy fallback env/marker support: removed
 - embedding dimension produced here: `256`
 
-Fallback embeddings in `LocalEmbeddingProvider` are produced by:
-
-1. tokenizing lowercase text with regex `[A-Za-z0-9_]+`
-2. hashing each token into a deterministic pseudo-random 256-dim vector
-3. summing token vectors and L2-normalizing the result
+For deterministic test-only embeddings, use `GLOGGUR_EMBEDDING_PROVIDER=test`
+(`DeterministicTestEmbeddingProvider`).
 
 ## Example chunking + annotations
 

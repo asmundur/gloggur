@@ -13,6 +13,11 @@ The verification workflow also includes non-pytest required gates on Python `3.1
 - `python scripts/run_artifact_smoke.py --format json`
 - `python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json`
 
+Verification harness scripts in this repository force
+`GLOGGUR_EMBEDDING_PROVIDER=test` for deterministic offline behavior.
+Deprecated `GLOGGUR_LOCAL_FALLBACK` now fails closed with
+`local_fallback_env_unsupported`.
+
 The workflow also includes a lane-policy audit gate:
 
 - each matrix lane emits a JSON lane report artifact (`verification-lane-<python-version>.json`)
