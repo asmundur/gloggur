@@ -76,6 +76,8 @@ jobs:
 
       - name: Run performance regression benchmark
         if: ${{ matrix.python-version == '3.13' }}
+        env:
+          GLOGGUR_EMBEDDING_PROVIDER: test
         run: |
           set -o pipefail
           python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json | tee performance-benchmark-${{ matrix.python-version }}.json

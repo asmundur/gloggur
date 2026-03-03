@@ -3889,7 +3889,8 @@ def coverage_import_python(file: str, output: str, as_json: bool) -> None:
 
     contexts: dict[str, dict[str, list[int]]] = {}
     try:
-        with sqlite3.connect(f"file:{file}?mode=ro", uri=True) as conn:
+        conn = sqlite3.connect(f"file:{file}?mode=ro", uri=True)
+        try:
             # Query test contexts mappings
             # Coverage.py schema usually stores contexts in the context table
             # and line executions in line_map or lines.
@@ -3944,6 +3945,8 @@ def coverage_import_python(file: str, output: str, as_json: bool) -> None:
                     "from coverage.py version 7+.",
                     error_code="coverage_sqlite_invalid",
                 ) from exc
+        finally:
+            conn.close()
 
     except sqlite3.Error as exc:
         raise CLIContractError(

@@ -36,6 +36,18 @@ from gloggur.io_failures import StorageIOError
 from gloggur.models import IndexMetadata, Symbol
 
 
+@pytest.fixture(autouse=True)
+def _disable_faiss_for_cli_unit_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep CLI unit tests deterministic and offline by forcing non-FAISS mode."""
+    monkeypatch.setattr(
+        vector_store_module.VectorStore,
+        "_check_faiss",
+        staticmethod(lambda: False),
+    )
+
+
 def test_profile_reindex_reason_no_metadata_and_no_profile() -> None:
     """No index metadata/profile should not force reindex."""
     reason = _profile_reindex_reason(
@@ -436,10 +448,13 @@ def test_coverage_import_python_missing_line_data_returns_coverage_sqlite_invali
     output_file = tmp_path / "gloggur-coverage.json"
     env = {"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")}
 
-    with sqlite3.connect(coverage_db) as conn:
+    conn = sqlite3.connect(coverage_db)
+    try:
         conn.execute("CREATE TABLE context (id INTEGER PRIMARY KEY, context TEXT)")
         conn.execute("CREATE TABLE file (id INTEGER PRIMARY KEY, path TEXT)")
         conn.commit()
+    finally:
+        conn.close()
 
     result = runner.invoke(
         cli_main.cli,
@@ -1392,7 +1407,7 @@ def test_index_json_reports_vector_store_write_failure(
         ["index", str(repo), "--json"],
         env={
             "GLOGGUR_CACHE_DIR": str(tmp_path / "cache"),
-            "GLOGGUR_LOCAL_FALLBACK": "1",
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
         },
     )
     assert result.exit_code == 1
@@ -1448,7 +1463,6 @@ def test_index_plain_progress_reports_done_over_total_for_all_embedding_provider
         "_create_embedding_provider_for_command",
         _fake_create_embedding,
     )
-
     result = runner.invoke(
         cli_main.cli,
         ["index", str(repo), "--embedding-provider", provider],
