@@ -133,8 +133,7 @@ class AdapterRegistry(Generic[T]):
         module_name, sep, attr_name = module_path.partition(":")
         if not sep or not module_name or not attr_name:
             raise AdapterResolutionError(
-                "Adapter override must use 'module:callable' format, "
-                f"received '{module_path}'."
+                "Adapter override must use 'module:callable' format, " f"received '{module_path}'."
             )
         try:
             module = importlib.import_module(module_name)
@@ -148,9 +147,7 @@ class AdapterRegistry(Generic[T]):
             )
         factory = getattr(module, attr_name)
         if not callable(factory):
-            raise AdapterResolutionError(
-                f"Adapter target '{module_path}' is not callable."
-            )
+            raise AdapterResolutionError(f"Adapter target '{module_path}' is not callable.")
         return factory
 
 

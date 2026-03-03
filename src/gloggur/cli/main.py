@@ -64,6 +64,7 @@ from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 from gloggur.watch.service import (
     DEFAULT_WATCH_FAILURE_REMEDIATION,
+    WatchService,
     is_process_running,
     load_watch_state,
     utc_now_iso,
@@ -1092,6 +1093,38 @@ def _create_metadata_store(config: GloggurConfig):
         return MetadataStore(MetadataStoreConfig(config.cache_dir))
     storage_backend = create_storage_backend(config)
     return storage_backend.create_metadata_store(config.cache_dir)
+
+
+def _create_watch_service(
+    *,
+    config: GloggurConfig,
+    embedding_provider: EmbeddingProvider | None,
+    cache: CacheManager,
+    vector_store: object,
+):
+    """Create watch service with default-class compatibility and runtime-host extension."""
+    parser_registry = ParserRegistry(
+        extension_map=config.parser_extension_map,
+        adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+    )
+    host_id = config.runtime_host()
+    host_override = config.adapter_module_override("runtime", host_id)
+    if host_id == "python_local" and not host_override:
+        return WatchService(
+            config=config,
+            embedding_provider=embedding_provider,
+            cache=cache,
+            vector_store=vector_store,
+            parser_registry=parser_registry,
+        )
+    runtime_host = create_runtime_host(config)
+    return runtime_host.build_watch_service(
+        config=config,
+        embedding_provider=embedding_provider,
+        cache=cache,
+        vector_store=vector_store,
+        parser_registry=parser_registry,
+    )
 
 
 def _create_runtime(
@@ -3510,17 +3543,11 @@ def watch_start(
         return
 
     embedding = _create_embedding_provider_for_command(config)
-    runtime_host = create_runtime_host(config)
-    parser_registry = ParserRegistry(
-        extension_map=config.parser_extension_map,
-        adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
-    )
-    service = runtime_host.build_watch_service(
+    service = _create_watch_service(
         config=config,
         embedding_provider=embedding,
         cache=cache,
         vector_store=vector_store,
-        parser_registry=parser_registry,
     )
 
     if mode == "daemon":

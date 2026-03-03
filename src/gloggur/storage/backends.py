@@ -51,8 +51,7 @@ def create_storage_backend(config: GloggurConfig) -> StorageBackend:
     backend = instantiate_adapter(factory)
     if not isinstance(backend, StorageBackend):
         if not all(
-            hasattr(backend, method)
-            for method in ("create_vector_store", "create_metadata_store")
+            hasattr(backend, method) for method in ("create_vector_store", "create_metadata_store")
         ):
             raise RuntimeError(
                 f"Storage backend '{backend_id}' is invalid ({type(backend).__name__})."
