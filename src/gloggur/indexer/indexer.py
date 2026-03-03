@@ -401,9 +401,7 @@ class Indexer:
         existing_symbols_by_id: dict[str, Symbol] = {}
         if existing:
             previous_symbols = self.cache.list_symbols_for_file(path)
-            existing_symbols_by_id = {
-                symbol.id: symbol for symbol in previous_symbols
-            }
+            existing_symbols_by_id = {symbol.id: symbol for symbol in previous_symbols}
         if existing and existing.content_hash == content_hash:
             return None, FileIndexOutcome(status="unchanged")
 
@@ -502,9 +500,7 @@ class Indexer:
         if not self.vector_store:
             return
         rollback_symbol_ids = {symbol_id for symbol_id in next_symbol_ids if symbol_id}
-        rollback_symbol_ids.update(
-            symbol.id for symbol in prepared.previous_symbols if symbol.id
-        )
+        rollback_symbol_ids.update(symbol.id for symbol in prepared.previous_symbols if symbol.id)
         if rollback_symbol_ids:
             self.vector_store.remove_ids(sorted(rollback_symbol_ids))
         if prepared.previous_symbols:
