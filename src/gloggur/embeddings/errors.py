@@ -30,7 +30,7 @@ def _provider_remediation(provider: str) -> list[str]:
     if provider == "local":
         return [
             "Install local embedding dependencies (`pip install -e '.[local]'`).",
-            "Use fallback mode only when appropriate (GLOGGUR_LOCAL_FALLBACK=1).",
+            "Ensure the local sentence-transformers model is installed and loadable.",
         ]
     return [
         "Verify embedding provider configuration values and required credentials.",

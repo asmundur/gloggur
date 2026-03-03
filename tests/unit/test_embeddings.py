@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -12,39 +11,51 @@ from gloggur.embeddings.local import LocalEmbeddingProvider
 from gloggur.embeddings.openai import OpenAIEmbeddingProvider
 
 
-def test_local_embedding_fallback_marker_enables_offline_vectors() -> None:
-    """Ensure fallback marker enables deterministic local embeddings."""
-    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    marker = Path(cache_dir) / ".local_embedding_fallback"
+def test_local_embedding_legacy_fallback_controls_are_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy fallback env/marker should not enable hash-vector behavior."""
+    marker = tmp_path / ".local_embedding_fallback"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch(exist_ok=True)
+    monkeypatch.setenv("GLOGGUR_LOCAL_FALLBACK", "1")
 
-    provider = LocalEmbeddingProvider("local", cache_dir=cache_dir)
-    vector = provider.embed_text("hello world")
-    batch = provider.embed_batch(["hello", "world"])
+    class FakeVector:
+        def __init__(self, values: list[float]) -> None:
+            self._values = values
 
-    assert len(vector) == provider.get_dimension()
-    assert provider.get_dimension() == 256
-    assert len(batch) == 2
-    assert len(batch[0]) == provider.get_dimension()
+        def tolist(self) -> list[float]:
+            return list(self._values)
+
+    class FakeModel:
+        def encode(self, texts, normalize_embeddings: bool = True):  # noqa: ANN001
+            _ = texts, normalize_embeddings
+            return [FakeVector([0.25, 0.75])]
+
+    provider = LocalEmbeddingProvider("local", cache_dir=str(tmp_path))
+    monkeypatch.setattr(provider, "_load_model", lambda: FakeModel())
+    assert provider.embed_text("hello") == [0.25, 0.75]
 
 
-def test_local_embedding_fallback_reuses_cached_token_vectors() -> None:
-    """Fallback token hashing should memoize repeated token vectors across calls."""
-    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    marker = Path(cache_dir) / ".local_embedding_fallback"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.touch(exist_ok=True)
+def test_local_embedding_requires_sentence_transformers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing sentence-transformers should be a hard local-provider failure."""
+    import builtins
 
-    provider = LocalEmbeddingProvider("local", cache_dir=cache_dir)
-    first = provider.embed_text("repeat repeat")
-    cache_size_after_first = len(provider._token_vector_cache)
-    second = provider.embed_text("repeat again")
+    original_import = builtins.__import__
 
-    assert first
-    assert second
-    assert "repeat" in provider._token_vector_cache
-    assert len(provider._token_vector_cache) == cache_size_after_first + 1
+    def fake_import(name: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name == "sentence_transformers":
+            raise ImportError("missing sentence_transformers")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    provider = LocalEmbeddingProvider("local")
+    with pytest.raises(RuntimeError, match="sentence-transformers is required"):
+        provider.embed_text("hello world")
 
 
 def test_openai_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -513,19 +524,8 @@ def test_gemini_embed_batch_falls_back_to_chunked_mode_when_large_request_fails(
     assert call_sizes == [5, 2, 2, 1]
 
 
-def test_local_embedding_fallback_vector_is_normalized(tmp_path: Path) -> None:
-    """Fallback embeddings are normalized to unit length."""
-    provider = LocalEmbeddingProvider("local", cache_dir=str(tmp_path))
-    provider._use_fallback = True
-
-    vector = provider.embed_text("Hello world")
-    assert len(vector) == provider.get_dimension()
-    assert provider.get_dimension() == 256
-    assert sum(v * v for v in vector) == pytest.approx(1.0, rel=1e-6)
-
-
-def test_local_embedding_fallback_marker_uses_fallback_cache_dir(tmp_path: Path) -> None:
-    """Fallback marker should be read from cache dir independent of model cache dir."""
+def test_local_embedding_legacy_marker_uses_fallback_cache_dir(tmp_path: Path) -> None:
+    """Legacy marker in fallback_cache_dir should not activate hash-vector behavior."""
     model_cache_dir = tmp_path / "models"
     fallback_cache_dir = tmp_path / "index-cache"
     marker = fallback_cache_dir / ".local_embedding_fallback"
@@ -537,9 +537,7 @@ def test_local_embedding_fallback_marker_uses_fallback_cache_dir(tmp_path: Path)
         cache_dir=str(model_cache_dir),
         fallback_cache_dir=str(fallback_cache_dir),
     )
-    assert provider._fallback_marker == marker
-    assert provider._use_fallback is True
-    assert provider.get_dimension() == 256
+    assert provider.fallback_cache_dir == str(fallback_cache_dir)
 
 
 def test_local_embedding_model_path(monkeypatch: pytest.MonkeyPatch) -> None:

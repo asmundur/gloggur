@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import hashlib
-import math
-import os
-import re
 from collections.abc import Iterable
-from pathlib import Path
 
 from gloggur.embeddings.base import EmbeddingProvider
 
 
 class LocalEmbeddingProvider(EmbeddingProvider):
-    """Embedding provider backed by sentence-transformers with a fallback."""
+    """Embedding provider backed by a local sentence-transformers model."""
 
     def __init__(
         self,
@@ -19,105 +14,49 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         cache_dir: str | None = None,
         fallback_cache_dir: str | None = None,
     ) -> None:
-        """Configure model artifact cache and fallback marker locations."""
+        """Configure local model loading."""
         self.provider = "local"
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.fallback_cache_dir = fallback_cache_dir
         self._model = None
-        self._fallback_dimension = 256
-        fallback_root = self.fallback_cache_dir or self.cache_dir or ".gloggur-cache"
-        self._fallback_marker = Path(fallback_root) / ".local_embedding_fallback"
-        env_flag = os.getenv("GLOGGUR_LOCAL_FALLBACK")
-        if env_flag is None:
-            self._use_fallback = self._fallback_marker.exists()
-        else:
-            self._use_fallback = env_flag.strip().lower() not in ("", "0", "false", "no", "off")
-        self._token_pattern = re.compile(r"[A-Za-z0-9_]+")
-        self._token_vector_cache: dict[str, list[float]] = {}
 
     def _load_model(self):
-        """Load the sentence-transformers model or enable fallback."""
-        if self._use_fallback:
-            return None
+        """Load the sentence-transformers model."""
         if self._model is not None:
             return self._model
         try:
             from sentence_transformers import SentenceTransformer
-        except ImportError:
-            self._enable_fallback()
-            self._model = None
-            return None
+        except ImportError as exc:
+            raise RuntimeError(
+                "sentence-transformers is required for local embeddings; "
+                "install local extras (pip install -e '.[local]')."
+            ) from exc
         try:
             self._model = SentenceTransformer(self.model_name, cache_folder=self.cache_dir)
-            return self._model
-        except Exception:
-            self._enable_fallback()
-            self._model = None
-            return None
-
-    def _enable_fallback(self) -> None:
-        """Enable deterministic fallback embeddings and persist marker."""
-        self._use_fallback = True
-        self._fallback_marker.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self._fallback_marker.touch(exist_ok=True)
-        except OSError:
-            pass
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load local embedding model '{self.model_name}' "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+        return self._model
 
     def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""
         model = self._load_model()
-        if model is None:
-            return self._tokenized_embedding(text)
         vector = model.encode([text], normalize_embeddings=True)[0]
         return vector.tolist()
 
     def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
         """Embed a batch of text strings."""
+        payload = list(texts)
+        if not payload:
+            return []
         model = self._load_model()
-        text_list = list(texts)
-        if model is None:
-            return [self._tokenized_embedding(text) for text in text_list]
-        vectors = model.encode(text_list, normalize_embeddings=True)
+        vectors = model.encode(payload, normalize_embeddings=True)
         return [vector.tolist() for vector in vectors]
 
     def get_dimension(self) -> int:
         """Return the embedding dimension."""
         model = self._load_model()
-        if model is None:
-            return self._fallback_dimension
         return model.get_sentence_embedding_dimension()
-
-    def _tokenized_embedding(self, text: str) -> list[float]:
-        """Create a deterministic embedding from token hashes."""
-        tokens = self._token_pattern.findall(text.lower())
-        if not tokens:
-            tokens = [text]
-        values = [0.0] * self._fallback_dimension
-        for token in tokens:
-            token_vector = self._token_vector_cache.get(token)
-            if token_vector is None:
-                token_vector = self._vector_from_seed(token.encode("utf8"))
-                self._token_vector_cache[token] = token_vector
-            for idx, token_value in enumerate(token_vector):
-                values[idx] += token_value
-        norm = math.sqrt(sum(v * v for v in values)) or 1.0
-        return [v / norm for v in values]
-
-    def _vector_from_seed(self, seed: bytes) -> list[float]:
-        """Generate a pseudo-random vector from a seed."""
-        values: list[float] = []
-        counter = 0
-        while len(values) < self._fallback_dimension:
-            digest = hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
-            for i in range(0, len(digest), 4):
-                if len(values) >= self._fallback_dimension:
-                    break
-                chunk = digest[i : i + 4]
-                if len(chunk) < 4:
-                    continue
-                number = int.from_bytes(chunk, "big")
-                values.append((number / 0xFFFFFFFF) * 2.0 - 1.0)
-            counter += 1
-        return values

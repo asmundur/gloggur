@@ -17,11 +17,12 @@ scripts/gloggur index . --json
 
 ## Provider Setup
 
-Local provider is the default and works offline with deterministic fallback:
+Local provider is the default and requires a working local sentence-transformers model:
 
 ```bash
 export GLOGGUR_EMBEDDING_PROVIDER=local
-export GLOGGUR_LOCAL_FALLBACK=1
+# optional override:
+export GLOGGUR_LOCAL_MODEL="microsoft/codebert-base"
 ```
 
 ### OpenAI
