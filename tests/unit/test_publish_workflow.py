@@ -46,6 +46,25 @@ def _publish_step(name: str) -> dict[str, object]:
     return step
 
 
+def test_publish_workflow_checkout_fetches_full_history_for_tags() -> None:
+    """Publish workflow should fetch tags so version resolution can inspect semantic tags."""
+    publish = _publish_job()
+    steps = publish.get("steps")
+    assert isinstance(steps, list)
+    checkout_step = next(
+        (
+            item
+            for item in steps
+            if isinstance(item, dict) and item.get("uses") == "actions/checkout@v4"
+        ),
+        None,
+    )
+    assert isinstance(checkout_step, dict)
+    with_payload = checkout_step.get("with")
+    assert isinstance(with_payload, dict)
+    assert with_payload.get("fetch-depth") == 0
+
+
 def test_publish_workflow_dispatch_version_input_is_optional_and_documented() -> None:
     """Dispatch version input should be optional and describe auto-patch behavior."""
     payload = _load_publish_workflow()
@@ -71,11 +90,16 @@ def test_publish_workflow_resolve_step_emits_expected_outputs_and_modes() -> Non
     run_script = resolve_step.get("run")
     assert isinstance(run_script, str)
     assert "active_version=" in run_script
+    assert "highest_known_version=" in run_script
     assert "version=" in run_script
     assert "resolution_mode=" in run_script
     assert "release_tag" in run_script
     assert "manual_override" in run_script
     assert "auto_patch" in run_script
+    assert "_read_pypi_released_versions" in run_script
+    assert "_read_git_tag_versions" in run_script
+    assert "pypi.org/pypi/" in run_script
+    assert "highest_known_tuple" in run_script
 
 
 def test_publish_workflow_resolve_step_enforces_strict_manual_override_order() -> None:
@@ -84,7 +108,7 @@ def test_publish_workflow_resolve_step_enforces_strict_manual_override_order() -
     run_script = resolve_step.get("run")
     assert isinstance(run_script, str)
     assert "must be strictly greater than" in run_script
-    assert "active repository version" in run_script
+    assert "highest known version" in run_script
 
 
 def test_publish_workflow_includes_resolution_summary_step() -> None:
@@ -94,5 +118,6 @@ def test_publish_workflow_includes_resolution_summary_step() -> None:
     assert isinstance(run_script, str)
     assert "GITHUB_STEP_SUMMARY" in run_script
     assert "steps.resolve_version.outputs.active_version" in run_script
+    assert "steps.resolve_version.outputs.highest_known_version" in run_script
     assert "steps.resolve_version.outputs.version" in run_script
     assert "steps.resolve_version.outputs.resolution_mode" in run_script

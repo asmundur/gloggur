@@ -19,6 +19,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -34,9 +36,15 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
         run: |
           python - <<'PY'
+          import json
           import os
           import pathlib
           import re
+          import subprocess
+          import tomllib
+          import urllib.error
+          import urllib.parse
+          import urllib.request
 
           def _parse_triplet(value: str, *, label: str) -> tuple[int, int, int]:
               match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", value)
@@ -44,16 +52,67 @@ jobs:
                   raise RuntimeError(f"{label} must use x.y.z format, got: {value!r}")
               return tuple(int(part) for part in match.groups())
 
+          def _normalize_version(raw_value: str) -> str:
+              value = raw_value.strip()
+              return value[1:] if value.startswith("v") else value
+
+          def _read_pypi_released_versions(package_name: str) -> list[str]:
+              url = f"https://pypi.org/pypi/{urllib.parse.quote(package_name, safe='')}/json"
+              try:
+                  with urllib.request.urlopen(url, timeout=20) as response:
+                      payload = json.load(response)
+              except urllib.error.URLError as exc:
+                  raise RuntimeError(
+                      f"Failed to read PyPI release metadata for package {package_name!r}: {exc}"
+                  ) from exc
+              releases = payload.get("releases")
+              if not isinstance(releases, dict):
+                  raise RuntimeError(
+                      f"PyPI response for package {package_name!r} is missing the releases map"
+                  )
+              versions: list[str] = []
+              for release_version, files in releases.items():
+                  if not isinstance(files, list) or not files:
+                      continue
+                  try:
+                      _parse_triplet(release_version, label="PyPI released version")
+                  except RuntimeError:
+                      continue
+                  versions.append(release_version)
+              return versions
+
+          def _read_git_tag_versions() -> list[str]:
+              completed = subprocess.run(
+                  ["git", "tag"],
+                  check=True,
+                  capture_output=True,
+                  text=True,
+              )
+              versions: list[str] = []
+              for raw_tag in completed.stdout.splitlines():
+                  normalized = _normalize_version(raw_tag)
+                  try:
+                      _parse_triplet(normalized, label="Git tag version")
+                  except RuntimeError:
+                      continue
+                  versions.append(normalized)
+              return versions
+
           event_name = os.environ["GITHUB_EVENT_NAME"]
           dispatch_version = os.environ.get("DISPATCH_VERSION", "").strip()
           release_tag = os.environ.get("RELEASE_TAG", "").strip()
 
           pyproject = pathlib.Path("pyproject.toml")
-          pyproject_text = pyproject.read_text(encoding="utf-8")
-          pyproject_match = re.search(r'(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"$', pyproject_text)
-          if pyproject_match is None:
-              raise RuntimeError("Failed to read active version from pyproject.toml")
-          active_pyproject_version = pyproject_match.group(1)
+          pyproject_payload = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+          project_payload = pyproject_payload.get("project")
+          if not isinstance(project_payload, dict):
+              raise RuntimeError("pyproject.toml is missing the [project] section")
+          package_name = project_payload.get("name")
+          if not isinstance(package_name, str) or not package_name.strip():
+              raise RuntimeError("Failed to read package name from pyproject.toml [project].name")
+          active_pyproject_version = project_payload.get("version")
+          if not isinstance(active_pyproject_version, str) or not active_pyproject_version.strip():
+              raise RuntimeError("Failed to read active version from pyproject.toml [project].version")
 
           package_init = pathlib.Path("src/gloggur/__init__.py")
           package_init_text = package_init.read_text(encoding="utf-8")
@@ -70,51 +129,73 @@ jobs:
 
           active_version = active_pyproject_version
           active_tuple = _parse_triplet(active_version, label="Active repository version")
+          tag_versions = _read_git_tag_versions()
+          pypi_versions = _read_pypi_released_versions(package_name)
+
+          known_versions: dict[str, tuple[int, int, int]] = {
+              active_version: active_tuple,
+          }
+          for tag_version in tag_versions:
+              known_versions.setdefault(
+                  tag_version,
+                  _parse_triplet(tag_version, label="Git tag version"),
+              )
+          for pypi_version in pypi_versions:
+              known_versions.setdefault(
+                  pypi_version,
+                  _parse_triplet(pypi_version, label="PyPI released version"),
+              )
+
+          highest_known_version, highest_known_tuple = max(
+              known_versions.items(),
+              key=lambda item: item[1],
+          )
           resolved_version: str
           resolution_mode: str
 
           if event_name == "release":
-              raw_version = release_tag
-              resolved_version = raw_version[1:] if raw_version.startswith("v") else raw_version
+              resolved_version = _normalize_version(release_tag)
               _parse_triplet(resolved_version, label="Release tag version")
               resolution_mode = "release_tag"
           elif dispatch_version:
-              raw_version = dispatch_version
-              resolved_version = raw_version[1:] if raw_version.startswith("v") else raw_version
+              resolved_version = _normalize_version(dispatch_version)
               resolved_tuple = _parse_triplet(
                   resolved_version,
                   label="workflow_dispatch version override",
               )
-              if resolved_tuple <= active_tuple:
+              if resolved_tuple <= highest_known_tuple:
                   raise RuntimeError(
                       "workflow_dispatch version override must be strictly greater than "
-                      f"active repository version {active_version}; got {resolved_version}"
+                      f"highest known version {highest_known_version}; got {resolved_version}"
                   )
               resolution_mode = "manual_override"
           else:
-              major, minor, patch = active_tuple
+              major, minor, patch = highest_known_tuple
               resolved_version = f"{major}.{minor}.{patch + 1}"
               resolution_mode = "auto_patch"
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output_file:
               output_file.write(f"active_version={active_version}\n")
+              output_file.write(f"highest_known_version={highest_known_version}\n")
               output_file.write(f"version={resolved_version}\n")
               output_file.write(f"resolution_mode={resolution_mode}\n")
 
           print(
               f"Resolved package version: {resolved_version} "
-              f"(mode={resolution_mode}, active={active_version})"
+              f"(mode={resolution_mode}, active={active_version}, highest_known={highest_known_version})"
           )
           PY
       - name: Show publish version resolution
         run: |
           echo "Active repo version: ${{ steps.resolve_version.outputs.active_version }}"
+          echo "Highest known version: ${{ steps.resolve_version.outputs.highest_known_version }}"
           echo "Resolved publish version: ${{ steps.resolve_version.outputs.version }}"
           echo "Resolution mode: ${{ steps.resolve_version.outputs.resolution_mode }}"
           {
             echo "### Publish Version Resolution"
             echo ""
             echo "- Active repo version: \`${{ steps.resolve_version.outputs.active_version }}\`"
+            echo "- Highest known version: \`${{ steps.resolve_version.outputs.highest_known_version }}\`"
             echo "- Resolved publish version: \`${{ steps.resolve_version.outputs.version }}\`"
             echo "- Resolution mode: \`${{ steps.resolve_version.outputs.resolution_mode }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
