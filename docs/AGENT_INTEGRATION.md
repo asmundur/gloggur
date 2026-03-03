@@ -49,6 +49,12 @@ scripts/gloggur <command> --json
 When `bd setup codex` is installed, the global `gloggur` launcher also works from
 external repositories by delegating to repo `scripts/gloggur` while preserving the
 caller working directory.
+Bootstrap refreshes that global launcher by default, replacing stale legacy
+wrappers that fail with "run inside a gloggur git worktree".
+
+For in-repo automation, verification harnesses, and benchmark runs, always prefer
+repo-local invocations (`scripts/gloggur ...` or `python -m gloggur.cli.main ...`)
+instead of depending on ambient `PATH` launcher state.
 
 `scripts/gloggur` preflight behavior:
 - use repo `.venv` when healthy

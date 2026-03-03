@@ -138,6 +138,25 @@ esac
     return log_file, state_file
 
 
+def _write_legacy_global_wrapper(wrapper_path: Path) -> None:
+    wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+    wrapper_path.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "${REPO_ROOT}" ] || [ ! -x "${REPO_ROOT}/scripts/gloggur" ]; then
+  echo "gloggur wrapper: run inside a gloggur git worktree." >&2
+  exit 1
+fi
+
+exec "${REPO_ROOT}/scripts/gloggur" "$@"
+""",
+        encoding="utf8",
+    )
+    wrapper_path.chmod(0o755)
+
+
 def test_bootstrap_can_seed_cache_via_symlink(tmp_path: Path) -> None:
     repo_root, script_path = _prepare_temp_repo(tmp_path)
     source_workspace = _prepare_seed_source(tmp_path)
@@ -351,3 +370,118 @@ def test_bootstrap_fails_when_startup_watch_payload_is_contradictory(tmp_path: P
     assert "startup_watch_state_contradictory" in completed.stderr or "startup_watch_payload_invalid" in completed.stderr
     invocations = log_file.read_text(encoding="utf8").splitlines()
     assert invocations == ["status --json", "status --json", "watch status --json"]
+
+
+def test_bootstrap_rewrites_stale_global_wrapper(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    log_file, state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    home_dir = tmp_path / "home"
+    wrapper_path = home_dir / ".local" / "bin" / "gloggur"
+    _write_legacy_global_wrapper(wrapper_path)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+    env["GLOGGUR_BOOTSTRAP_GLOBAL_LINK_DIRS"] = ""
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    rewritten = wrapper_path.read_text(encoding="utf8")
+    assert "run inside a gloggur git worktree" not in rewritten
+    assert 'INSTALL_ROOT="${GLOGGUR_INSTALL_ROOT:-$DEFAULT_INSTALL_ROOT}"' in rewritten
+    assert f'DEFAULT_INSTALL_ROOT="{repo_root}"' in rewritten
+    assert '"error_code": "wrapper_launch_target_missing"' in rewritten
+    assert "Global wrapper: installed:" in completed.stdout
+
+
+def test_rewritten_global_wrapper_runs_from_external_cwd(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    log_file, state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    home_dir = tmp_path / "home"
+    wrapper_path = home_dir / ".local" / "bin" / "gloggur"
+    _write_legacy_global_wrapper(wrapper_path)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+    env["GLOGGUR_BOOTSTRAP_GLOBAL_LINK_DIRS"] = ""
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    external_cwd = tmp_path / "outside"
+    external_cwd.mkdir()
+    status = subprocess.run(
+        [str(wrapper_path), "status", "--json"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=str(external_cwd),
+        check=False,
+    )
+
+    assert status.returncode == 0, status.stderr
+    payload = json.loads(status.stdout)
+    assert isinstance(payload.get("needs_reindex"), bool)
+    assert "run inside a gloggur git worktree" not in status.stderr
+
+
+def test_bootstrap_allows_disabling_global_wrapper_refresh(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    log_file, state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    home_dir = tmp_path / "home"
+    wrapper_path = home_dir / ".local" / "bin" / "gloggur"
+    _write_legacy_global_wrapper(wrapper_path)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(state_file)
+    env["GLOGGUR_BOOTSTRAP_INSTALL_GLOBAL_WRAPPER"] = "0"
+    env["GLOGGUR_BOOTSTRAP_GLOBAL_LINK_DIRS"] = ""
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Global wrapper: skipped:disabled" in completed.stdout
+    assert "run inside a gloggur git worktree" in wrapper_path.read_text(encoding="utf8")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from scripts.run_edge_bench import BenchmarkMetric, _apply_baseline_contract
+import sys
+
+from scripts.run_edge_bench import BenchmarkMetric, _apply_baseline_contract, _new_runner
 
 
 def test_apply_baseline_contract_adds_thresholds_and_comparisons() -> None:
@@ -64,3 +66,8 @@ def test_apply_baseline_contract_emits_warning_when_threshold_exceeded() -> None
     warnings = payload.get("warnings")
     assert isinstance(warnings, list)
     assert len(warnings) == 4
+
+
+def test_benchmark_runner_uses_repo_local_cli_invocation() -> None:
+    runner = _new_runner("/tmp/gloggur-cache-test")
+    assert runner.base_cmd == [sys.executable, "-m", "gloggur.cli.main"]

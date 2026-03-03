@@ -67,6 +67,9 @@ the watch runtime state is contradictory (`startup_status_probe_failed`,
 `bd setup codex` also installs a global `gloggur` launcher on `PATH` that delegates
 to repo `scripts/gloggur` and preserves the caller working directory so external
 repos can run `gloggur` directly.
+Running `scripts/bootstrap_gloggur_env.sh` now refreshes that global launcher by
+default and replaces stale legacy wrappers that required running inside a gloggur
+git worktree.
 
 Optional fast cache hydration from another workspace:
 
@@ -641,6 +644,10 @@ scripts/bootstrap_gloggur_env.sh
 scripts/gloggur status --json
 .venv/bin/pytest
 ```
+
+For automation, CI harnesses, and benchmark runners in this repository, prefer
+repo-local invocations (`scripts/gloggur ...` or `python -m gloggur.cli.main ...`)
+instead of relying on ambient `PATH` launcher state.
 
 If `bd setup codex` has already installed the global wrapper, you can run:
 

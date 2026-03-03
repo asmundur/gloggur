@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version to publish (for example: 0.1.1)"
-        required: true
+        description: "Optional override (x.y.z). Leave blank to auto-bump patch from active repo version."
+        required: false
         type: string
 
 jobs:
@@ -29,19 +29,95 @@ jobs:
           python -m pip install build
       - name: Resolve package version
         id: resolve_version
-        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version || '' }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || '' }}
         run: |
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            raw_version="${{ github.event.release.tag_name }}"
-          else
-            raw_version="${{ inputs.version }}"
-          fi
-          version="${raw_version#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-]?[0-9A-Za-z]+)*$ ]]; then
-            echo "Invalid version: $raw_version"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          def _parse_triplet(value: str, *, label: str) -> tuple[int, int, int]:
+              match = re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", value)
+              if match is None:
+                  raise RuntimeError(f"{label} must use x.y.z format, got: {value!r}")
+              return tuple(int(part) for part in match.groups())
+
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          dispatch_version = os.environ.get("DISPATCH_VERSION", "").strip()
+          release_tag = os.environ.get("RELEASE_TAG", "").strip()
+
+          pyproject = pathlib.Path("pyproject.toml")
+          pyproject_text = pyproject.read_text(encoding="utf-8")
+          pyproject_match = re.search(r'(?m)^version = "([0-9]+\.[0-9]+\.[0-9]+)"$', pyproject_text)
+          if pyproject_match is None:
+              raise RuntimeError("Failed to read active version from pyproject.toml")
+          active_pyproject_version = pyproject_match.group(1)
+
+          package_init = pathlib.Path("src/gloggur/__init__.py")
+          package_init_text = package_init.read_text(encoding="utf-8")
+          init_match = re.search(r'(?m)^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$', package_init_text)
+          if init_match is None:
+              raise RuntimeError("Failed to read active __version__ from src/gloggur/__init__.py")
+          active_init_version = init_match.group(1)
+
+          if active_pyproject_version != active_init_version:
+              raise RuntimeError(
+                  "Active version mismatch between pyproject.toml "
+                  f"({active_pyproject_version}) and src/gloggur/__init__.py ({active_init_version})"
+              )
+
+          active_version = active_pyproject_version
+          active_tuple = _parse_triplet(active_version, label="Active repository version")
+          resolved_version: str
+          resolution_mode: str
+
+          if event_name == "release":
+              raw_version = release_tag
+              resolved_version = raw_version[1:] if raw_version.startswith("v") else raw_version
+              _parse_triplet(resolved_version, label="Release tag version")
+              resolution_mode = "release_tag"
+          elif dispatch_version:
+              raw_version = dispatch_version
+              resolved_version = raw_version[1:] if raw_version.startswith("v") else raw_version
+              resolved_tuple = _parse_triplet(
+                  resolved_version,
+                  label="workflow_dispatch version override",
+              )
+              if resolved_tuple <= active_tuple:
+                  raise RuntimeError(
+                      "workflow_dispatch version override must be strictly greater than "
+                      f"active repository version {active_version}; got {resolved_version}"
+                  )
+              resolution_mode = "manual_override"
+          else:
+              major, minor, patch = active_tuple
+              resolved_version = f"{major}.{minor}.{patch + 1}"
+              resolution_mode = "auto_patch"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output_file:
+              output_file.write(f"active_version={active_version}\n")
+              output_file.write(f"version={resolved_version}\n")
+              output_file.write(f"resolution_mode={resolution_mode}\n")
+
+          print(
+              f"Resolved package version: {resolved_version} "
+              f"(mode={resolution_mode}, active={active_version})"
+          )
+          PY
+      - name: Show publish version resolution
+        run: |
+          echo "Active repo version: ${{ steps.resolve_version.outputs.active_version }}"
+          echo "Resolved publish version: ${{ steps.resolve_version.outputs.version }}"
+          echo "Resolution mode: ${{ steps.resolve_version.outputs.resolution_mode }}"
+          {
+            echo "### Publish Version Resolution"
+            echo ""
+            echo "- Active repo version: \`${{ steps.resolve_version.outputs.active_version }}\`"
+            echo "- Resolved publish version: \`${{ steps.resolve_version.outputs.version }}\`"
+            echo "- Resolution mode: \`${{ steps.resolve_version.outputs.resolution_mode }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Set package version
         env:
           PACKAGE_VERSION: ${{ steps.resolve_version.outputs.version }}

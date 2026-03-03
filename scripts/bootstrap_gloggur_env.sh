@@ -18,7 +18,15 @@ SEED_CACHE_DIR=""
 SEED_CACHE_RESULT="not_requested"
 INSTALL_RESULT="not_run"
 INDEX_FRESHNESS_RESULT="not_checked"
+INSTALL_GLOBAL_WRAPPER="${GLOGGUR_BOOTSTRAP_INSTALL_GLOBAL_WRAPPER:-1}"
+GLOBAL_BIN_DIR="${GLOGGUR_BOOTSTRAP_GLOBAL_BIN_DIR:-}"
+GLOBAL_LINK_DIRS="${GLOGGUR_BOOTSTRAP_GLOBAL_LINK_DIRS:-/opt/homebrew/bin:/usr/local/bin}"
+GLOBAL_WRAPPER_RESULT="not_checked"
 PYTHON_BIN=""
+
+if [[ -z "$GLOBAL_BIN_DIR" && -n "${HOME:-}" ]]; then
+  GLOBAL_BIN_DIR="${HOME}/.local/bin"
+fi
 
 is_truthy() {
   local value="${1:-}"
@@ -227,6 +235,125 @@ ensure_startup_readiness() {
   fi
 }
 
+install_global_wrapper() {
+  if ! is_truthy "$INSTALL_GLOBAL_WRAPPER"; then
+    GLOBAL_WRAPPER_RESULT="skipped:disabled"
+    return 0
+  fi
+
+  if [[ -z "$GLOBAL_BIN_DIR" ]]; then
+    GLOBAL_WRAPPER_RESULT="skipped:missing_home"
+    return 0
+  fi
+
+  if ! mkdir -p "$GLOBAL_BIN_DIR"; then
+    GLOBAL_WRAPPER_RESULT="failed:bin_dir_unwritable:${GLOBAL_BIN_DIR}"
+    return 0
+  fi
+
+  local wrapper_path="${GLOBAL_BIN_DIR}/gloggur"
+  if ! cat > "$wrapper_path" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+is_json=0
+for arg in "$@"; do
+  if [[ "$arg" == "--json" ]]; then
+    is_json=1
+    break
+  fi
+done
+
+emit_launch_target_missing() {
+  local install_root="$1"
+  local launcher_path="$2"
+  if [[ $is_json -eq 1 ]]; then
+    printf '{\n'
+    printf '  "operation": "wrapper",\n'
+    printf '  "error": true,\n'
+    printf '  "error_code": "wrapper_launch_target_missing",\n'
+    printf '  "message": "Unable to locate executable scripts/gloggur launcher from install root.",\n'
+    printf '  "remediation": [\n'
+    printf '    "Set GLOGGUR_INSTALL_ROOT to a gloggur checkout with scripts/gloggur.",\n'
+    printf '    "Run scripts/bootstrap_gloggur_env.sh in that checkout to repair local tooling."\n'
+    printf '  ],\n'
+    printf '  "detected_environment": {\n'
+    printf '    "cwd": "%s",\n' "$(pwd -P)"
+    printf '    "install_root": "%s",\n' "$install_root"
+    printf '    "launcher_path": "%s"\n' "$launcher_path"
+    printf '  }\n'
+    printf '}\n'
+  else
+    echo "gloggur wrapper failed (wrapper_launch_target_missing): launcher not found at ${launcher_path}" >&2
+    echo "Set GLOGGUR_INSTALL_ROOT to a gloggur checkout and rerun scripts/bootstrap_gloggur_env.sh." >&2
+  fi
+}
+
+DEFAULT_INSTALL_ROOT="__GLOGGUR_INSTALL_ROOT__"
+INSTALL_ROOT="${GLOGGUR_INSTALL_ROOT:-$DEFAULT_INSTALL_ROOT}"
+LAUNCHER="${INSTALL_ROOT}/scripts/gloggur"
+if [[ ! -x "$LAUNCHER" ]]; then
+  emit_launch_target_missing "$INSTALL_ROOT" "$LAUNCHER"
+  exit 1
+fi
+
+SHARED_VENV="${INSTALL_ROOT}/.venv"
+if [[ -x "${SHARED_VENV}/bin/python" ]]; then
+  export GLOGGUR_PREFLIGHT_VENV_PYTHON="${SHARED_VENV}/bin/python"
+fi
+
+export GLOGGUR_RUN_FROM_CALLER_CWD=1
+exec "$LAUNCHER" "$@"
+SH
+  then
+    GLOBAL_WRAPPER_RESULT="failed:wrapper_unwritable:${wrapper_path}"
+    return 0
+  fi
+
+  if ! "${VENV_DIR}/bin/python" - "$wrapper_path" "$REPO_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+wrapper_path = Path(sys.argv[1])
+repo_root = sys.argv[2]
+content = wrapper_path.read_text(encoding="utf8")
+wrapper_path.write_text(content.replace("__GLOGGUR_INSTALL_ROOT__", repo_root), encoding="utf8")
+PY
+  then
+    GLOBAL_WRAPPER_RESULT="failed:placeholder_substitution:${wrapper_path}"
+    return 0
+  fi
+
+  if ! chmod +x "$wrapper_path"; then
+    GLOBAL_WRAPPER_RESULT="failed:chmod:${wrapper_path}"
+    return 0
+  fi
+
+  local linked_path=""
+  local candidate=""
+  local IFS=':'
+  for candidate in $GLOBAL_LINK_DIRS; do
+    if [[ -z "$candidate" ]]; then
+      continue
+    fi
+    if [[ -d "$candidate" && -w "$candidate" ]]; then
+      if ln -sfn "$wrapper_path" "$candidate/gloggur"; then
+        linked_path="${candidate}/gloggur"
+      else
+        GLOBAL_WRAPPER_RESULT="installed:${wrapper_path};link_failed:${candidate}/gloggur"
+        return 0
+      fi
+      break
+    fi
+  done
+
+  if [[ -n "$linked_path" ]]; then
+    GLOBAL_WRAPPER_RESULT="installed:${wrapper_path};linked:${linked_path}"
+  else
+    GLOBAL_WRAPPER_RESULT="installed:${wrapper_path};linked:none"
+  fi
+}
+
 detect_python() {
   if [[ -n "$PYTHON_BIN" ]]; then
     return 0
@@ -347,6 +474,7 @@ else
   INSTALL_RESULT="installed:${INSTALL_SPEC}"
 fi
 
+install_global_wrapper
 seed_cache_if_requested
 ensure_index_is_current
 ensure_startup_readiness
@@ -356,6 +484,7 @@ Bootstrap complete.
 - Interpreter: ${VENV_DIR}/bin/python
 - Venv seed: ${SEED_VENV_RESULT}
 - Install step: ${INSTALL_RESULT}
+- Global wrapper: ${GLOBAL_WRAPPER_RESULT}
 - Cache seed: ${SEED_CACHE_RESULT}
 - Index freshness: ${INDEX_FRESHNESS_RESULT}
 
