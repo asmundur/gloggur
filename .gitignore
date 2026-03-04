@@ -25,3 +25,5 @@ verification_report.json
 .idea/
 .DS_Store
 coverage.xml
+.gloggur/logs/
+.gloggur

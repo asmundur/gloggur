@@ -1296,10 +1296,16 @@ def _create_cache_manager(cache_dir: str) -> CacheManager:
 def _is_transient_status_race_error(error: StorageIOError) -> bool:
     """Return True when status hit a transient table-missing race during concurrent recovery."""
     detail = error.detail.lower()
-    if error.operation == "execute cache database transaction" and (
-        "no such table" in detail or "database schema has changed" in detail
-    ):
-        return True
+    if error.operation == "execute cache database transaction":
+        status_recovery_tokens = (
+            "no such table",
+            "database schema has changed",
+            "file is not a database",
+            "database disk image is malformed",
+            "database corrupted",
+        )
+        if any(token in detail for token in status_recovery_tokens):
+            return True
     if error.operation == "configure cache database pragmas":
         return True
     return False

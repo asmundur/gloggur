@@ -1341,6 +1341,10 @@ def test_status_retries_transient_no_such_table_race_once(
     ("operation", "detail"),
     [
         ("execute cache database transaction", "OperationalError: no such table: metadata"),
+        (
+            "execute cache database transaction",
+            "DatabaseError: database disk image is malformed",
+        ),
         ("configure cache database pragmas", "DatabaseError: file is not a database"),
     ],
 )
