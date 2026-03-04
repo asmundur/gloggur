@@ -469,9 +469,13 @@ def _benchmark_search_latency(repo_path: Path) -> Tuple[TestCaseResult, Benchmar
             )
         timings: List[int] = []
         for query in queries:
-            output = runner.run_search(query, top_k=5)
-            metadata = output.get("metadata", {})
-            timing = int(metadata.get("search_time_ms", 0))
+            output = runner.run_search(query, top_k=5, debug_router=True)
+            debug_payload = output.get("debug", {})
+            timing = 0
+            if isinstance(debug_payload, dict):
+                timings_payload = debug_payload.get("timings", {})
+                if isinstance(timings_payload, dict):
+                    timing = int(timings_payload.get("total_ms", 0))
             timings.append(timing)
         avg_ms = sum(timings) / len(timings)
         return (

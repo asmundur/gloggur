@@ -160,10 +160,10 @@ def _run_stage(
             stage_payload["failure_code"] = f"{stage.failure_code}_contract_invalid"
 
     if stage.name == "search" and completed.returncode == 0:
-        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        if not isinstance(payload, dict) or not isinstance(payload.get("hits"), list):
             stage_payload["ok"] = False
             stage_payload["failure_code"] = f"{stage.failure_code}_contract_invalid"
-        elif len(payload["results"]) == 0:
+        elif len(payload["hits"]) == 0:
             stage_payload["ok"] = False
             stage_payload["failure_code"] = f"{stage.failure_code}_no_results"
 

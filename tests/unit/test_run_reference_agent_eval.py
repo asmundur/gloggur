@@ -14,15 +14,22 @@ def test_execute_reference_loop_retries_once_then_succeeds() -> None:
         calls.append((query, top_k))
         if len(calls) == 1:
             return {
-                "results": [],
-                "validation": {
-                    "passed": False,
-                    "reason_code": "grounding_evidence_missing",
-                },
+                "schema_version": 2,
+                "summary": {"strategy": "hybrid", "reason": "hits_missing"},
+                "hits": [],
             }
         return {
-            "results": [{"symbol": "add_numbers", "symbol_id": "math_ops.py:1:add_numbers"}],
-            "validation": {"passed": True, "reason_code": "grounding_sufficient"},
+            "schema_version": 2,
+            "summary": {"strategy": "exact", "reason": "hits_present"},
+            "hits": [
+                {
+                    "path": "math_ops.py",
+                    "span": {"start_line": 1, "end_line": 1},
+                    "snippet": "def add_numbers(a: int, b: int) -> int:",
+                    "score": 0.9,
+                    "tags": ["literal_match"],
+                }
+            ],
         }
 
     result = execute_reference_loop(
@@ -40,17 +47,16 @@ def test_execute_reference_loop_retries_once_then_succeeds() -> None:
     assert calls[0] == ("add numbers token", 2)
     assert calls[1][1] == 4
     assert result.top_symbol == "add_numbers"
+    assert result.top_symbol_id == "math_ops.py:1"
     assert [entry["step"] for entry in result.logs].count("decide") == 2
 
 
 def test_execute_reference_loop_fails_closed_after_retry_budget_exhausted() -> None:
     def search_json(_query: str, _top_k: int) -> dict[str, object]:
         return {
-            "results": [],
-            "validation": {
-                "passed": False,
-                "reason_code": "grounding_evidence_missing",
-            },
+            "schema_version": 2,
+            "summary": {"strategy": "hybrid", "reason": "hits_missing"},
+            "hits": [],
         }
 
     result = execute_reference_loop(
@@ -88,7 +94,7 @@ def test_execute_reference_loop_fails_on_timeout_exception() -> None:
 
 def test_execute_reference_loop_fails_on_invalid_payload_schema() -> None:
     def search_json(_query: str, _top_k: int) -> dict[str, object]:
-        return {"results": []}
+        return {"schema_version": 2, "summary": {"strategy": "exact"}}
 
     result = execute_reference_loop(
         query="token",

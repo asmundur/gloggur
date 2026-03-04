@@ -27,9 +27,19 @@ def test_command_runner_status_json() -> None:
 def test_checks_schema_and_scores() -> None:
     """Check schema and similarity score ranges."""
     output = {
+        "schema_version": 2,
         "query": "hello",
-        "results": [{"similarity_score": 0.5}],
-        "metadata": {"total_results": 1, "search_time_ms": 10},
+        "summary": {"strategy": "exact", "reason": "test", "hits": 1},
+        "hits": [
+            {
+                "path": "src/example.py",
+                "span": {"start_line": 1, "end_line": 1},
+                "snippet": "def hello() -> str:",
+                "score": 0.5,
+                "tags": ["literal_match"],
+            }
+        ],
+        "debug": {"timings": {"total_ms": 10}},
     }
     result = Checks.check_search_output(output)
     assert result.ok, result.message

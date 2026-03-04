@@ -11,6 +11,7 @@ from gloggur.cli.main import cli
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.search import attach_legacy_search_contract
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 from gloggur.watch.service import WatchService
 from scripts.verification.fixtures import TestFixtures
@@ -20,7 +21,10 @@ def _parse_json_output(output: str) -> dict[str, object]:
     start = output.find("{")
     if start == -1:
         raise ValueError(f"No JSON object found in output: {output!r}")
-    return json.loads(output[start:])
+    payload = json.loads(output[start:])
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
+    return payload
 
 
 def _invoke_json(runner: CliRunner, args: list[str], env: dict[str, str]) -> dict[str, object]:

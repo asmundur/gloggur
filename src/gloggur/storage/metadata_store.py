@@ -94,6 +94,27 @@ class MetadataStore:
             rows = conn.execute("SELECT * FROM symbols ORDER BY file_path, start_line").fetchall()
             return [self._row_to_symbol(row) for row in rows]
 
+    def sample_symbol_file_paths(self, *, limit: int = 64) -> list[str]:
+        """Return a bounded deterministic set of symbol file paths."""
+        safe_limit = max(1, int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT file_path
+                FROM symbols
+                WHERE file_path IS NOT NULL AND file_path != ''
+                ORDER BY file_path
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        paths: list[str] = []
+        for row in rows:
+            value = row["file_path"]
+            if isinstance(value, str) and value.strip():
+                paths.append(value)
+        return paths
+
     def list_chunks(self) -> list[SymbolChunk]:
         """List all symbol chunks in deterministic order."""
         with self._connect() as conn:

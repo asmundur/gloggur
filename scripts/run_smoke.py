@@ -81,7 +81,7 @@ STAGE_SPECS: List[StageSpec] = [
     StageSpec(
         name="search",
         failure_code="smoke_search_failed",
-        remediation="Run `gloggur search <query> --json` and verify retrieval metadata/results.",
+        remediation="Run `gloggur search <query> --json` and verify ContextPack v2 `summary` + `hits`.",
     ),
     StageSpec(
         name="inspect",
@@ -487,7 +487,7 @@ class SmokeHarness:
             ["search", self._updated_phrase, "--json", "--top-k", "5"],
             spec=spec,
         )
-        results = payload.get("results")
+        results = payload.get("hits")
         if not isinstance(results, list) or not results:
             raise StageFailure(
                 code=spec.failure_code,
@@ -496,25 +496,25 @@ class SmokeHarness:
                 context={"payload": payload},
             )
         expected_file = str(self.repo_dir / self._watch_target)
-        if not any(str(item.get("file", "")) == expected_file for item in results if isinstance(item, dict)):
+        if not any(str(item.get("path", "")) == expected_file for item in results if isinstance(item, dict)):
             raise StageFailure(
                 code=spec.failure_code,
                 remediation=spec.remediation,
                 detail="Search results do not include the smoke fixture file.",
                 context={"expected_file": expected_file, "payload": payload},
             )
-        metadata = payload.get("metadata", {})
-        if isinstance(metadata, dict) and metadata.get("needs_reindex") is True:
+        summary = payload.get("summary", {})
+        if isinstance(summary, dict) and summary.get("needs_reindex") is True:
             raise StageFailure(
                 code=spec.failure_code,
                 remediation=spec.remediation,
                 detail="Search metadata reported needs_reindex=true.",
-                context={"metadata": metadata},
+                context={"summary": summary},
             )
         return {
             "query": self._updated_phrase,
             "total_results": len(results),
-            "top_file": str(results[0].get("file", "")) if isinstance(results[0], dict) else "",
+            "top_file": str(results[0].get("path", "")) if isinstance(results[0], dict) else "",
         }
 
     def _stage_inspect(self, spec: StageSpec) -> Dict[str, object]:

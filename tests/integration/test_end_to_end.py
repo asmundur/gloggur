@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from gloggur.search import attach_legacy_search_contract
 from scripts.verification.fixtures import TestFixtures
 
 pytest.importorskip("faiss")
@@ -32,7 +33,10 @@ def _run_cli(args: list[str], env: dict[str, str]) -> dict[str, object]:
         text=True,
         env=env,
     )
-    return json.loads(completed.stdout)
+    payload = json.loads(completed.stdout)
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
+    return payload
 
 
 def test_end_to_end_index_and_search() -> None:
@@ -49,4 +53,6 @@ def test_end_to_end_index_and_search() -> None:
         assert index_payload["indexed_symbols"] > 0
 
         search_payload = _run_cli(["search", "add", "--json", "--top-k", "3"], env=env)
-        assert search_payload["metadata"]["total_results"] > 0
+        hits = search_payload.get("hits")
+        assert isinstance(hits, list)
+        assert len(hits) > 0

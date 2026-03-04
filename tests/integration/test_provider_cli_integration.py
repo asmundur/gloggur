@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from gloggur.cli.main import cli
+from gloggur.search import attach_legacy_search_contract
 from scripts.verification.fixtures import TestFixtures
 
 
@@ -17,6 +18,8 @@ def _parse_json_output(output: str) -> dict[str, object]:
         raise ValueError(f"No JSON object found in output: {output!r}")
     decoder = json.JSONDecoder()
     payload, _ = decoder.raw_decode(output[start:])
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
     return payload
 
 

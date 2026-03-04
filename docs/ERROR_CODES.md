@@ -88,9 +88,34 @@ Fields:
   - Operator action: disable `--stream` or disable evidence/grounding extras.
 - `search_result_payload_invalid`
   - Command(s): `search`.
-  - Meaning: search backend returned malformed JSON contract data.
+  - Meaning: search backend returned malformed ContextPack v2 contract data.
   - Retryability: retry only after fixing the implementation/backend.
   - Operator action: inspect the malformed payload source and repair the contract.
+- `search_contract_v1_removed`
+  - Command(s): `search`.
+  - Meaning: deprecated v1-only search options or parsing assumptions were used after ContextPack v2 cutover.
+  - Retryability: retry after migrating to v2 schema/options.
+  - Operator action: parse `schema_version=2` payload fields (`summary`, `hits`) and remove v1-only flags.
+- `search_router_backends_failed`
+  - Command(s): `search`.
+  - Meaning: all enabled router backends failed to produce usable evidence.
+  - Retryability: retry after adjusting mode/budget or fixing backend runtime conditions.
+  - Operator action: rerun with `--mode exact` or `--debug-router` and inspect backend errors.
+- `search_max_files_invalid`
+  - Command(s): `search`.
+  - Meaning: `--max-files` is less than 1.
+  - Retryability: retry after fixing option.
+  - Operator action: set `--max-files >= 1`.
+- `search_max_snippets_invalid`
+  - Command(s): `search`.
+  - Meaning: `--max-snippets` is less than 1.
+  - Retryability: retry after fixing option.
+  - Operator action: set `--max-snippets >= 1`.
+- `search_time_budget_invalid`
+  - Command(s): `search`.
+  - Meaning: `--time-budget-ms` is less than 1.
+  - Retryability: retry after fixing option.
+  - Operator action: set `--time-budget-ms >= 1`.
 - `search_evidence_trace_invalid`
   - Command(s): `search`.
   - Meaning: generated evidence-trace payload is malformed or incomplete.

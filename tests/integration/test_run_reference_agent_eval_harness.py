@@ -34,6 +34,7 @@ def test_reference_agent_run_mode_passes_end_to_end() -> None:
     assert int(result["attempts_used"]) >= 1
     assert isinstance(result["logs"], list) and result["logs"]
     assert result["top_symbol"] == "add_numbers"
+    assert isinstance(result.get("top_symbol_id"), str)
 
 
 def test_reference_agent_eval_fails_nonzero_below_threshold() -> None:
@@ -48,7 +49,7 @@ def test_reference_agent_eval_fails_nonzero_below_threshold() -> None:
             "--evidence-min-items",
             "2",
             "--min-pass-rate",
-            "0.5",
+            "0.6",
         ]
     )
     assert completed.returncode == 1, f"{completed.stderr}\n{completed.stdout}"
@@ -57,7 +58,7 @@ def test_reference_agent_eval_fails_nonzero_below_threshold() -> None:
     assert payload["mode"] == "eval"
     assert payload["ok"] is False
     summary = payload["summary"]
-    assert summary["required_pass_rate"] == 0.5
+    assert summary["required_pass_rate"] == 0.6
     assert float(summary["pass_rate"]) < float(summary["required_pass_rate"])
     failure = payload["failure"]
     assert failure["code"] == "agent_eval_threshold_failed"

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from gloggur.search import attach_legacy_search_contract
+
 
 def _write_fallback_marker(cache_dir: Path) -> None:
     marker = cache_dir / ".local_embedding_fallback"
@@ -20,7 +22,10 @@ def _parse_json_payload(output: str) -> dict[str, object]:
     start = output.find("{")
     if start == -1:
         raise ValueError(f"No JSON payload found in output: {output!r}")
-    return json.loads(output[start:])
+    payload = json.loads(output[start:])
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
+    return payload
 
 
 def _run_cli(
@@ -99,7 +104,9 @@ def test_corruption_recovery_commands_work_in_simulated_no_faiss_runtime(
     if command == "status":
         assert "needs_reindex" in payload
     elif command == "search":
-        assert "metadata" in payload
+        assert payload.get("schema_version") == 2
+        assert "summary" in payload
+        assert "hits" in payload
     elif command == "inspect":
         assert "reports_total" in payload
     elif command == "clear-cache":

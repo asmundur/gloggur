@@ -76,7 +76,7 @@ def _check_search_output(output: Dict[str, object]) -> Optional[Tuple[str, Dict[
     schema = Checks.check_search_output(output)
     if not schema.ok:
         return schema.message, schema.details or {}
-    results = output.get("results", [])
+    results = output.get("hits", [])
     if not results:
         return "Search returned no results", {"output": output}
     return None
@@ -131,7 +131,7 @@ def _run_provider_test(
     return TestCaseResult(
         name=name,
         status="passed",
-        message=f"Indexed {indexed_files} files and returned {len(search_output.get('results', []))} results",
+        message=f"Indexed {indexed_files} files and returned {len(search_output.get('hits', []))} results",
         details=details,
     )
 

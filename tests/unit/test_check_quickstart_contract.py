@@ -42,7 +42,8 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
                 "embedding_provider_error",
                 "watch_mode_conflict",
                 "watch_path_missing",
-                "search_grounding_validation_failed",
+                "search_contract_v1_removed",
+                "search_router_backends_failed",
             ]
         ),
     )
@@ -52,7 +53,8 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
             [
                 "watch_mode_conflict",
                 "watch_path_missing",
-                "search_grounding_validation_failed",
+                "search_contract_v1_removed",
+                "search_router_backends_failed",
             ]
         ),
     )

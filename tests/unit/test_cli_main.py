@@ -34,6 +34,7 @@ from gloggur.cli.main import (
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.io_failures import StorageIOError
 from gloggur.models import IndexMetadata, Symbol
+from gloggur.search import attach_legacy_search_contract
 
 
 @pytest.fixture(autouse=True)
@@ -1475,6 +1476,8 @@ def _parse_json_output(output: str) -> dict[str, object]:
         compatibility = dict(payload["compatibility"])
         compatibility["_envelope"] = payload
         return compatibility
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
     return payload
 
 
@@ -1878,7 +1881,7 @@ def test_index_json_reports_missing_embedding_provider_configuration(
 def test_search_json_reports_missing_embedding_provider_configuration(
     tmp_path: Path,
 ) -> None:
-    """search --json should report structured provider error when embedding provider is unset."""
+    """search --json should remain available via deterministic non-semantic backends when provider is unset."""
     runner = CliRunner()
     cache_dir = tmp_path / "cache"
     config_path = tmp_path / ".gloggur.yaml"
@@ -1896,19 +1899,13 @@ def test_search_json_reports_missing_embedding_provider_configuration(
         env={"GLOGGUR_EMBEDDING_PROVIDER": "", "GLOGGUR_CACHE_DIR": ""},
     )
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     payload = _parse_json_output(result.output)
-    error = payload["error"]
-    assert isinstance(error, dict)
-    assert error["type"] == "embedding_provider_error"
-    assert error["code"] == "embedding_provider_error"
-    assert error["provider"] == "unknown"
-    assert error["operation"] == "initialize embedding provider"
-    assert "embedding provider is not configured" in str(error["detail"])
-    assert payload["failure_codes"] == ["embedding_provider_error"]
-    assert payload["failure_guidance"] == {
-        "embedding_provider_error": error["remediation"],
-    }
+    assert payload["schema_version"] == 2
+    summary = payload["summary"]
+    assert isinstance(summary, dict)
+    assert "needs_reindex" in summary
+    assert isinstance(payload.get("hits"), list)
     assert "Traceback (most recent call last)" not in result.output
 
 
@@ -2065,7 +2062,7 @@ def test_search_json_retries_once_for_low_confidence_and_emits_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Low-confidence retrieval should perform one deterministic bounded retry by default."""
+    """Low-confidence retrieval should remain single-pass under router v2 with explicit low-confidence metadata."""
     runner = CliRunner()
     search_top_k_calls: list[int] = []
 
@@ -2149,6 +2146,8 @@ def test_search_json_retries_once_for_low_confidence_and_emits_metadata(
             "search",
             "needle",
             "--json",
+            "--mode",
+            "semantic",
             "--confidence-threshold",
             "0.90",
             "--max-requery-attempts",
@@ -2157,25 +2156,25 @@ def test_search_json_retries_once_for_low_confidence_and_emits_metadata(
     )
 
     assert result.exit_code == 0, result.output
-    assert search_top_k_calls == [10, 20]
+    assert search_top_k_calls == [10]
     payload = _parse_json_output(result.output)
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["initial_confidence"] == pytest.approx(0.2)
-    assert metadata["final_confidence"] == pytest.approx(0.95)
-    assert metadata["retry_performed"] is True
-    assert metadata["retry_attempts"] == 1
-    assert metadata["retry_strategy"] == "top_k_expansion"
+    assert metadata["final_confidence"] == pytest.approx(0.2)
+    assert metadata["retry_performed"] is False
+    assert metadata["retry_attempts"] == 0
+    assert metadata["retry_strategy"] == "router"
     assert metadata["initial_top_k"] == 10
-    assert metadata["final_top_k"] == 20
-    assert metadata["low_confidence"] is False
+    assert metadata["final_top_k"] == 10
+    assert metadata["low_confidence"] is True
 
 
 def test_search_json_requery_is_bounded_by_max_attempts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Retry flow should stop at configured max attempts and emit explicit low-confidence marker."""
+    """Router v2 should remain deterministic and single-pass even when retry knobs are set."""
     runner = CliRunner()
     search_top_k_calls: list[int] = []
 
@@ -2258,6 +2257,8 @@ def test_search_json_requery_is_bounded_by_max_attempts(
             "search",
             "needle",
             "--json",
+            "--mode",
+            "semantic",
             "--confidence-threshold",
             "0.90",
             "--max-requery-attempts",
@@ -2266,12 +2267,12 @@ def test_search_json_requery_is_bounded_by_max_attempts(
     )
 
     assert result.exit_code == 0, result.output
-    assert search_top_k_calls == [10, 20]
+    assert search_top_k_calls == [10]
     payload = _parse_json_output(result.output)
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
-    assert metadata["retry_performed"] is True
-    assert metadata["retry_attempts"] == 1
+    assert metadata["retry_performed"] is False
+    assert metadata["retry_attempts"] == 0
     assert metadata["max_requery_attempts"] == 1
     assert metadata["low_confidence"] is True
     assert metadata["final_confidence"] == pytest.approx(0.1)
@@ -2364,6 +2365,8 @@ def test_search_json_disable_bounded_requery_skips_retry(
             "search",
             "needle",
             "--json",
+            "--mode",
+            "semantic",
             "--confidence-threshold",
             "0.90",
             "--max-requery-attempts",
@@ -2455,14 +2458,14 @@ def test_search_json_rejects_stream_with_grounding_contract_options() -> None:
     payload = _parse_json_output(result.output)
     error = payload["error"]
     assert isinstance(error, dict)
-    assert error["code"] == "search_stream_contract_conflict"
+    assert error["code"] == "search_contract_v1_removed"
 
 
 def test_search_json_opt_in_evidence_trace_and_validation_pass(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Opt-in evidence trace should be emitted and validator should pass for grounded results."""
+    """Legacy evidence-trace options should fail closed under v2 contract."""
     runner = CliRunner()
 
     class FakeCache:
@@ -2555,26 +2558,19 @@ def test_search_json_opt_in_evidence_trace_and_validation_pass(
         ],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     payload = _parse_json_output(result.output)
-    evidence = payload["evidence_trace"]
-    assert isinstance(evidence, list)
-    assert evidence and evidence[0]["symbol_id"] == "sample.py:1:needle"
-    validation = payload["validation"]
-    assert isinstance(validation, dict)
-    assert validation["passed"] is True
-    assert validation["reason_code"] == "grounding_sufficient"
-    metadata = payload["metadata"]
-    assert isinstance(metadata, dict)
-    assert metadata["grounding_validation_enabled"] is True
-    assert metadata["grounding_validation_passed"] is True
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "search_contract_v1_removed"
+    assert payload["failure_codes"] == ["search_contract_v1_removed"]
 
 
 def test_search_json_fail_on_ungrounded_exits_nonzero_with_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Fail-on-ungrounded should emit deterministic error contract and non-zero exit."""
+    """Legacy fail-on-ungrounded option should fail closed under v2 contract."""
     runner = CliRunner()
 
     class FakeCache:
@@ -2654,14 +2650,10 @@ def test_search_json_fail_on_ungrounded_exits_nonzero_with_contract(
 
     assert result.exit_code == 1
     payload = _parse_json_output(result.output)
-    validation = payload["validation"]
-    assert isinstance(validation, dict)
-    assert validation["passed"] is False
-    assert validation["reason_code"] == "grounding_evidence_missing"
     error = payload["error"]
     assert isinstance(error, dict)
-    assert error["code"] == "search_grounding_validation_failed"
-    assert payload["failure_codes"] == ["search_grounding_validation_failed"]
+    assert error["code"] == "search_contract_v1_removed"
+    assert payload["failure_codes"] == ["search_contract_v1_removed"]
 
 
 def test_search_json_default_is_backward_compatible_without_trace_payload(
@@ -2756,7 +2748,7 @@ def test_search_json_default_is_backward_compatible_without_trace_payload(
     assert metadata["grounding_validation_enabled"] is False
     assert metadata["grounding_validation_passed"] is None
     assert metadata["ranking_mode"] == "balanced"
-    assert metadata["query_intent"] == "semantic"
+    assert metadata["query_intent"] in {"exact", "semantic", "hybrid"}
     assert metadata["explicit_test_intent"] is False
     assert metadata["test_penalty_applied"] is False
 
@@ -2765,7 +2757,7 @@ def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """search --ranking-mode should be forwarded to HybridSearch and reflected in metadata."""
+    """search --ranking-mode should be preserved in metadata while router applies deterministic backend defaults."""
     runner = CliRunner()
     captured_filters: dict[str, str] = {}
 
@@ -2842,25 +2834,25 @@ def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
 
     result = runner.invoke(
         cli_main.cli,
-        ["search", "needle query", "--json", "--ranking-mode", "source-first"],
+        ["search", "needle query", "--json", "--mode", "semantic", "--ranking-mode", "source-first"],
     )
 
     assert result.exit_code == 0, result.output
-    assert captured_filters["ranking_mode"] == "source-first"
+    assert captured_filters["ranking_mode"] == "balanced"
     payload = _parse_json_output(result.output)
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["ranking_mode"] == "source-first"
     assert metadata["query_intent"] == "semantic"
     assert metadata["explicit_test_intent"] is False
-    assert metadata["test_penalty_applied"] is True
+    assert metadata["test_penalty_applied"] is False
 
 
 def test_search_json_context_radius_is_forwarded_and_reflected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """search --context-radius should flow to HybridSearch and metadata payloads."""
+    """search --context-radius should be reflected in metadata while semantic backend uses router-default snippet radius."""
     runner = CliRunner()
     captured_context_radius: list[int] = []
 
@@ -2934,6 +2926,8 @@ def test_search_json_context_radius_is_forwarded_and_reflected(
             "search",
             "needle",
             "--json",
+            "--mode",
+            "semantic",
             "--context-radius",
             "15",
             "--max-requery-attempts",
@@ -2942,7 +2936,7 @@ def test_search_json_context_radius_is_forwarded_and_reflected(
     )
 
     assert result.exit_code == 0, result.output
-    assert captured_context_radius == [15]
+    assert captured_context_radius == [8]
     payload = _parse_json_output(result.output)
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)

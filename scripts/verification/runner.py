@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
+from gloggur.search import attach_legacy_search_contract
 from scripts.verification.logging_utils import log_event
 from scripts.verification.reporter import Reporter, TestResult
 
@@ -400,6 +401,7 @@ class CommandRunner:
         file_path = kwargs.get("file_path")
         top_k = kwargs.get("top_k")
         stream = kwargs.get("stream")
+        debug_router = kwargs.get("debug_router")
         if config_path:
             cmd += ["--config", str(config_path)]
         if kind:
@@ -408,13 +410,16 @@ class CommandRunner:
             cmd += ["--file", str(file_path)]
         if top_k is not None:
             cmd += ["--top-k", str(top_k)]
+        if debug_router:
+            cmd += ["--debug-router"]
         if stream:
             cmd += ["--stream"]
         capture_json = not bool(stream)
         result = self.run_command(cmd, capture_json=capture_json, timeout=timeout)
         if stream:
             return self._parse_stream_results(result)
-        return self._require_json(result)
+        payload = self._require_json(result)
+        return self._with_search_compat(payload)
 
     def run_inspect(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
         """Run the inspect command and return JSON output."""
@@ -564,7 +569,7 @@ class CommandRunner:
                         "error": str(exc),
                     }
                 )
-        response: Dict[str, object] = {"stream": True, "results": results, "parsing_errors": parsing_errors}
+        response: Dict[str, object] = {"stream": True, "hits": results, "parsing_errors": parsing_errors}
         if total_lines > 0 and parsing_errors:
             failure_rate = len(parsing_errors) / total_lines
             if failure_rate > 0.10:
@@ -572,6 +577,11 @@ class CommandRunner:
                     f"High parsing error rate: {len(parsing_errors)} of {total_lines} lines failed to parse."
                 ]
         return response
+
+    @staticmethod
+    def _with_search_compat(payload: Dict[str, object]) -> Dict[str, object]:
+        """Attach legacy-compatible views for internal harnesses during schema migration."""
+        return attach_legacy_search_contract(payload)
 
     @staticmethod
     def _require_json(result: CommandResult) -> Dict[str, object]:

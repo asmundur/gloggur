@@ -67,7 +67,17 @@ gloggur search "pkg.module.Handler.handle" --search-mode by_fqname --json
 gloggur search "src/services" --search-mode by_path --json
 ```
 
-Use `--ranking-mode source-first` to prefer source definitions over test mocks. You can filter results to a path prefix with `--file src/` and adjust the amount of surrounding context with `--context-radius 15`.
+`search --json` now emits **ContextPack v2** only:
+
+- `schema_version`
+- `query`
+- `summary`
+- `hits[]` (`path`, `span`, `snippet`, `score`, `tags`)
+- optional `debug` via `--debug-router`
+
+Legacy top-level `results` + `metadata` keys were removed. See [Search JSON v2 migration](docs/SEARCH_JSON_V2_MIGRATION.md) for field mapping and upgrade guidance.
+
+You can filter results to a path prefix with `--file src/`, choose router mode via `--mode auto|exact|semantic|hybrid`, and include router timings/scores with `--debug-router`.
 
 Traverse the reference graph:
 

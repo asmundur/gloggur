@@ -72,6 +72,8 @@ scripts/gloggur inspect . --json
 scripts/gloggur watch stop --json
 ```
 
+`search --json` emits ContextPack v2 fields (`schema_version`, `query`, `summary`, `hits[]`). Legacy `results` + `metadata` top-level keys are not emitted.
+
 ## Troubleshooting by Failure Code
 
 | Failure code | Meaning | Action |
@@ -79,7 +81,8 @@ scripts/gloggur watch stop --json
 | `embedding_provider_error` | Provider client could not initialize or authenticate. | Set the provider API key and model env vars, then retry. |
 | `watch_mode_conflict` | Both `--foreground` and `--daemon` were passed. | Use exactly one watch mode flag. |
 | `watch_path_missing` | Configured watch path does not exist. | Run `scripts/gloggur watch init <existing-path> --json`. |
-| `search_grounding_validation_failed` | Grounding validation blocked ungrounded search output. | Relax thresholds or improve query/evidence scope before retry. |
+| `search_contract_v1_removed` | Deprecated v1-only flags or payload assumptions were used with search JSON v2. | Remove v1 flags and parse ContextPack v2 (`summary`, `hits[]`). |
+| `search_router_backends_failed` | Router could not produce usable evidence from enabled backends. | Reindex and rerun with `--debug-router`; adjust mode/filters/time budget. |
 
 For `--json` failures, the top-level contract is:
 - `ok=false`
@@ -90,5 +93,6 @@ For `--json` failures, the top-level contract is:
 ## Command Reference
 
 - CLI behavior and config keys: `README.md`
+- Search JSON migration: `docs/SEARCH_JSON_V2_MIGRATION.md`
 - Verification probes and smoke harnesses: `docs/VERIFICATION.md`
 - Agent integration conventions: `docs/AGENT_INTEGRATION.md`

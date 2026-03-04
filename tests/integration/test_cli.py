@@ -17,6 +17,7 @@ from gloggur.cli import main as cli_main
 from gloggur.cli.main import cli
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.search import attach_legacy_search_contract
 from scripts.verification.fixtures import TestFixtures
 
 
@@ -34,6 +35,8 @@ def _parse_json_output(output: str) -> dict[str, object]:
         raise ValueError(f"No JSON object found in output: {output!r}")
     decoder = json.JSONDecoder()
     payload, _ = decoder.raw_decode(output[start:])
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
     return payload
 
 
@@ -92,8 +95,33 @@ def test_cli_index_search_status_and_clear_cache() -> None:
         assert clear_payload["cleared"] is True
 
 
+def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
+    """search --json should emit ContextPack v2 and exclude removed v1 payload keys."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(cli, ["search", "add", "--json", "--top-k", "3"], env=env)
+        assert result.exit_code == 0, result.output
+        start = result.output.find("{")
+        assert start >= 0
+        payload = json.loads(result.output[start:])
+        assert payload["schema_version"] == 2
+        assert isinstance(payload.get("summary"), dict)
+        assert isinstance(payload.get("hits"), list)
+        assert "results" not in payload
+        assert "metadata" not in payload
+
+
 def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
-    """Low-signal search should emit deterministic retry telemetry and low-confidence marker."""
+    """Low-signal search should return empty bounded evidence with deterministic metadata."""
     runner = CliRunner()
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
@@ -129,11 +157,11 @@ def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
         assert int(metadata["total_results"]) == 0
         assert metadata["initial_confidence"] == pytest.approx(0.0)
         assert metadata["final_confidence"] == pytest.approx(0.0)
-        assert metadata["retry_performed"] is True
-        assert metadata["retry_attempts"] == 1
-        assert metadata["retry_strategy"] == "top_k_expansion"
+        assert metadata["retry_enabled"] is True
+        assert metadata["retry_performed"] is False
+        assert metadata["retry_attempts"] == 0
         assert metadata["initial_top_k"] == 2
-        assert metadata["final_top_k"] == 4
+        assert metadata["final_top_k"] == 2
         assert metadata["low_confidence"] is True
 
 
@@ -235,8 +263,8 @@ def test_cli_search_file_filter_prefix_boundary_and_context_radius() -> None:
             os.chdir(previous_cwd)
 
 
-def test_cli_search_emits_evidence_trace_and_validation_for_grounded_query() -> None:
-    """Grounded search should emit evidence trace and passing validation when requested."""
+def test_cli_search_rejects_legacy_grounding_contract_flags() -> None:
+    """Legacy evidence/grounding flags should fail closed under ContextPack v2."""
     runner = CliRunner()
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
@@ -263,21 +291,16 @@ def test_cli_search_emits_evidence_trace_and_validation_for_grounded_query() -> 
             ],
             env=env,
         )
-        assert search_result.exit_code == 0, search_result.output
+        assert search_result.exit_code == 1, search_result.output
         payload = _parse_json_output(search_result.output)
-        evidence = payload["evidence_trace"]
-        assert isinstance(evidence, list) and evidence
-        first = evidence[0]
-        assert isinstance(first["symbol_id"], str)
-        assert first["line_span"]["start"] >= 1
-        validation = payload["validation"]
-        assert isinstance(validation, dict)
-        assert validation["passed"] is True
-        assert validation["reason_code"] == "grounding_sufficient"
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "search_contract_v1_removed"
+        assert payload["failure_codes"] == ["search_contract_v1_removed"]
 
 
 def test_cli_search_fail_on_ungrounded_returns_nonzero_with_validation_payload() -> None:
-    """Ungrounded validation path should fail closed with deterministic JSON contract."""
+    """Legacy fail-on-ungrounded path should fail closed with v2 migration code."""
     runner = CliRunner()
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
@@ -304,14 +327,10 @@ def test_cli_search_fail_on_ungrounded_returns_nonzero_with_validation_payload()
         )
         assert search_result.exit_code == 1
         payload = _parse_json_output(search_result.output)
-        validation = payload["validation"]
-        assert isinstance(validation, dict)
-        assert validation["passed"] is False
-        assert validation["reason_code"] == "grounding_evidence_missing"
         error = payload["error"]
         assert isinstance(error, dict)
-        assert error["code"] == "search_grounding_validation_failed"
-        assert payload["failure_codes"] == ["search_grounding_validation_failed"]
+        assert error["code"] == "search_contract_v1_removed"
+        assert payload["failure_codes"] == ["search_contract_v1_removed"]
 
 
 def test_cli_guidance_uses_ingested_coverage_for_constraining_tests() -> None:
@@ -341,62 +360,21 @@ def test_calls_covered_target():
         assert index_result.exit_code == 0, index_result.output
 
         service_path = str(repo / "service.py")
-        search_service_result = runner.invoke(
-            cli,
-            [
-                "search",
-                "target",
-                "--json",
-                "--file",
-                service_path,
-                "--kind",
-                "function",
-                "--top-k",
-                "10",
-            ],
-            env=env,
-        )
-        assert search_service_result.exit_code == 0, search_service_result.output
-        service_payload = _parse_json_output(search_service_result.output)
-        service_results = service_payload["results"]
-        assert isinstance(service_results, list)
-
-        covered_symbol = next(
-            result for result in service_results if result.get("symbol") == "covered_target"
-        )
-        untested_symbol = next(
-            result
-            for result in service_results
-            if result.get("symbol") == "untested_with_invariant"
-        )
-        covered_symbol_id = covered_symbol["symbol_id"]
-        untested_symbol_id = untested_symbol["symbol_id"]
-        covered_line = int(covered_symbol["line"])
+        cache = CacheManager(CacheConfig(cache_dir))
+        service_symbols = {
+            symbol.name: symbol for symbol in cache.list_symbols_for_file(service_path)
+        }
+        covered_symbol = service_symbols["covered_target"]
+        untested_symbol = service_symbols["untested_with_invariant"]
+        covered_symbol_id = covered_symbol.id
+        untested_symbol_id = untested_symbol.id
+        covered_line = int(covered_symbol.start_line)
 
         test_path = str(repo / "test_service.py")
-        search_test_result = runner.invoke(
-            cli,
-            [
-                "search",
-                "test_calls_covered_target",
-                "--json",
-                "--file",
-                test_path,
-                "--kind",
-                "function",
-                "--top-k",
-                "10",
-            ],
-            env=env,
-        )
-        assert search_test_result.exit_code == 0, search_test_result.output
-        test_payload = _parse_json_output(search_test_result.output)
-        test_results = test_payload["results"]
-        assert isinstance(test_results, list)
-        test_symbol = next(
-            result for result in test_results if result.get("symbol") == "test_calls_covered_target"
-        )
-        test_symbol_id = test_symbol["symbol_id"]
+        test_symbols = {
+            symbol.name: symbol for symbol in cache.list_symbols_for_file(test_path)
+        }
+        test_symbol_id = test_symbols["test_calls_covered_target"].id
 
         coverage_payload = {test_symbol_id: {service_path: [covered_line]}}
         coverage_file = repo / "gloggur-coverage.json"

@@ -38,7 +38,8 @@ REQUIRED_FAILURE_CODES = [
     "embedding_provider_error",
     "watch_mode_conflict",
     "watch_path_missing",
-    "search_grounding_validation_failed",
+    "search_contract_v1_removed",
+    "search_router_backends_failed",
 ]
 
 DEFAULT_SOURCE_FILES = [

@@ -91,7 +91,7 @@ STAGE_SPECS: List[StageSpec] = [
     StageSpec(
         name="restored_search",
         failure_code="artifact_smoke_search_failed",
-        remediation="Run `gloggur search <query> --json` against the restored cache directory and verify retrieval results.",
+        remediation="Run `gloggur search <query> --json` against the restored cache and verify ContextPack v2 `hits`.",
     ),
 ]
 
@@ -467,16 +467,15 @@ class ArtifactSmokeHarness:
                 cache_dir=self.restored_cache_dir,
                 spec=spec,
             )
-            metadata = payload.get("metadata")
-            if not isinstance(metadata, dict):
+            hits = payload.get("hits")
+            if not isinstance(hits, list):
                 raise StageFailure(
                     code=spec.failure_code,
                     remediation=spec.remediation,
-                    detail="Restored cache search did not emit metadata payload.",
+                    detail="Restored cache search did not emit hits payload.",
                     context={"payload": payload},
                 )
-            total_results = metadata.get("total_results")
-            if not isinstance(total_results, int) or total_results <= 0:
+            if len(hits) <= 0:
                 raise StageFailure(
                     code=spec.failure_code,
                     remediation=spec.remediation,
@@ -485,7 +484,7 @@ class ArtifactSmokeHarness:
                 )
             return {
                 "query": self._search_query,
-                "total_results": total_results,
+                "total_results": len(hits),
             }
 
         raise RuntimeError(f"Unknown stage: {spec.name}")

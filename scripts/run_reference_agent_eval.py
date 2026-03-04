@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -312,9 +313,8 @@ def execute_reference_loop(
                 },
             )
 
-        results = payload.get("results")
-        validation = payload.get("validation")
-        if not isinstance(results, list) or not isinstance(validation, dict):
+        results = payload.get("hits")
+        if not isinstance(results, list):
             logs.append(
                 {
                     "step": "stop",
@@ -337,10 +337,14 @@ def execute_reference_loop(
                 validation=None,
                 failure={
                     "code": "agent_search_payload_invalid",
-                    "detail": "Search payload missing required results/validation structures.",
-                    "remediation": "Run search with --with-evidence-trace --validate-grounding and verify JSON schema.",
+                    "detail": "Search payload missing required hits list (ContextPack v2).",
+                    "remediation": "Run search with --json and verify schema_version=2 plus hits[] payload.",
                 },
             )
+        validation: Dict[str, object] = {
+            "passed": len(results) > 0,
+            "reason_code": "hits_present" if len(results) > 0 else "hits_missing",
+        }
 
         logs.append(
             {
@@ -364,10 +368,20 @@ def execute_reference_loop(
         top_symbol_id = None
         if results and isinstance(results[0], dict):
             first = results[0]
-            symbol_raw = first.get("symbol")
-            symbol_id_raw = first.get("symbol_id")
-            top_symbol = str(symbol_raw) if isinstance(symbol_raw, str) else None
-            top_symbol_id = str(symbol_id_raw) if isinstance(symbol_id_raw, str) else None
+            snippet_raw = first.get("snippet")
+            if isinstance(snippet_raw, str):
+                symbol_match = re.search(
+                    r"\b(?:def|function)\s+([A-Za-z_][A-Za-z0-9_]*)",
+                    snippet_raw,
+                )
+                if symbol_match is not None:
+                    top_symbol = symbol_match.group(1)
+            path_raw = first.get("path")
+            span_raw = first.get("span")
+            if isinstance(path_raw, str) and isinstance(span_raw, dict):
+                line_raw = span_raw.get("start_line")
+                if isinstance(line_raw, int):
+                    top_symbol_id = f"{path_raw}:{line_raw}"
 
         passed = bool(validation.get("passed"))
         if passed:
@@ -585,13 +599,7 @@ class ReferenceAgentHarness:
                 "--json",
                 "--top-k",
                 str(top_k),
-                "--disable-bounded-requery",
-                "--with-evidence-trace",
-                "--validate-grounding",
-                "--evidence-min-confidence",
-                str(self._evidence_min_confidence),
-                "--evidence-min-items",
-                str(self._evidence_min_items),
+                "--debug-router",
             ]
         )
 

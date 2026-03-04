@@ -9,6 +9,7 @@ import tempfile
 from contextlib import closing
 from pathlib import Path
 
+from gloggur.search import attach_legacy_search_contract
 from scripts.verification.fixtures import TestFixtures
 
 
@@ -17,7 +18,10 @@ def _parse_json_payload(output: str) -> dict[str, object]:
     start = output.find("{")
     if start == -1:
         raise ValueError(f"No JSON payload found in output: {output!r}")
-    return json.loads(output[start:])
+    payload = json.loads(output[start:])
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
+    return payload
 
 
 def _run_cli(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:

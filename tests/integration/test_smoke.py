@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from gloggur.cli.main import cli
+from gloggur.search import attach_legacy_search_contract
 from scripts.verification.fixtures import TestFixtures
 
 pytest.importorskip("faiss")
@@ -27,7 +28,10 @@ def _parse_json_output(output: str) -> dict[str, object]:
     start = output.find("{")
     if start == -1:
         raise ValueError(f"No JSON object found in output: {output!r}")
-    return json.loads(output[start:])
+    payload = json.loads(output[start:])
+    if isinstance(payload, dict):
+        return attach_legacy_search_contract(payload)
+    return payload
 
 
 def _invoke_json(runner: CliRunner, args: list[str], env: dict[str, str]) -> dict[str, object]:
@@ -119,17 +123,15 @@ def test_smoke_search_filters() -> None:
             ["search", "search fixture function", "--json", "--top-k", "10"],
             env,
         )
-        results = payload.get("results", [])
+        results = payload.get("hits", [])
         assert isinstance(results, list) and results
 
         required = {
-            "symbol",
-            "kind",
-            "file",
-            "line",
-            "signature",
-            "similarity_score",
-            "ranking_score",
+            "path",
+            "span",
+            "snippet",
+            "score",
+            "tags",
         }
         for item in results:
             assert required.issubset(item)
@@ -143,17 +145,14 @@ def test_smoke_search_filters() -> None:
                 "--json",
                 "--top-k",
                 "10",
-                "--kind",
-                "function",
                 "--file",
                 expected_file,
             ],
             env,
         )
-        filtered_results = filtered.get("results", [])
+        filtered_results = filtered.get("hits", [])
         assert isinstance(filtered_results, list) and filtered_results
-        assert all(item.get("kind") == "function" for item in filtered_results)
-        assert all(item.get("file") == expected_file for item in filtered_results)
+        assert all(item.get("path") == expected_file for item in filtered_results)
 
 
 def test_smoke_status_and_clear_cache() -> None:

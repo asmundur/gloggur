@@ -78,24 +78,71 @@ class Checks:
     def check_search_output(output: Dict[str, object]) -> CheckResult:
         """Check search command output schema."""
         schema = {
+            "schema_version": int,
             "query": str,
-            "results": list,
-            "metadata": {
-                "total_results": int,
-                "search_time_ms": int,
+            "summary": {
+                "strategy": str,
+                "reason": str,
+                "hits": int,
             },
+            "hits": list,
+            "debug": Optional(
+                {
+                    "timings": Optional(
+                        {
+                            "total_ms": int,
+                        }
+                    )
+                }
+            ),
         }
         base = Checks.check_json_structure(output, schema)
         if not base.ok:
             return base
-        results = output.get("results", [])
-        return Checks.check_similarity_scores(results)
+        schema_version = output.get("schema_version")
+        if schema_version != 2:
+            return CheckResult.failure(
+                "Invalid search schema version",
+                {"expected": 2, "actual": schema_version},
+            )
+        if "results" in output or "metadata" in output:
+            return CheckResult.failure(
+                "Legacy v1 search fields are not allowed in ContextPack v2 payload",
+                {"forbidden_fields": ["results", "metadata"]},
+            )
+        hits = output.get("hits", [])
+        if not isinstance(hits, list):
+            return CheckResult.failure("hits must be a list")
+        summary = output.get("summary")
+        if isinstance(summary, dict):
+            expected_hits = summary.get("hits")
+            if isinstance(expected_hits, int) and expected_hits != len(hits):
+                return CheckResult.failure(
+                    "summary.hits must equal len(hits)",
+                    {"summary_hits": expected_hits, "actual_hits": len(hits)},
+                )
+        return Checks.check_similarity_scores(hits, score_field="score")
 
     @staticmethod
-    def check_similarity_scores(results: List[Dict[str, object]]) -> CheckResult:
+    def check_similarity_scores(
+        results: List[Dict[str, object]],
+        *,
+        score_field: str = "similarity_score",
+    ) -> CheckResult:
         """Check similarity score ranges in search results."""
         invalid: List[Dict[str, object]] = []
-        result_schema = {"similarity_score": Range(min_value=0.0, max_value=1.0)}
+        result_schema = {
+            score_field: Range(min_value=0.0, max_value=1.0),
+            "path": Optional(str),
+            "span": Optional(
+                {
+                    "start_line": int,
+                    "end_line": int,
+                }
+            ),
+            "snippet": Optional(str),
+            "tags": Optional(list),
+        }
         for idx, result in enumerate(results):
             check = Checks.check_json_structure(result, result_schema)
             if not check.ok:
