@@ -147,6 +147,7 @@ Pytest defaults for this repo:
 - Search by **concepts**, not just filenames (e.g., "incremental hashing", "embedding provider", "tree-sitter parser").
 - Use `--top-k` to widen or narrow results based on the task.
 - Use `--stream` if you are integrating results into a tool chain.
+- For identifier-heavy lookups where tests are noisy, use `--ranking-mode source-first`.
 
 Grounded retrieve -> validate -> emit/repair flow (recommended for agent outputs):
 

@@ -2690,6 +2690,103 @@ def test_search_json_default_is_backward_compatible_without_trace_payload(
     assert isinstance(metadata, dict)
     assert metadata["grounding_validation_enabled"] is False
     assert metadata["grounding_validation_passed"] is None
+    assert metadata["ranking_mode"] == "balanced"
+    assert metadata["query_intent"] == "semantic"
+    assert metadata["explicit_test_intent"] is False
+    assert metadata["test_penalty_applied"] is False
+
+
+def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """search --ranking-mode should be forwarded to HybridSearch and reflected in metadata."""
+    runner = CliRunner()
+    captured_filters: dict[str, str] = {}
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = top_k
+            captured_filters.update(filters)
+            return {
+                "query": "needle query",
+                "results": [],
+                "metadata": {
+                    "total_results": 0,
+                    "search_time_ms": 1,
+                    "ranking_mode": "source-first",
+                    "query_intent": "semantic",
+                    "explicit_test_intent": False,
+                    "test_penalty_applied": True,
+                },
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["search", "needle query", "--json", "--ranking-mode", "source-first"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured_filters["ranking_mode"] == "source-first"
+    payload = _parse_json_output(result.output)
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["ranking_mode"] == "source-first"
+    assert metadata["query_intent"] == "semantic"
+    assert metadata["explicit_test_intent"] is False
+    assert metadata["test_penalty_applied"] is True
 
 
 def test_search_json_wraps_metadata_store_connect_failure(

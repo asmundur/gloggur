@@ -53,6 +53,7 @@ def test_hybrid_search_returns_ranked_results() -> None:
         assert payload["metadata"]["total_results"] > 0
         first = payload["results"][0]
         assert 0.0 <= first["similarity_score"] <= 1.0
+        assert 0.0 <= first["ranking_score"] <= 1.0
         assert first["file"].endswith("sample.py")
 
 

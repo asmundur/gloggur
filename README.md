@@ -170,6 +170,12 @@ Search for similar symbols:
 gloggur search "streaming parser" --top-k 5 --json
 ```
 
+Prefer source definitions for agent-heavy workflows:
+
+```bash
+gloggur search "Session.mount" --top-k 5 --json --ranking-mode source-first
+```
+
 Stream results as line-delimited JSON:
 
 ```bash
@@ -659,12 +665,17 @@ Search results are returned as JSON:
       "signature": "def function_name(arg1, arg2)",
       "docstring": "...",
       "similarity_score": 0.95,
+      "ranking_score": 0.97,
       "context": "surrounding code snippet"
     }
   ],
   "metadata": {
     "total_results": 10,
-    "search_time_ms": 45
+    "search_time_ms": 45,
+    "ranking_mode": "balanced",
+    "query_intent": "semantic",
+    "explicit_test_intent": false,
+    "test_penalty_applied": false
   }
 }
 ```

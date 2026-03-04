@@ -54,6 +54,7 @@ from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.coverage import CoverageIngester
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
+from gloggur.search import hybrid_search as hybrid_search_module
 from gloggur.search.evidence import (
     build_evidence_trace,
     validate_evidence_trace,
@@ -2408,6 +2409,19 @@ def _validate_search_evidence_options(
         )
 
 
+def _resolve_search_ranking_metadata(
+    *,
+    query: str,
+    ranking_mode: str,
+    file_path: str | None,
+) -> dict[str, object]:
+    """Resolve stable ranking metadata for search payloads."""
+    ranking_filters: dict[str, str] = {"ranking_mode": ranking_mode}
+    if file_path:
+        ranking_filters["file"] = file_path
+    return hybrid_search_module.HybridSearch.build_ranking_metadata(query, ranking_filters)
+
+
 def _resolve_allow_tool_version_drift(
     *,
     cli_flag_enabled: bool,
@@ -2575,6 +2589,13 @@ def _search_with_bounded_retry(
 @click.option("--file", "file_path", type=str, default=None)
 @click.option("--top-k", type=int, default=10)
 @click.option(
+    "--ranking-mode",
+    type=click.Choice(["balanced", "source-first"], case_sensitive=False),
+    default="balanced",
+    show_default=True,
+    help="Ranking profile for source-vs-test preference in search results.",
+)
+@click.option(
     "--confidence-threshold",
     type=float,
     default=DEFAULT_RETRIEVAL_CONFIDENCE_THRESHOLD,
@@ -2641,6 +2662,7 @@ def search(
     kind: str | None,
     file_path: str | None,
     top_k: int,
+    ranking_mode: str,
     confidence_threshold: float,
     max_requery_attempts: int,
     disable_bounded_requery: bool,
@@ -2664,6 +2686,11 @@ def search(
     _validate_search_evidence_options(
         evidence_min_confidence=evidence_min_confidence,
         evidence_min_items=evidence_min_items,
+    )
+    ranking_metadata = _resolve_search_ranking_metadata(
+        query=query,
+        ranking_mode=ranking_mode,
+        file_path=file_path,
     )
     if stream and (with_evidence_trace or validate_grounding or fail_on_ungrounded):
         raise CLIContractError(
@@ -2724,6 +2751,7 @@ def search(
                 "grounding_validation_passed": None,
                 "expected_index_profile": expected_profile,
                 "cached_index_profile": cached_profile,
+                **ranking_metadata,
                 **resume_contract,
             },
         }
@@ -2735,7 +2763,7 @@ def search(
     )
     metadata_store = _create_metadata_store(config)
     searcher = HybridSearch(embedding, vector_store, metadata_store)
-    filters = {}
+    filters = {"ranking_mode": ranking_mode}
     if kind:
         filters["kind"] = kind
     if file_path:
@@ -2759,6 +2787,16 @@ def search(
     if isinstance(metadata_payload, dict):
         metadata_payload.setdefault("needs_reindex", False)
         metadata_payload.setdefault("reindex_reason", None)
+        metadata_payload.setdefault("ranking_mode", ranking_metadata["ranking_mode"])
+        metadata_payload.setdefault("query_intent", ranking_metadata["query_intent"])
+        metadata_payload.setdefault(
+            "explicit_test_intent",
+            ranking_metadata["explicit_test_intent"],
+        )
+        metadata_payload.setdefault(
+            "test_penalty_applied",
+            ranking_metadata["test_penalty_applied"],
+        )
         metadata_payload.update(confidence_payload)
         metadata_payload.update(resume_contract)
     else:

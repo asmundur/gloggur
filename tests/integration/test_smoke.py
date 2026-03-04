@@ -114,11 +114,23 @@ def test_smoke_search_filters() -> None:
         env = {"GLOGGUR_CACHE_DIR": cache_dir}
 
         _invoke_json(runner, ["index", str(repo), "--json"], env)
-        payload = _invoke_json(runner, ["search", "search fixture function", "--json", "--top-k", "10"], env)
+        payload = _invoke_json(
+            runner,
+            ["search", "search fixture function", "--json", "--top-k", "10"],
+            env,
+        )
         results = payload.get("results", [])
         assert isinstance(results, list) and results
 
-        required = {"symbol", "kind", "file", "line", "signature", "similarity_score"}
+        required = {
+            "symbol",
+            "kind",
+            "file",
+            "line",
+            "signature",
+            "similarity_score",
+            "ranking_score",
+        }
         for item in results:
             assert required.issubset(item)
 
