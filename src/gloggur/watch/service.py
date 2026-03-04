@@ -219,6 +219,22 @@ class WatchService:
                 result.failed_samples.append(sample_text)
                 result.last_error = sample_text
 
+    @staticmethod
+    def _is_noop_batch(batch: BatchResult) -> bool:
+        """Return True when a watch event batch produced no in-scope work."""
+        return (
+            batch.files_considered <= 0
+            and batch.changed_files <= 0
+            and batch.deleted_files <= 0
+            and batch.indexed_files <= 0
+            and batch.skipped_files <= 0
+            and batch.error_count <= 0
+            and batch.indexed_symbols <= 0
+            and not batch.failed_reasons
+            and not batch.failed_samples
+            and batch.last_error is None
+        )
+
     def run_forever(self, path: str) -> dict[str, object]:
         """Watch filesystem changes and process until stopped."""
 
@@ -242,6 +258,14 @@ class WatchService:
                 if self._stop_event.is_set():
                     break
                 batch = self.process_batch(changes, watch_root=watch_root, watch_file=watch_file)
+                if self._is_noop_batch(batch):
+                    self._write_state(
+                        running=True,
+                        watch_path=watch_root,
+                        last_heartbeat=utc_now_iso(),
+                        status="running_with_errors" if self._total_errors else "running",
+                    )
+                    continue
                 self._total_files_considered += batch.files_considered
                 self._total_indexed_files += batch.indexed_files
                 self._total_indexed_symbols += batch.indexed_symbols
