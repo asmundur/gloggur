@@ -71,8 +71,7 @@ class SymbolIndexStore:
 
     def _init_db(self) -> None:
         with self._connect() as conn:
-            conn.executescript(
-                """
+            conn.executescript("""
                 CREATE TABLE IF NOT EXISTS occurrences (
                     symbol TEXT NOT NULL,
                     kind TEXT NOT NULL,
@@ -93,8 +92,7 @@ class SymbolIndexStore:
                 CREATE INDEX IF NOT EXISTS idx_occ_path ON occurrences (path);
                 CREATE INDEX IF NOT EXISTS idx_occ_path_line ON occurrences (path, line);
                 CREATE INDEX IF NOT EXISTS idx_occ_kind ON occurrences (kind);
-                """
-            )
+                """)
 
     def get_file(self, path: str) -> IndexedFile | None:
         if not self.available:
@@ -173,7 +171,9 @@ class SymbolIndexStore:
             if rows:
                 conn.executemany(
                     """
-                    INSERT INTO occurrences (symbol, kind, path, line, language, container, signature)
+                    INSERT INTO occurrences (
+                        symbol, kind, path, line, language, container, signature
+                    )
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,

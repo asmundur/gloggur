@@ -588,7 +588,13 @@ def run_symbol_backend(
         )
         if score <= 0.0:
             continue
-        score = max(0.0, min(1.0, score + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent)))
+        score = max(
+            0.0,
+            min(
+                1.0,
+                score + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent),
+            ),
+        )
         scored_occurrences.append((score, occurrence, path))
         file_hit_counts[path] = file_hit_counts.get(path, 0) + 1
 

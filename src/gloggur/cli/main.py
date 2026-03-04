@@ -2561,7 +2561,7 @@ def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) 
 
 def _resolve_symbol_index_root(index_target: str) -> Path:
     """Resolve repo root used for .gloggur/index/symbols.db storage."""
-    target = Path(index_target).resolve()
+    target = Path(os.path.abspath(index_target))
     current = target if target.is_dir() else target.parent
     for candidate in (current, *current.parents):
         if (candidate / ".git").exists() or (candidate / ".gloggur").exists():

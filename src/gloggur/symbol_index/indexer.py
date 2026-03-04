@@ -81,7 +81,7 @@ class SymbolIndexer:
         parser_registry: ParserRegistry | None = None,
         store: SymbolIndexStore | None = None,
     ) -> None:
-        self.repo_root = repo_root.resolve()
+        self.repo_root = Path(os.path.abspath(str(repo_root)))
         self.config = config
         self.parser_registry = parser_registry or ParserRegistry(
             extension_map=config.parser_extension_map,
@@ -93,15 +93,17 @@ class SymbolIndexer:
         )
 
     def index_path(self, path: str) -> SymbolIndexResult:
-        target = Path(path).resolve()
+        target = Path(os.path.abspath(path))
         result = SymbolIndexResult(db_path=self.store.db_path)
 
         files = (
             list(self._iter_source_files(target))
             if target.is_dir()
-            else [str(target)]
-            if self._is_supported_file(str(target)) and not self._is_excluded(str(target))
-            else []
+            else (
+                [str(target)]
+                if self._is_supported_file(str(target)) and not self._is_excluded(str(target))
+                else []
+            )
         )
         seen_paths: set[str] = set()
         for file_path in files:
@@ -111,7 +113,10 @@ class SymbolIndexer:
                 stat = os.stat(file_path)
                 mtime_ns = int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)))
             except OSError as exc:
-                result.add_failure("symbol_index_stat_error", f"{file_path}: {type(exc).__name__}: {exc}")
+                result.add_failure(
+                    "symbol_index_stat_error",
+                    f"{file_path}: {type(exc).__name__}: {exc}",
+                )
                 continue
 
             previous = self.store.get_file(file_path)
@@ -123,7 +128,10 @@ class SymbolIndexer:
                 with open(file_path, encoding="utf8") as handle:
                     source = handle.read()
             except (UnicodeDecodeError, OSError) as exc:
-                result.add_failure("symbol_index_read_error", f"{file_path}: {type(exc).__name__}: {exc}")
+                result.add_failure(
+                    "symbol_index_read_error",
+                    f"{file_path}: {type(exc).__name__}: {exc}",
+                )
                 continue
 
             content_hash = self._hash_content(source)
@@ -185,7 +193,10 @@ class SymbolIndexer:
                     occurrences=occurrences,
                 )
             except Exception as exc:
-                result.add_failure("symbol_index_store_error", f"{file_path}: {type(exc).__name__}: {exc}")
+                result.add_failure(
+                    "symbol_index_store_error",
+                    f"{file_path}: {type(exc).__name__}: {exc}",
+                )
                 continue
 
             result.files_changed += 1
@@ -199,7 +210,10 @@ class SymbolIndexer:
                     scope_prefix=str(target),
                 )
             except Exception as exc:
-                result.add_failure("symbol_index_prune_error", f"{target}: {type(exc).__name__}: {exc}")
+                result.add_failure(
+                    "symbol_index_prune_error",
+                    f"{target}: {type(exc).__name__}: {exc}",
+                )
         return result
 
     def _iter_source_files(self, root: Path) -> list[str]:

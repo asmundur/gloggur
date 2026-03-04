@@ -7,6 +7,7 @@ import signal
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Event
 
 from gloggur.config import GloggurConfig
@@ -17,6 +18,7 @@ from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
 from gloggur.models import IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
+from gloggur.symbol_index.indexer import SymbolIndexer
 
 DEFAULT_WATCH_FAILURE_REMEDIATION = (
     "Inspect failed_samples and rerun watch/index after resolving the underlying error."
@@ -364,6 +366,11 @@ class WatchService:
                     result.deleted_files += int(stale_cleanup.get("files_removed", 0))
                     result.indexed_files += int(stale_cleanup.get("files_removed", 0))
                     self._merge_failure_payload(result, stale_cleanup)
+                    self._refresh_symbol_index(
+                        watch_root=watch_root,
+                        watch_file=watch_file,
+                        result=result,
+                    )
                     self.vector_store.save()
                     consistency = self.indexer.validate_vector_metadata_consistency()
                     self._merge_failure_payload(result, consistency)
@@ -376,6 +383,55 @@ class WatchService:
                         self.cache.set_index_metadata(metadata)
                         self.cache.set_index_profile(self.config.embedding_profile())
         return result
+
+    @staticmethod
+    def _resolve_symbol_repo_root(watch_target: str) -> Path:
+        """Resolve symbol-index repo root from watch target with repo markers fallback."""
+
+        target = Path(os.path.abspath(watch_target))
+        current = target if target.is_dir() else target.parent
+        for candidate in (current, *current.parents):
+            if (candidate / ".git").exists() or (candidate / ".gloggur").exists():
+                return candidate
+        return current
+
+    def _refresh_symbol_index(
+        self,
+        *,
+        watch_root: str,
+        watch_file: str | None,
+        result: BatchResult,
+    ) -> None:
+        """Refresh symbol occurrence index after incremental cache mutations."""
+
+        index_target = watch_file if watch_file else watch_root
+        if not index_target:
+            return
+        try:
+            repo_root = self._resolve_symbol_repo_root(index_target)
+            symbol_indexer = SymbolIndexer(
+                repo_root=repo_root,
+                config=self.config,
+                parser_registry=self.parser_registry,
+            )
+            symbol_result = symbol_indexer.index_path(index_target)
+        except Exception as exc:
+            result.record_failed(
+                "symbol_index_error",
+                f"{index_target}: {type(exc).__name__}: {exc}",
+            )
+            return
+        if symbol_result.failed <= 0:
+            return
+        for reason, count in symbol_result.failed_reasons.items():
+            result.failed_reasons[reason] = result.failed_reasons.get(reason, 0) + int(count)
+            result.error_count += int(count)
+        for sample in symbol_result.failed_samples:
+            if len(result.failed_samples) >= 5:
+                break
+            sample_text = str(sample)
+            result.failed_samples.append(sample_text)
+            result.last_error = sample_text
 
     def _watch_changes(self, watch_target: str):
         """Yield raw change batches from the watch backend."""

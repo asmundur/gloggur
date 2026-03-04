@@ -65,7 +65,9 @@ def extract_query_hints(query: str) -> QueryHints:
             continue
         stack_locations.append((path, line))
 
-    identifier_tokens_list = [token.lower() for token in _TOKEN_RE.findall(query) if len(token) >= 3]
+    identifier_tokens_list = [
+        token.lower() for token in _TOKEN_RE.findall(query) if len(token) >= 3
+    ]
     for literal in literal_symbol_candidates:
         token = literal.lower()
         if token not in identifier_tokens_list:
