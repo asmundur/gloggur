@@ -2,7 +2,22 @@
 set -eu
 
 echo "Running pytest before push..."
-PYTHONPATH="${PYTHONPATH:-.}" .venv/bin/pytest -q
+PYTEST_PYTHON_BIN=""
+PYTEST_PYTHONPATH="${PYTHONPATH:-.}"
+
+if [ -x ".venv/bin/python" ] && PYTHONPATH="$PYTEST_PYTHONPATH" .venv/bin/python -m pytest --version >/dev/null 2>&1; then
+  PYTEST_PYTHON_BIN=".venv/bin/python"
+elif command -v python >/dev/null 2>&1 && PYTHONPATH="$PYTEST_PYTHONPATH" python -m pytest --version >/dev/null 2>&1; then
+  PYTEST_PYTHON_BIN="python"
+elif command -v python3 >/dev/null 2>&1 && PYTHONPATH="$PYTEST_PYTHONPATH" python3 -m pytest --version >/dev/null 2>&1; then
+  PYTEST_PYTHON_BIN="python3"
+else
+  echo "Error: no usable Python interpreter with pytest is available for pre-push checks." >&2
+  echo "Remediation: run scripts/bootstrap_gloggur_env.sh (or activate a working venv) and retry." >&2
+  exit 1
+fi
+
+PYTHONPATH="$PYTEST_PYTHONPATH" "$PYTEST_PYTHON_BIN" -m pytest -q
 echo "Tests passed. Proceeding with push."
 
 if ! command -v bd >/dev/null 2>&1; then

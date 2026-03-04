@@ -305,6 +305,29 @@ class SmokeHarness:
             )
         return payload
 
+    def _read_watch_state(self) -> Dict[str, object]:
+        """Read the watch state file directly for low-latency polling."""
+        state_path = self.runtime_dir / "watch_state.json"
+        if not state_path.exists():
+            return {}
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_watch_target_update(self, revision: int) -> None:
+        """Write an updated smoke target revision to trigger incremental watch indexing."""
+        target = self.repo_dir / self._watch_target
+        target.write_text(
+            "def smoke_target() -> str:\n"
+            f'    """{self._updated_phrase}"""\n'
+            '    return "after"\n\n'
+            "def smoke_helper() -> int:\n"
+            f"    return {revision}\n",
+            encoding="utf8",
+        )
+
     def _run_stage(self, spec: StageSpec) -> StageResult:
         """Run one stage and return structured pass/fail result."""
         start = time.perf_counter()
@@ -394,56 +417,65 @@ class SmokeHarness:
         self._watch_started = True
         try:
             running_payload: Optional[Dict[str, object]] = None
-            for _ in range(80):
-                payload = self._run_cli_json(
-                    ["watch", "status", "--config", str(self.watch_config), "--json"],
-                    spec=spec,
-                    timeout_seconds=30.0,
-                )
+            for _ in range(200):
+                payload = self._read_watch_state()
                 if payload.get("running") is True:
                     running_payload = payload
                     break
                 time.sleep(0.1)
             if running_payload is None:
-                raise StageFailure(
-                    code=spec.failure_code,
-                    remediation=spec.remediation,
-                    detail="Watch daemon never reached running=true status.",
-                    context={},
-                )
-
-            target = self.repo_dir / self._watch_target
-            target.write_text(
-                "def smoke_target() -> str:\n"
-                f'    """{self._updated_phrase}"""\n'
-                '    return "after"\n\n'
-                "def smoke_helper() -> int:\n"
-                "    return 2\n",
-                encoding="utf8",
-            )
-
-            processed_payload: Optional[Dict[str, object]] = None
-            for _ in range(120):
-                payload = self._run_cli_json(
+                status_payload = self._run_cli_json(
                     ["watch", "status", "--config", str(self.watch_config), "--json"],
                     spec=spec,
                     timeout_seconds=30.0,
                 )
-                indexed_files = int(payload.get("indexed_files", 0))
-                last_batch = payload.get("last_batch", {})
+                raise StageFailure(
+                    code=spec.failure_code,
+                    remediation=spec.remediation,
+                    detail="Watch daemon never reached running=true status.",
+                    context={"status_payload": status_payload},
+                )
+
+            self._write_watch_target_update(revision=2)
+
+            processed_payload: Optional[Dict[str, object]] = None
+            last_payload: Dict[str, object] = dict(running_payload)
+            for attempt in range(300):
+                payload = self._read_watch_state()
+                if payload:
+                    last_payload = payload
+
+                indexed_files = int(last_payload.get("indexed_files", 0))
+                last_batch = last_payload.get("last_batch", {})
                 batch_indexed = 0
                 if isinstance(last_batch, dict):
                     batch_indexed = int(last_batch.get("indexed_files", 0))
                 if indexed_files > 0 or batch_indexed > 0:
-                    processed_payload = payload
+                    processed_payload = last_payload
                     break
+
+                error_count = int(last_payload.get("error_count", 0))
+                batch_failed = int(last_batch.get("failed", 0)) if isinstance(last_batch, dict) else 0
+                if error_count > 0 or batch_failed > 0:
+                    raise StageFailure(
+                        code=spec.failure_code,
+                        remediation=spec.remediation,
+                        detail="Watch stage observed processing errors before incremental update completed.",
+                        context={"payload": last_payload},
+                    )
+
+                if attempt in {40, 120, 220}:
+                    self._write_watch_target_update(revision=2 + attempt)
                 time.sleep(0.1)
             if processed_payload is None:
                 raise StageFailure(
                     code=spec.failure_code,
                     remediation=spec.remediation,
                     detail="Watch stage did not process the file change in time.",
-                    context={},
+                    context={
+                        "watch_state_file": str(self.runtime_dir / "watch_state.json"),
+                        "last_payload": last_payload,
+                    },
                 )
             return {
                 "pid": int(start_payload.get("pid", 0)),
