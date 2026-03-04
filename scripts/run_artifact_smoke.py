@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = REPO_ROOT / "src"
+
 
 @dataclass(frozen=True)
 class StageSpec:
@@ -234,6 +237,12 @@ class ArtifactSmokeHarness:
     def _env(self, cache_dir: Path) -> Dict[str, str]:
         """Build deterministic environment for artifact smoke commands."""
         env = dict(os.environ)
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(SOURCE_ROOT)
+            if not existing_pythonpath
+            else f"{SOURCE_ROOT}{os.pathsep}{existing_pythonpath}"
+        )
         env["GLOGGUR_CACHE_DIR"] = str(cache_dir)
         env["GLOGGUR_EMBEDDING_PROVIDER"] = "test"
         return env

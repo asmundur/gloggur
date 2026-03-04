@@ -10,20 +10,36 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from gloggur.io_failures import wrap_io_error
-from gloggur.models import AuditFileMetadata, FileMetadata, IndexMetadata, Symbol
+from gloggur.models import (
+    AuditFileMetadata,
+    EdgeRecord,
+    FileMetadata,
+    IndexMetadata,
+    Symbol,
+    SymbolChunk,
+)
 
 SCHEMA_VERSION_KEY = "schema_version"
 INDEX_PROFILE_KEY = "index_profile"
 LAST_SUCCESS_RESUME_FINGERPRINT_KEY = "last_success_resume_fingerprint"
 LAST_SUCCESS_RESUME_AT_KEY = "last_success_resume_at"
 LAST_SUCCESS_TOOL_VERSION_KEY = "last_success_tool_version"
-CACHE_SCHEMA_VERSION = "4"
+CACHE_SCHEMA_VERSION = "6"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 SQLITE_JOURNAL_MODE = "WAL"
 SQLITE_SYNCHRONOUS = "NORMAL"
 
-REQUIRED_TABLES = {"files", "symbols", "metadata", "audits", "audit_files", "meta"}
+REQUIRED_TABLES = {
+    "files",
+    "symbols",
+    "chunks",
+    "edges",
+    "metadata",
+    "audits",
+    "audit_files",
+    "meta",
+}
 LEGACY_TABLES = {"validations", "validation_files"}
 REQUIRED_COLUMNS = {
     "files": {"path", "language", "content_hash", "last_indexed"},
@@ -31,14 +47,22 @@ REQUIRED_COLUMNS = {
         "id",
         "name",
         "kind",
+        "fqname",
         "file_path",
         "start_line",
         "end_line",
+        "container_id",
+        "container_fqname",
         "signature",
         "docstring",
         "body_hash",
         "embedding_vector",
         "language",
+        "repo_id",
+        "commit_hash",
+        "visibility",
+        "exported",
+        "tokens_estimate",
         "invariants",
         "calls",
         "covered_by",
@@ -47,8 +71,38 @@ REQUIRED_COLUMNS = {
         "signals",
         "attributes",
     },
+    "chunks": {
+        "chunk_id",
+        "symbol_id",
+        "chunk_part_index",
+        "chunk_part_total",
+        "text",
+        "file_path",
+        "start_line",
+        "end_line",
+        "tokens_estimate",
+        "language",
+        "repo_id",
+        "commit_hash",
+        "embedding_vector",
+    },
+    "edges": {
+        "edge_id",
+        "edge_type",
+        "from_id",
+        "to_id",
+        "from_kind",
+        "to_kind",
+        "file_path",
+        "line",
+        "confidence",
+        "repo_id",
+        "commit_hash",
+        "text",
+        "embedding_vector",
+    },
     "metadata": {"key", "value"},
-    "audits": {"symbol_id", "warnings"},
+    "audits": {"symbol_id", "warnings", "file_path"},
     "audit_files": {"path", "content_hash", "last_audited"},
     "meta": {"key", "value"},
 }
@@ -166,14 +220,22 @@ class CacheManager:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
                     kind TEXT NOT NULL,
+                    fqname TEXT,
                     file_path TEXT NOT NULL,
                     start_line INTEGER NOT NULL,
                     end_line INTEGER NOT NULL,
+                    container_id TEXT,
+                    container_fqname TEXT,
                     signature TEXT,
                     docstring TEXT,
                     body_hash TEXT NOT NULL,
                     embedding_vector TEXT,
                     language TEXT,
+                    repo_id TEXT,
+                    commit_hash TEXT,
+                    visibility TEXT,
+                    exported INTEGER,
+                    tokens_estimate INTEGER,
                     invariants TEXT,
                     calls TEXT,
                     covered_by TEXT,
@@ -181,6 +243,36 @@ class CacheManager:
                     implicit_contract TEXT,
                     signals TEXT,
                     attributes TEXT
+                );
+                CREATE TABLE IF NOT EXISTS chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    symbol_id TEXT NOT NULL,
+                    chunk_part_index INTEGER NOT NULL,
+                    chunk_part_total INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    tokens_estimate INTEGER,
+                    language TEXT,
+                    repo_id TEXT,
+                    commit_hash TEXT,
+                    embedding_vector TEXT
+                );
+                CREATE TABLE IF NOT EXISTS edges (
+                    edge_id TEXT PRIMARY KEY,
+                    edge_type TEXT NOT NULL,
+                    from_id TEXT NOT NULL,
+                    to_id TEXT NOT NULL,
+                    from_kind TEXT NOT NULL,
+                    to_kind TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    line INTEGER NOT NULL,
+                    confidence REAL NOT NULL,
+                    repo_id TEXT,
+                    commit_hash TEXT,
+                    text TEXT,
+                    embedding_vector TEXT
                 );
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
@@ -192,13 +284,22 @@ class CacheManager:
                 );
                 CREATE TABLE IF NOT EXISTS audits (
                     symbol_id TEXT PRIMARY KEY,
-                    warnings TEXT NOT NULL
+                    warnings TEXT NOT NULL,
+                    file_path TEXT
                 );
                 CREATE TABLE IF NOT EXISTS audit_files (
                     path TEXT PRIMARY KEY,
                     content_hash TEXT NOT NULL,
                     last_audited TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_symbols_fqname ON symbols (fqname);
+                CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols (file_path);
+                CREATE INDEX IF NOT EXISTS idx_chunks_symbol_id ON chunks (symbol_id);
+                CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks (file_path);
+                CREATE INDEX IF NOT EXISTS idx_edges_from_id ON edges (from_id);
+                CREATE INDEX IF NOT EXISTS idx_edges_to_id ON edges (to_id);
+                CREATE INDEX IF NOT EXISTS idx_edges_type ON edges (edge_type);
+                CREATE INDEX IF NOT EXISTS idx_edges_file_path ON edges (file_path);
                 """)
             conn.execute(
                 """
@@ -233,6 +334,11 @@ class CacheManager:
         with self._connect() as conn:
             conn.execute("DELETE FROM symbols WHERE file_path = ?", (path,))
 
+    def delete_chunks_for_file(self, path: str) -> None:
+        """Delete all cached chunk rows for a file."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chunks WHERE file_path = ?", (path,))
+
     def delete_file_metadata(self, path: str) -> None:
         """Delete cached file metadata for a path."""
         with self._connect() as conn:
@@ -246,18 +352,36 @@ class CacheManager:
         with self._connect() as conn:
             self._upsert_symbol_rows(conn, symbol_rows)
 
+    def upsert_chunks(self, chunks: Iterable[SymbolChunk]) -> None:
+        """Insert or update a batch of symbol chunks."""
+        chunk_rows = [self._chunk_row(chunk) for chunk in chunks]
+        if not chunk_rows:
+            return
+        with self._connect() as conn:
+            self._upsert_chunk_rows(conn, chunk_rows)
+
     def replace_file_index(
         self,
         path: str,
         metadata: FileMetadata,
         symbols: Iterable[Symbol],
+        chunks: Iterable[SymbolChunk],
+        edges: Iterable[EdgeRecord],
     ) -> None:
-        """Replace one file's symbol rows and metadata in a single transaction."""
+        """Replace one file's symbols/chunks/edges and metadata in a single transaction."""
         symbol_rows = [self._symbol_row(symbol) for symbol in symbols]
+        chunk_rows = [self._chunk_row(chunk) for chunk in chunks]
+        edge_rows = [self._edge_row(edge) for edge in edges]
         with self._connect() as conn:
             conn.execute("DELETE FROM symbols WHERE file_path = ?", (path,))
+            conn.execute("DELETE FROM chunks WHERE file_path = ?", (path,))
+            conn.execute("DELETE FROM edges WHERE file_path = ?", (path,))
             if symbol_rows:
                 self._upsert_symbol_rows(conn, symbol_rows)
+            if chunk_rows:
+                self._upsert_chunk_rows(conn, chunk_rows)
+            if edge_rows:
+                self._upsert_edge_rows(conn, edge_rows)
             self._upsert_file_metadata_row(conn, metadata)
 
     def list_symbols(self) -> list[Symbol]:
@@ -291,6 +415,118 @@ class CacheManager:
                 "SELECT * FROM symbols WHERE file_path = ? ORDER BY start_line", (path,)
             ).fetchall()
             return [self._row_to_symbol(row) for row in rows]
+
+    def list_chunks_for_file(self, path: str) -> list[SymbolChunk]:
+        """Return cached symbol chunks for a file path."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM chunks
+                WHERE file_path = ?
+                ORDER BY start_line, chunk_part_index, chunk_id
+                """,
+                (path,),
+            ).fetchall()
+            return [self._row_to_chunk(row) for row in rows]
+
+    def list_chunks(self) -> list[SymbolChunk]:
+        """Return all cached symbol chunks."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM chunks ORDER BY file_path, start_line, chunk_part_index, chunk_id"
+            ).fetchall()
+            return [self._row_to_chunk(row) for row in rows]
+
+    def list_chunks_for_symbol(self, symbol_id: str) -> list[SymbolChunk]:
+        """Return chunk rows for a symbol id."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM chunks
+                WHERE symbol_id = ?
+                ORDER BY chunk_part_index, chunk_id
+                """,
+                (symbol_id,),
+            ).fetchall()
+            return [self._row_to_chunk(row) for row in rows]
+
+    def upsert_edges(self, edges: Iterable[EdgeRecord]) -> None:
+        """Insert or update a batch of edge records."""
+        edge_rows = [self._edge_row(edge) for edge in edges]
+        if not edge_rows:
+            return
+        with self._connect() as conn:
+            self._upsert_edge_rows(conn, edge_rows)
+
+    def replace_edges_for_file(self, path: str, edges: Iterable[EdgeRecord]) -> None:
+        """Replace all edges observed in one file atomically."""
+        edge_rows = [self._edge_row(edge) for edge in edges]
+        with self._connect() as conn:
+            conn.execute("DELETE FROM edges WHERE file_path = ?", (path,))
+            if edge_rows:
+                self._upsert_edge_rows(conn, edge_rows)
+
+    def delete_edges_for_file(self, path: str) -> None:
+        """Delete edge rows observed in a file."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM edges WHERE file_path = ?", (path,))
+
+    def list_edges(self) -> list[EdgeRecord]:
+        """Return all edge records in deterministic order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM edges ORDER BY file_path, line, edge_type, edge_id"
+            ).fetchall()
+            return [self._row_to_edge(row) for row in rows]
+
+    def list_edges_for_file(self, path: str) -> list[EdgeRecord]:
+        """Return edge records emitted for one file path."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM edges
+                WHERE file_path = ?
+                ORDER BY line, edge_type, edge_id
+                """,
+                (path,),
+            ).fetchall()
+            return [self._row_to_edge(row) for row in rows]
+
+    def list_edges_for_symbol(
+        self,
+        symbol_id: str,
+        *,
+        direction: str = "both",
+        edge_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[EdgeRecord]:
+        """Return incoming/outgoing/bidirectional edges for a symbol id."""
+        clauses = []
+        params: list[object] = []
+        if direction == "incoming":
+            clauses.append("to_id = ?")
+            params.append(symbol_id)
+        elif direction == "outgoing":
+            clauses.append("from_id = ?")
+            params.append(symbol_id)
+        else:
+            clauses.append("(from_id = ? OR to_id = ?)")
+            params.extend([symbol_id, symbol_id])
+        if edge_type:
+            clauses.append("edge_type = ?")
+            params.append(edge_type)
+        where = " AND ".join(clauses) if clauses else "1=1"
+        query = (
+            "SELECT * FROM edges "
+            f"WHERE {where} "
+            "ORDER BY confidence DESC, file_path, line, edge_id"
+        )
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_to_edge(row) for row in rows]
 
     def get_index_metadata(self) -> IndexMetadata | None:
         """Return index-level metadata, if present."""
@@ -386,16 +622,24 @@ class CacheManager:
                 (LAST_SUCCESS_TOOL_VERSION_KEY, version),
             )
 
-    def set_audit_warnings(self, symbol_id: str, warnings: list[str]) -> None:
+    def set_audit_warnings(
+        self,
+        symbol_id: str,
+        warnings: list[str],
+        *,
+        file_path: str | None = None,
+    ) -> None:
         """Store audit warnings for a symbol."""
         payload = self._serialize_audit_payload(warnings)
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO audits (symbol_id, warnings) VALUES (?, ?)
-                ON CONFLICT(symbol_id) DO UPDATE SET warnings = excluded.warnings
+                INSERT INTO audits (symbol_id, warnings, file_path) VALUES (?, ?, ?)
+                ON CONFLICT(symbol_id) DO UPDATE SET
+                    warnings = excluded.warnings,
+                    file_path = COALESCE(excluded.file_path, audits.file_path)
                 """,
-                (symbol_id, payload),
+                (symbol_id, payload, file_path),
             )
 
     def set_audit_report(
@@ -403,6 +647,7 @@ class CacheManager:
         symbol_id: str,
         *,
         warnings: list[str],
+        file_path: str | None = None,
         semantic_score: float | None = None,
         score_metadata: dict[str, object] | None = None,
     ) -> None:
@@ -415,10 +660,12 @@ class CacheManager:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO audits (symbol_id, warnings) VALUES (?, ?)
-                ON CONFLICT(symbol_id) DO UPDATE SET warnings = excluded.warnings
+                INSERT INTO audits (symbol_id, warnings, file_path) VALUES (?, ?, ?)
+                ON CONFLICT(symbol_id) DO UPDATE SET
+                    warnings = excluded.warnings,
+                    file_path = COALESCE(excluded.file_path, audits.file_path)
                 """,
-                (symbol_id, payload),
+                (symbol_id, payload, file_path),
             )
 
     def get_audit_warnings(self, symbol_id: str) -> list[str]:
@@ -439,8 +686,18 @@ class CacheManager:
         """Fetch cached audit report payloads for one file path."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT symbol_id, warnings FROM audits WHERE symbol_id LIKE ? ORDER BY symbol_id",
-                (f"{path}:%",),
+                """
+                SELECT audits.symbol_id, audits.warnings
+                FROM audits
+                WHERE audits.file_path = ?
+                UNION
+                SELECT audits.symbol_id, audits.warnings
+                FROM audits
+                JOIN symbols ON symbols.id = audits.symbol_id
+                WHERE symbols.file_path = ?
+                ORDER BY symbol_id
+                """,
+                (path, path),
             ).fetchall()
             reports: list[tuple[str, list[str], float | None, dict[str, object] | None]] = []
             for row in rows:
@@ -460,7 +717,16 @@ class CacheManager:
     def delete_audit_reports_for_file(self, path: str) -> None:
         """Delete cached audit report rows for one file path."""
         with self._connect() as conn:
-            conn.execute("DELETE FROM audits WHERE symbol_id LIKE ?", (f"{path}:%",))
+            conn.execute(
+                """
+                DELETE FROM audits
+                WHERE file_path = ?
+                    OR symbol_id IN (
+                    SELECT id FROM symbols WHERE file_path = ?
+                )
+                """,
+                (path, path),
+            )
 
     def get_audit_file_metadata(self, path: str) -> AuditFileMetadata | None:
         """Return cached audit metadata for a file."""
@@ -498,6 +764,8 @@ class CacheManager:
             conn.executescript("""
                 DELETE FROM audits;
                 DELETE FROM audit_files;
+                DELETE FROM edges;
+                DELETE FROM chunks;
                 DELETE FROM symbols;
                 DELETE FROM files;
                 DELETE FROM metadata;
@@ -734,25 +1002,20 @@ class CacheManager:
 
     def _list_symbol_ids(self, conn: sqlite3.Connection, path: str) -> list[str]:
         """Return symbol ids for a file (internal helper)."""
-        rows = conn.execute("SELECT id FROM symbols WHERE file_path = ?", (path,)).fetchall()
+        rows = conn.execute(
+            "SELECT id FROM symbols WHERE file_path = ? ORDER BY start_line, end_line, id",
+            (path,),
+        ).fetchall()
         return [row["id"] for row in rows]
 
     def _row_to_symbol(self, row: sqlite3.Row) -> Symbol:
         """Convert a database row into a Symbol."""
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
         invariants = json.loads(row["invariants"]) if row["invariants"] else []
-        calls = json.loads(row["calls"]) if "calls" in row.keys() and row["calls"] else []
-        covered_by = (
-            json.loads(row["covered_by"])
-            if "covered_by" in row.keys() and row["covered_by"]
-            else []
-        )
-        signals = json.loads(row["signals"]) if "signals" in row.keys() and row["signals"] else []
-        attributes = (
-            json.loads(row["attributes"])
-            if "attributes" in row.keys() and row["attributes"]
-            else {}
-        )
+        calls = json.loads(row["calls"]) if row["calls"] else []
+        covered_by = json.loads(row["covered_by"]) if row["covered_by"] else []
+        signals = json.loads(row["signals"]) if row["signals"] else []
+        attributes = json.loads(row["attributes"]) if row["attributes"] else {}
         if not isinstance(attributes, dict):
             attributes = {}
 
@@ -760,14 +1023,24 @@ class CacheManager:
             id=row["id"],
             name=row["name"],
             kind=row["kind"],
+            fqname=row["fqname"],
             file_path=row["file_path"],
             start_line=row["start_line"],
             end_line=row["end_line"],
+            container_id=row["container_id"],
+            container_fqname=row["container_fqname"],
             signature=row["signature"],
             docstring=row["docstring"],
             body_hash=row["body_hash"],
             embedding_vector=vector,
             language=row["language"],
+            repo_id=row["repo_id"],
+            commit=row["commit_hash"],
+            visibility=row["visibility"],
+            exported=bool(row["exported"]) if row["exported"] is not None else None,
+            tokens_estimate=(
+                int(row["tokens_estimate"]) if row["tokens_estimate"] is not None else None
+            ),
             invariants=invariants,
             calls=calls,
             covered_by=covered_by,
@@ -784,14 +1057,22 @@ class CacheManager:
             symbol.id,
             symbol.name,
             symbol.kind,
+            symbol.fqname,
             symbol.file_path,
             symbol.start_line,
             symbol.end_line,
+            symbol.container_id,
+            symbol.container_fqname,
             symbol.signature,
             symbol.docstring,
             symbol.body_hash,
             json.dumps(symbol.embedding_vector) if symbol.embedding_vector is not None else None,
             symbol.language,
+            symbol.repo_id,
+            symbol.commit,
+            symbol.visibility,
+            int(symbol.exported) if symbol.exported is not None else None,
+            symbol.tokens_estimate,
             json.dumps(symbol.invariants),
             json.dumps(symbol.calls),
             json.dumps(symbol.covered_by),
@@ -810,22 +1091,32 @@ class CacheManager:
         conn.executemany(
             """
             INSERT INTO symbols (
-                id, name, kind, file_path, start_line, end_line,
+                id, name, kind, fqname, file_path, start_line, end_line,
+                container_id, container_fqname,
                 signature, docstring, body_hash, embedding_vector, language,
+                repo_id, commit_hash, visibility, exported, tokens_estimate,
                 invariants, calls, covered_by, is_serialization_boundary, implicit_contract,
                 signals, attributes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 kind = excluded.kind,
+                fqname = excluded.fqname,
                 file_path = excluded.file_path,
                 start_line = excluded.start_line,
                 end_line = excluded.end_line,
+                container_id = excluded.container_id,
+                container_fqname = excluded.container_fqname,
                 signature = excluded.signature,
                 docstring = excluded.docstring,
                 body_hash = excluded.body_hash,
                 embedding_vector = excluded.embedding_vector,
                 language = excluded.language,
+                repo_id = excluded.repo_id,
+                commit_hash = excluded.commit_hash,
+                visibility = excluded.visibility,
+                exported = excluded.exported,
+                tokens_estimate = excluded.tokens_estimate,
                 invariants = excluded.invariants,
                 calls = excluded.calls,
                 covered_by = excluded.covered_by,
@@ -835,6 +1126,145 @@ class CacheManager:
                 attributes = excluded.attributes
             """,
             symbol_rows,
+        )
+
+    @staticmethod
+    def _row_to_chunk(row: sqlite3.Row) -> SymbolChunk:
+        """Convert a database row into a SymbolChunk."""
+        vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
+        return SymbolChunk(
+            chunk_id=row["chunk_id"],
+            symbol_id=row["symbol_id"],
+            chunk_part_index=int(row["chunk_part_index"]),
+            chunk_part_total=int(row["chunk_part_total"]),
+            text=row["text"],
+            file_path=row["file_path"],
+            start_line=int(row["start_line"]),
+            end_line=int(row["end_line"]),
+            tokens_estimate=(
+                int(row["tokens_estimate"]) if row["tokens_estimate"] is not None else None
+            ),
+            language=row["language"],
+            repo_id=row["repo_id"],
+            commit=row["commit_hash"],
+            embedding_vector=vector,
+        )
+
+    @staticmethod
+    def _chunk_row(chunk: SymbolChunk) -> tuple[object, ...]:
+        """Normalize one chunk into the row payload used by upsert statements."""
+        return (
+            chunk.chunk_id,
+            chunk.symbol_id,
+            chunk.chunk_part_index,
+            chunk.chunk_part_total,
+            chunk.text,
+            chunk.file_path,
+            chunk.start_line,
+            chunk.end_line,
+            chunk.tokens_estimate,
+            chunk.language,
+            chunk.repo_id,
+            chunk.commit,
+            json.dumps(chunk.embedding_vector) if chunk.embedding_vector is not None else None,
+        )
+
+    @staticmethod
+    def _upsert_chunk_rows(
+        conn: sqlite3.Connection,
+        chunk_rows: list[tuple[object, ...]],
+    ) -> None:
+        """Insert or update chunk rows with one executemany call."""
+        conn.executemany(
+            """
+            INSERT INTO chunks (
+                chunk_id, symbol_id, chunk_part_index, chunk_part_total, text,
+                file_path, start_line, end_line, tokens_estimate, language,
+                repo_id, commit_hash, embedding_vector
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chunk_id) DO UPDATE SET
+                symbol_id = excluded.symbol_id,
+                chunk_part_index = excluded.chunk_part_index,
+                chunk_part_total = excluded.chunk_part_total,
+                text = excluded.text,
+                file_path = excluded.file_path,
+                start_line = excluded.start_line,
+                end_line = excluded.end_line,
+                tokens_estimate = excluded.tokens_estimate,
+                language = excluded.language,
+                repo_id = excluded.repo_id,
+                commit_hash = excluded.commit_hash,
+                embedding_vector = excluded.embedding_vector
+            """,
+            chunk_rows,
+        )
+
+    @staticmethod
+    def _row_to_edge(row: sqlite3.Row) -> EdgeRecord:
+        """Convert a database row into an EdgeRecord."""
+        vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
+        return EdgeRecord(
+            edge_id=row["edge_id"],
+            edge_type=row["edge_type"],
+            from_id=row["from_id"],
+            to_id=row["to_id"],
+            from_kind=row["from_kind"],
+            to_kind=row["to_kind"],
+            file_path=row["file_path"],
+            line=int(row["line"]),
+            confidence=float(row["confidence"]),
+            repo_id=row["repo_id"],
+            commit=row["commit_hash"],
+            text=row["text"],
+            embedding_vector=vector,
+        )
+
+    @staticmethod
+    def _edge_row(edge: EdgeRecord) -> tuple[object, ...]:
+        """Normalize one edge record into the row payload used by upsert statements."""
+        return (
+            edge.edge_id,
+            edge.edge_type,
+            edge.from_id,
+            edge.to_id,
+            edge.from_kind,
+            edge.to_kind,
+            edge.file_path,
+            edge.line,
+            edge.confidence,
+            edge.repo_id,
+            edge.commit,
+            edge.text,
+            json.dumps(edge.embedding_vector) if edge.embedding_vector is not None else None,
+        )
+
+    @staticmethod
+    def _upsert_edge_rows(
+        conn: sqlite3.Connection,
+        edge_rows: list[tuple[object, ...]],
+    ) -> None:
+        """Insert or update edge rows with one executemany call."""
+        conn.executemany(
+            """
+            INSERT INTO edges (
+                edge_id, edge_type, from_id, to_id, from_kind, to_kind,
+                file_path, line, confidence, repo_id, commit_hash, text, embedding_vector
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(edge_id) DO UPDATE SET
+                edge_type = excluded.edge_type,
+                from_id = excluded.from_id,
+                to_id = excluded.to_id,
+                from_kind = excluded.from_kind,
+                to_kind = excluded.to_kind,
+                file_path = excluded.file_path,
+                line = excluded.line,
+                confidence = excluded.confidence,
+                repo_id = excluded.repo_id,
+                commit_hash = excluded.commit_hash,
+                text = excluded.text,
+                embedding_vector = excluded.embedding_vector
+            """,
+            edge_rows,
         )
 
     @staticmethod

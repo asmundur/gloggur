@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import wrap_embedding_error
+from gloggur.models import SymbolChunk
 from gloggur.storage.metadata_store import MetadataStore
 from gloggur.storage.vector_store import VectorStore
 
@@ -100,35 +101,38 @@ class HybridSearch:
         """Search for symbols matching the query and filters."""
         start = time.time()
         filters = filters or {}
-        try:
-            query_vector = self.embedding_provider.embed_text(query)
-        except Exception as exc:
-            raise wrap_embedding_error(
-                exc,
-                provider=getattr(self.embedding_provider, "provider", "unknown"),
-                operation="embed query for search",
-            ) from exc
         ranking_context = self._build_ranking_context(query, filters)
         metadata_filters = self._metadata_filters(filters)
-        if metadata_filters:
-            results = self._search_filtered(
-                query_vector,
-                metadata_filters,
-                top_k,
-                ranking_context=ranking_context,
-                context_radius=context_radius,
-            )
-        else:
+        search_mode = str(filters.get("mode") or "semantic").strip().lower()
+        if search_mode == "semantic":
+            try:
+                query_vector = self.embedding_provider.embed_text(query)
+            except Exception as exc:
+                raise wrap_embedding_error(
+                    exc,
+                    provider=getattr(self.embedding_provider, "provider", "unknown"),
+                    operation="embed query for search",
+                ) from exc
             results = self._search_unfiltered(
                 query_vector,
                 top_k,
                 ranking_context=ranking_context,
+                context_radius=context_radius,
+                metadata_filters=metadata_filters,
+            )
+        else:
+            results = self._search_structured(
+                mode=search_mode,
+                query=query,
+                filters=metadata_filters,
+                top_k=top_k,
                 context_radius=context_radius,
             )
         duration_ms = int((time.time() - start) * 1000)
         metadata = {
             "total_results": len(results),
             "search_time_ms": duration_ms,
+            "search_mode": search_mode,
             "ranking_mode": ranking_context.ranking_mode,
             "query_intent": self._query_intent_label(ranking_context.query_intent),
             "explicit_test_intent": ranking_context.explicit_test_intent,
@@ -170,17 +174,29 @@ class HybridSearch:
                 line_distance = 0
 
             if line_distance <= radius * 10:  # heuristic radius multiplier for lines
-                structural.append(self._serialize_result(s, similarity_score=1.0))
+                symbol_chunks = self._chunks_for_symbol(s)
+                if not symbol_chunks:
+                    continue
+                structural.append(
+                    self._serialize_result(
+                        s,
+                        chunk=symbol_chunks[0],
+                        similarity_score=1.0,
+                    )
+                )
 
         # 2. Semantic neighbors (vector search)
         semantic: list[dict[str, object]] = []
-        if symbol.embedding_vector:
+        seed_chunks = self._chunks_for_symbol(symbol)
+        if seed_chunks and seed_chunks[0].embedding_vector:
+            seed_chunk = seed_chunks[0]
             # We use unfiltered search to find conceptually related symbols across the codebase
             vector_results = self._search_unfiltered(
-                symbol.embedding_vector,
+                seed_chunk.embedding_vector,
                 top_k=top_k + 1,
                 ranking_context=self._build_ranking_context("", {}),
                 context_radius=_DEFAULT_CONTEXT_RADIUS,
+                metadata_filters=None,
             )
             for res in vector_results:
                 if res["symbol_id"] != symbol_id:
@@ -230,16 +246,26 @@ class HybridSearch:
         *,
         ranking_context: RankingContext,
         context_radius: int,
+        metadata_filters: dict[str, str] | None = None,
     ) -> list[dict[str, object]]:
-        """Search via vector index without any filters."""
+        """Search chunk vectors and rank matching symbols/chunks."""
         if top_k < 1:
             return []
         candidate_count = self._candidate_fetch_size(top_k, ranking_context)
+        if metadata_filters:
+            candidate_count = max(candidate_count, top_k * 12)
+            if candidate_count > _MAX_EXPANDED_CANDIDATES:
+                candidate_count = _MAX_EXPANDED_CANDIDATES
         hits = self.vector_store.search(query_vector, k=candidate_count)
-        scored: list[tuple[float, float, str, int, str, object]] = []
-        for symbol_id, distance in hits:
-            symbol = self.metadata_store.get_symbol(symbol_id)
+        scored: list[tuple[float, float, str, int, str, object, SymbolChunk]] = []
+        for hit_id, distance in hits:
+            chunk = self._lookup_chunk(hit_id)
+            if not chunk:
+                continue
+            symbol = self.metadata_store.get_symbol(chunk.symbol_id)
             if not symbol:
+                continue
+            if metadata_filters and not self._symbol_matches_filters(symbol, metadata_filters):
                 continue
             similarity_score = self._score_from_distance(distance)
             ranking_score = self._ranking_score(
@@ -252,17 +278,57 @@ class HybridSearch:
                     ranking_score,
                     similarity_score,
                     symbol.file_path,
-                    symbol.start_line,
-                    symbol.id,
+                    chunk.start_line,
+                    chunk.chunk_id,
                     symbol,
+                    chunk,
                 )
             )
+        if not scored and metadata_filters:
+            for symbol in self._filter_symbols(metadata_filters):
+                symbol_chunks = self._chunks_for_symbol(symbol)
+                if not symbol_chunks:
+                    continue
+                chunk = symbol_chunks[0]
+                similarity_score = self._score_symbol(query_vector, symbol)
+                if similarity_score is None and chunk.embedding_vector:
+                    if len(chunk.embedding_vector) == len(query_vector):
+                        similarity_score = self._score_from_distance(
+                            self._l2_distance(query_vector, chunk.embedding_vector)
+                        )
+                if similarity_score is None:
+                    similarity_score = 0.0
+                ranking_score = self._ranking_score(
+                    symbol,
+                    similarity_score=similarity_score,
+                    ranking_context=ranking_context,
+                )
+                scored.append(
+                    (
+                        ranking_score,
+                        similarity_score,
+                        symbol.file_path,
+                        chunk.start_line,
+                        chunk.chunk_id,
+                        symbol,
+                        chunk,
+                    )
+                )
         scored.sort(key=lambda item: (-item[0], -item[1], item[2], item[3], item[4]))
         results = []
-        for ranking_score, similarity_score, _file, _line, _symbol_id, symbol in scored[:top_k]:
+        for (
+            ranking_score,
+            similarity_score,
+            _file,
+            _line,
+            _chunk_id,
+            symbol,
+            chunk,
+        ) in scored[:top_k]:
             results.append(
                 self._serialize_result(
                     symbol,
+                    chunk=chunk,
                     similarity_score=similarity_score,
                     ranking_score=ranking_score,
                     context_radius=context_radius,
@@ -279,44 +345,60 @@ class HybridSearch:
         ranking_context: RankingContext,
         context_radius: int,
     ) -> list[dict[str, object]]:
-        """Search within metadata-filtered symbols and rank by similarity."""
+        """Search with metadata filters by delegating to chunk-vector path."""
+        return self._search_unfiltered(
+            query_vector,
+            top_k,
+            ranking_context=ranking_context,
+            context_radius=context_radius,
+            metadata_filters=filters,
+        )
+
+    def _search_structured(
+        self,
+        *,
+        mode: str,
+        query: str,
+        filters: dict[str, str],
+        top_k: int,
+        context_radius: int,
+    ) -> list[dict[str, object]]:
+        """Run non-semantic search modes against symbol/chunk metadata."""
         if top_k < 1:
             return []
-        candidates = self._filter_symbols(filters)
-        if not candidates:
+        symbols = self._filter_symbols(filters)
+        if mode == "by_fqname":
+            symbols = [symbol for symbol in symbols if (symbol.fqname or "") == query.strip()]
+        elif mode == "by_fqname_regex":
+            try:
+                pattern = re.compile(query)
+            except re.error:
+                return []
+            symbols = [symbol for symbol in symbols if pattern.search(symbol.fqname or "")]
+        elif mode == "by_path":
+            target_path = (filters.get("file") or query).strip()
+            if not target_path:
+                return []
+            symbols = self._filter_symbols({**filters, "file": target_path})
+        else:
+            # Unknown modes fail closed as no matches.
             return []
-        scored: list[tuple[float, float, str, int, str, object]] = []
-        for symbol in candidates:
-            similarity_score = self._score_symbol(query_vector, symbol)
-            if similarity_score is None:
-                similarity_score = 0.0
-            ranking_score = self._ranking_score(
+
+        rows: list[tuple[str, int, str, object, SymbolChunk]] = []
+        for symbol in symbols:
+            for chunk in self._chunks_for_symbol(symbol):
+                rows.append((symbol.file_path, chunk.start_line, chunk.chunk_id, symbol, chunk))
+        rows.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [
+            self._serialize_result(
                 symbol,
-                similarity_score=similarity_score,
-                ranking_context=ranking_context,
+                chunk=chunk,
+                similarity_score=1.0,
+                ranking_score=1.0,
+                context_radius=context_radius,
             )
-            scored.append(
-                (
-                    ranking_score,
-                    similarity_score,
-                    symbol.file_path,
-                    symbol.start_line,
-                    symbol.id,
-                    symbol,
-                )
-            )
-        scored.sort(key=lambda item: (-item[0], -item[1], item[2], item[3], item[4]))
-        results = []
-        for ranking_score, similarity_score, _file, _line, _symbol_id, symbol in scored[:top_k]:
-            results.append(
-                self._serialize_result(
-                    symbol,
-                    similarity_score=similarity_score,
-                    ranking_score=ranking_score,
-                    context_radius=context_radius,
-                )
-            )
-        return results
+            for _file, _line, _chunk_id, symbol, chunk in rows[:top_k]
+        ]
 
     def _filter_symbols(self, filters: dict[str, str]):
         """Return symbols matching metadata filters with path normalization."""
@@ -338,13 +420,53 @@ class HybridSearch:
                 return symbols
         return []
 
+    def _symbol_matches_filters(self, symbol, filters: dict[str, str]) -> bool:
+        """Return whether a symbol matches metadata filter predicates."""
+        raw_kind = filters.get("kind")
+        if raw_kind and symbol.kind != raw_kind:
+            return False
+        raw_language = filters.get("language")
+        if raw_language and symbol.language != raw_language:
+            return False
+        file_path = filters.get("file")
+        if file_path:
+            candidates = self._file_path_candidates(file_path)
+            normalized_symbol_path = os.path.normpath(symbol.file_path)
+            matched = False
+            for candidate in candidates:
+                normalized_candidate = os.path.normpath(candidate)
+                if (
+                    normalized_symbol_path == normalized_candidate
+                    or normalized_symbol_path.startswith(f"{normalized_candidate}{os.sep}")
+                    or normalized_symbol_path.startswith(f"{normalized_candidate}/")
+                ):
+                    matched = True
+                    break
+            if not matched:
+                return False
+        return True
+
+    def _lookup_chunk(self, hit_id: str) -> SymbolChunk | None:
+        """Resolve vector hit id into a chunk record."""
+        getter = getattr(self.metadata_store, "get_chunk", None)
+        if callable(getter):
+            return getter(hit_id)
+        return None
+
+    def _chunks_for_symbol(self, symbol) -> list[SymbolChunk]:
+        """Return persisted chunks for a symbol."""
+        lister = getattr(self.metadata_store, "list_chunks_for_symbol", None)
+        if callable(lister):
+            return lister(symbol.id)
+        return []
+
     @staticmethod
     def _metadata_filters(filters: dict[str, str] | None) -> dict[str, str]:
         """Extract metadata-store filters from full query-time filter payload."""
         if not filters:
             return {}
         filtered: dict[str, str] = {}
-        for key in ("kind", "file", "language"):
+        for key in ("kind", "file", "language", "mode"):
             value = filters.get(key)
             if isinstance(value, str) and value.strip():
                 filtered[key] = value
@@ -589,6 +711,7 @@ class HybridSearch:
         self,
         symbol,
         *,
+        chunk: SymbolChunk | None = None,
         similarity_score: float,
         ranking_score: float | None = None,
         context_radius: int = _DEFAULT_CONTEXT_RADIUS,
@@ -596,22 +719,36 @@ class HybridSearch:
         """Build the JSON-friendly result payload for a symbol."""
         if ranking_score is None:
             ranking_score = similarity_score
+        effective_chunk = chunk
+        if effective_chunk is None:
+            symbol_chunks = self._chunks_for_symbol(symbol)
+            if not symbol_chunks:
+                raise RuntimeError(f"missing persisted chunk rows for symbol '{symbol.id}'")
+            effective_chunk = symbol_chunks[0]
+        chunk_context = effective_chunk.text.strip() if effective_chunk.text else ""
+        if not chunk_context:
+            chunk_context = self._load_context(
+                symbol.file_path,
+                effective_chunk.start_line,
+                radius=context_radius,
+            )
         return {
             "symbol_id": symbol.id,
+            "chunk_id": effective_chunk.chunk_id,
+            "chunk_part_index": effective_chunk.chunk_part_index,
+            "chunk_part_total": effective_chunk.chunk_part_total,
             "symbol": symbol.name,
+            "fqname": symbol.fqname,
             "kind": symbol.kind,
             "file": symbol.file_path,
-            "line": symbol.start_line,
-            "line_end": symbol.end_line,
+            "line": effective_chunk.start_line,
+            "line_end": effective_chunk.end_line,
             "signature": symbol.signature,
             "docstring": symbol.docstring,
             "similarity_score": similarity_score,
             "ranking_score": ranking_score,
-            "context": self._load_context(
-                symbol.file_path,
-                symbol.start_line,
-                radius=context_radius,
-            ),
+            "chunk_text": effective_chunk.text,
+            "context": chunk_context,
         }
 
     @staticmethod

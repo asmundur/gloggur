@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import subprocess
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -9,8 +11,9 @@ from dataclasses import dataclass, field
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError, wrap_embedding_error
+from gloggur.graph.extractor import GraphEdgeExtractor
 from gloggur.indexer.cache import CacheConfig, CacheManager
-from gloggur.models import FileMetadata, IndexMetadata, Symbol
+from gloggur.models import EdgeRecord, FileMetadata, IndexMetadata, Symbol, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.storage.vector_store import VectorStore
 
@@ -143,9 +146,14 @@ class PreparedFileIndex:
     content_hash: str
     source: str
     symbols: list[Symbol]
+    chunks: list[SymbolChunk]
+    edges: list[EdgeRecord]
     previous_symbol_ids: list[str]
+    previous_chunk_ids: list[str]
     previous_metadata: FileMetadata | None
     previous_symbols: list[Symbol]
+    previous_chunks: list[SymbolChunk]
+    previous_edges: list[EdgeRecord]
     symbols_added: int
     symbols_updated: int
     symbols_removed: int
@@ -174,6 +182,7 @@ class Indexer:
         self.vector_store = vector_store
         self._progress_callback: Callable[[int, int], None] | None = None
         self._scan_callback: Callable[[int, int, str], None] | None = None
+        self._commit_cache: dict[str, str] = {}
 
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
@@ -223,10 +232,10 @@ class Indexer:
                 else:
                     failed_samples.append(file_path)
 
-        total_embedding_symbols = sum(len(prepared.symbols) for prepared in prepared_files)
+        total_embedding_symbols = sum(len(prepared.chunks) for prepared in prepared_files)
         embedded_symbols_done = 0
         for prepared in prepared_files:
-            file_symbols_total = len(prepared.symbols)
+            file_symbols_total = len(prepared.chunks)
             file_progress_done = 0
             progress_callback = None
             if self._progress_callback is not None and total_embedding_symbols > 0:
@@ -245,11 +254,11 @@ class Indexer:
                 progress_callback = _progress
 
             try:
-                prepared.symbols = self._apply_embeddings(
-                    prepared.symbols,
-                    prepared.source,
-                    progress_callback,
+                prepared.chunks = self._apply_embeddings(
+                    prepared.chunks,
+                    progress_callback=progress_callback,
                 )
+                prepared.edges = self._apply_edge_embeddings(prepared.edges)
                 self._persist_prepared_file(prepared)
             except Exception as exc:
                 failed_files += 1
@@ -349,11 +358,11 @@ class Indexer:
             return outcome
 
         try:
-            prepared.symbols = self._apply_embeddings(
-                prepared.symbols,
-                prepared.source,
-                self._progress_callback,
+            prepared.chunks = self._apply_embeddings(
+                prepared.chunks,
+                progress_callback=self._progress_callback,
             )
+            prepared.edges = self._apply_edge_embeddings(prepared.edges)
             self._persist_prepared_file(prepared)
         except Exception as exc:
             return FileIndexOutcome(
@@ -398,9 +407,13 @@ class Indexer:
         content_hash = self._hash_content(source)
         existing = self.cache.get_file_metadata(path)
         previous_symbols: list[Symbol] = []
+        previous_chunks: list[SymbolChunk] = []
+        previous_edges: list[EdgeRecord] = []
         existing_symbols_by_id: dict[str, Symbol] = {}
         if existing:
             previous_symbols = self.cache.list_symbols_for_file(path)
+            previous_chunks = self.cache.list_chunks_for_file(path)
+            previous_edges = self.cache.list_edges_for_file(path)
             existing_symbols_by_id = {symbol.id: symbol for symbol in previous_symbols}
         if existing and existing.content_hash == content_hash:
             return None, FileIndexOutcome(status="unchanged")
@@ -422,7 +435,27 @@ class Indexer:
                 detail=f"{type(exc).__name__}: {exc}",
             )
 
+        repo_id = self._repo_id(path)
+        commit = self._resolve_commit(path)
+        for symbol in symbols:
+            if not symbol.repo_id:
+                symbol.repo_id = repo_id
+            symbol.commit = commit
+
+        chunks = self._build_symbol_chunks(path=path, source=source, symbols=symbols, commit=commit)
+        candidate_symbols = self.cache.list_symbols()
+        edges = self._build_graph_edges(
+            path=path,
+            source=source,
+            symbols=symbols,
+            candidate_symbols=candidate_symbols,
+            repo_id=repo_id,
+            commit=commit,
+            language=parser_entry.language,
+        )
+
         previous_symbol_ids = existing.symbols if existing else []
+        previous_chunk_ids = [chunk.chunk_id for chunk in previous_chunks]
         new_symbols_by_id = {symbol.id: symbol for symbol in symbols}
         new_symbol_ids = set(new_symbols_by_id)
         previous_symbol_ids_set = set(previous_symbol_ids)
@@ -443,9 +476,14 @@ class Indexer:
             content_hash=content_hash,
             source=source,
             symbols=symbols,
+            chunks=chunks,
+            edges=edges,
             previous_symbol_ids=previous_symbol_ids,
+            previous_chunk_ids=previous_chunk_ids,
             previous_metadata=existing.model_copy(deep=True) if existing else None,
             previous_symbols=[symbol.model_copy(deep=True) for symbol in previous_symbols],
+            previous_chunks=[chunk.model_copy(deep=True) for chunk in previous_chunks],
+            previous_edges=[edge.model_copy(deep=True) for edge in previous_edges],
             symbols_added=symbols_added,
             symbols_updated=symbols_updated,
             symbols_removed=symbols_removed,
@@ -455,9 +493,10 @@ class Indexer:
     def _persist_prepared_file(self, prepared: PreparedFileIndex) -> None:
         """Persist one prepared file into cache and vector store."""
         next_symbol_ids = [symbol.id for symbol in prepared.symbols]
+        next_chunk_ids = [chunk.chunk_id for chunk in prepared.chunks]
         try:
-            if self.vector_store and prepared.previous_symbol_ids:
-                self.vector_store.remove_ids(prepared.previous_symbol_ids)
+            if self.vector_store and prepared.previous_chunk_ids:
+                self.vector_store.remove_ids(prepared.previous_chunk_ids)
             self.cache.replace_file_index(
                 prepared.path,
                 FileMetadata(
@@ -467,12 +506,14 @@ class Indexer:
                     symbols=next_symbol_ids,
                 ),
                 prepared.symbols,
+                prepared.chunks,
+                prepared.edges,
             )
-            if self.vector_store and prepared.symbols:
-                self.vector_store.upsert_vectors(prepared.symbols)
+            if self.vector_store and prepared.chunks:
+                self.vector_store.upsert_vectors(prepared.chunks)
         except Exception as persist_exc:
             try:
-                self._rollback_persisted_file(prepared, next_symbol_ids)
+                self._rollback_persisted_file(prepared, next_symbol_ids, next_chunk_ids)
             except Exception as rollback_exc:
                 raise RuntimeError(
                     "file persist failed and rollback did not complete "
@@ -485,26 +526,33 @@ class Indexer:
         self,
         prepared: PreparedFileIndex,
         next_symbol_ids: list[str],
+        next_chunk_ids: list[str],
     ) -> None:
         """Best-effort restore of file-local cache/vector state after persist failure."""
         if prepared.previous_metadata is None:
             self.cache.delete_symbols_for_file(prepared.path)
+            self.cache.delete_chunks_for_file(prepared.path)
+            self.cache.delete_edges_for_file(prepared.path)
             self.cache.delete_file_metadata(prepared.path)
         else:
             self.cache.replace_file_index(
                 prepared.path,
                 prepared.previous_metadata,
                 prepared.previous_symbols,
+                prepared.previous_chunks,
+                prepared.previous_edges,
             )
 
         if not self.vector_store:
             return
-        rollback_symbol_ids = {symbol_id for symbol_id in next_symbol_ids if symbol_id}
-        rollback_symbol_ids.update(symbol.id for symbol in prepared.previous_symbols if symbol.id)
-        if rollback_symbol_ids:
-            self.vector_store.remove_ids(sorted(rollback_symbol_ids))
-        if prepared.previous_symbols:
-            self.vector_store.upsert_vectors(prepared.previous_symbols)
+        rollback_ids = {symbol_id for symbol_id in next_symbol_ids if symbol_id}
+        rollback_ids.update(chunk_id for chunk_id in next_chunk_ids if chunk_id)
+        rollback_ids.update(symbol.id for symbol in prepared.previous_symbols if symbol.id)
+        rollback_ids.update(chunk.chunk_id for chunk in prepared.previous_chunks if chunk.chunk_id)
+        if rollback_ids:
+            self.vector_store.remove_ids(sorted(rollback_ids))
+        if prepared.previous_chunks:
+            self.vector_store.upsert_vectors(prepared.previous_chunks)
 
     def index_file(self, path: str) -> int | None:
         """Index a file and return symbol count when indexed, else None."""
@@ -546,9 +594,14 @@ class Indexer:
             try:
                 metadata = self.cache.get_file_metadata(stale_path)
                 previous_symbol_ids = metadata.symbols if metadata else []
-                if self.vector_store and previous_symbol_ids:
-                    self.vector_store.remove_ids(previous_symbol_ids)
+                previous_chunk_ids = [
+                    chunk.chunk_id for chunk in self.cache.list_chunks_for_file(stale_path)
+                ]
+                if self.vector_store and previous_chunk_ids:
+                    self.vector_store.remove_ids(previous_chunk_ids)
                 self.cache.delete_symbols_for_file(stale_path)
+                self.cache.delete_chunks_for_file(stale_path)
+                self.cache.delete_edges_for_file(stale_path)
                 self.cache.delete_file_metadata(stale_path)
                 files_removed += 1
                 symbols_removed += len(previous_symbol_ids)
@@ -596,9 +649,9 @@ class Indexer:
                 "failed_samples": [f"vector metadata check failed: {type(exc).__name__}: {exc}"],
             }
 
-        cache_symbol_ids = {symbol.id for symbol in self.cache.list_symbols()}
-        missing_vectors = sorted(cache_symbol_ids - vector_symbol_ids)
-        stale_vectors = sorted(vector_symbol_ids - cache_symbol_ids)
+        cache_chunk_ids = {chunk.chunk_id for chunk in self.cache.list_chunks()}
+        missing_vectors = sorted(cache_chunk_ids - vector_symbol_ids)
+        stale_vectors = sorted(vector_symbol_ids - cache_chunk_ids)
         if not missing_vectors and not stale_vectors:
             return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
         sample = (
@@ -621,45 +674,95 @@ class Indexer:
 
     def _apply_embeddings(
         self,
-        symbols: list[Symbol],
-        source: str,
+        chunks: list[SymbolChunk],
         progress_callback: Callable[[int, int], None] | None = None,
-    ) -> list[Symbol]:
-        """Attach embedding vectors to symbols when a provider is available."""
+    ) -> list[SymbolChunk]:
+        """Attach embedding vectors to chunk rows when available."""
 
         if not self.embedding_provider:
-            return symbols
-        lines = source.splitlines()
-        texts = [self._symbol_text(symbol, lines) for symbol in symbols]
+            return chunks
+        if not chunks:
+            return chunks
+        texts = [chunk.text for chunk in chunks]
         if not texts:
-            return symbols
-        total = len(symbols)
+            return chunks
+        total = len(chunks)
         chunk_size = getattr(self.embedding_provider, "_chunk_size", 50)
-        done = 0
         if progress_callback is not None:
             progress_callback(0, total)
         for i in range(0, total, chunk_size):
             chunk_texts = texts[i : i + chunk_size]
-            chunk_symbols = symbols[i : i + chunk_size]
+            chunk_rows = chunks[i : i + chunk_size]
             try:
                 vectors = self.embedding_provider.embed_batch(chunk_texts)
-                if len(vectors) != len(chunk_symbols):
+                if len(vectors) != len(chunk_rows):
                     raise RuntimeError(
                         "embedding provider returned "
-                        f"{len(vectors)} vectors for {len(chunk_symbols)} symbols during indexing"
+                        f"{len(vectors)} vectors for {len(chunk_rows)} "
+                        "chunks during indexing"
                     )
             except Exception as exc:
                 raise wrap_embedding_error(
                     exc,
                     provider=self.config.embedding_provider,
-                    operation="embed symbol batch for indexing",
+                    operation="embed chunk batch for indexing",
                 ) from exc
-            for symbol, vector in zip(chunk_symbols, vectors, strict=True):
-                symbol.embedding_vector = vector
+            for chunk_row, vector in zip(chunk_rows, vectors, strict=True):
+                chunk_row.embedding_vector = vector
             done = min(i + chunk_size, total)
             if progress_callback is not None:
                 progress_callback(done, total)
-        return symbols
+        return chunks
+
+    def _apply_edge_embeddings(self, edges: list[EdgeRecord]) -> list[EdgeRecord]:
+        """Attach embedding vectors to edge fact text when a provider is available."""
+        if not self.embedding_provider:
+            return edges
+        texts = [edge.text or "" for edge in edges]
+        if not texts:
+            return edges
+        batch_size = getattr(self.embedding_provider, "_chunk_size", 50)
+        for offset in range(0, len(edges), batch_size):
+            edge_batch = edges[offset : offset + batch_size]
+            text_batch = texts[offset : offset + batch_size]
+            try:
+                vectors = self.embedding_provider.embed_batch(text_batch)
+                if len(vectors) != len(edge_batch):
+                    raise RuntimeError(
+                        "embedding provider returned "
+                        f"{len(vectors)} vectors for {len(edge_batch)} edges during indexing"
+                    )
+            except Exception as exc:
+                raise wrap_embedding_error(
+                    exc,
+                    provider=self.config.embedding_provider,
+                    operation="embed edge batch for indexing",
+                ) from exc
+            for edge_row, vector in zip(edge_batch, vectors, strict=True):
+                edge_row.embedding_vector = vector
+        return edges
+
+    @staticmethod
+    def _build_graph_edges(
+        *,
+        path: str,
+        source: str,
+        symbols: list[Symbol],
+        candidate_symbols: list[Symbol],
+        repo_id: str,
+        commit: str,
+        language: str,
+    ) -> list[EdgeRecord]:
+        """Extract deterministic graph edges for a file from symbols and source text."""
+        extractor = GraphEdgeExtractor(language)
+        return extractor.extract_edges(
+            path=path,
+            source=source,
+            symbols=symbols,
+            candidate_symbols=candidate_symbols,
+            repo_id=repo_id,
+            commit=commit,
+        )
 
     @staticmethod
     def _hash_content(source: str) -> str:
@@ -667,12 +770,248 @@ class Indexer:
 
         return hashlib.sha256(source.encode("utf8")).hexdigest()
 
-    @staticmethod
-    def _symbol_text(symbol: Symbol, lines: list[str]) -> str:
-        """Build embedding text by slicing lines and joining signature/docstring/snippet."""
+    def _build_symbol_chunks(
+        self,
+        *,
+        path: str,
+        source: str,
+        symbols: list[Symbol],
+        commit: str,
+    ) -> list[SymbolChunk]:
+        """Build deterministic symbol-boundary embedding chunks with split support."""
+        lines = source.splitlines()
+        imports = self._extract_import_lines(lines)
+        chunks: list[SymbolChunk] = []
+        for symbol in symbols:
+            body_lines = lines[max(0, symbol.start_line - 1) : max(0, symbol.end_line)]
+            body_text = "\n".join(body_lines).strip()
+            signature_block = self._build_signature_block(symbol)
+            imports_block = self._build_imports_in_scope_block(imports=imports, body_text=body_text)
+            header_lines = [
+                f"FQNAME: {symbol.fqname or symbol.name}",
+                f"KIND: {symbol.kind}",
+                f"FILE: {symbol.file_path}",
+                f"LINES: {symbol.start_line}-{symbol.end_line}",
+            ]
+            prefix_sections = ["\n".join(header_lines), signature_block]
+            if imports_block:
+                prefix_sections.append(imports_block)
+            prefix = "\n\n".join(section for section in prefix_sections if section).strip()
+            max_bytes = max(256, int(getattr(self.config, "max_symbol_chunk_bytes", 12000)))
+            parts = self._split_symbol_body_parts(
+                prefix=prefix,
+                body_lines=body_lines,
+                start_line=symbol.start_line,
+                max_bytes=max_bytes,
+            )
+            total_parts = len(parts)
+            for index, (part_start, part_end, part_body_text) in enumerate(parts, start=1):
+                text_sections = [prefix, "BODY:", part_body_text]
+                text = "\n\n".join(section for section in text_sections if section).strip()
+                chunk_id = self._hash_chunk_id(
+                    symbol_id=symbol.id,
+                    part_index=index,
+                    part_total=total_parts,
+                    start_line=part_start,
+                    end_line=part_end,
+                )
+                chunks.append(
+                    SymbolChunk(
+                        chunk_id=chunk_id,
+                        symbol_id=symbol.id,
+                        chunk_part_index=index,
+                        chunk_part_total=total_parts,
+                        text=text,
+                        file_path=path,
+                        start_line=part_start,
+                        end_line=part_end,
+                        tokens_estimate=self._estimate_tokens(text),
+                        language=symbol.language,
+                        repo_id=symbol.repo_id,
+                        commit=commit,
+                    )
+                )
+        return chunks
 
-        snippet_start = max(0, symbol.start_line - 1)
-        snippet_end = min(len(lines), snippet_start + 3)
-        snippet = "\n".join(lines[snippet_start:snippet_end]).strip()
-        parts = [symbol.signature or "", symbol.docstring or "", snippet]
-        return "\n".join(part for part in parts if part).strip()
+    @staticmethod
+    def _extract_import_lines(lines: list[str]) -> list[str]:
+        """Extract candidate import lines for import-in-scope blocks."""
+        candidates: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(
+                ("import ", "from ", "use ", "package ", "#include ", "require(")
+            ):
+                candidates.append(stripped)
+        return candidates
+
+    @staticmethod
+    def _build_signature_block(symbol: Symbol) -> str:
+        """Build a deterministic best-effort signature block."""
+        signature = (symbol.signature or "").strip()
+        if not signature:
+            return "SIGNATURE:\nRAW: <unknown>"
+        params = "<unknown>"
+        returns = "<unknown>"
+        modifiers: list[str] = []
+
+        if "(" in signature and ")" in signature:
+            params = signature.split("(", 1)[1].split(")", 1)[0].strip() or "<none>"
+        if "->" in signature:
+            returns = signature.split("->", 1)[1].split(":", 1)[0].strip() or "<unknown>"
+        lower = signature.lower()
+        for marker in (
+            "public",
+            "private",
+            "protected",
+            "static",
+            "async",
+            "final",
+            "pub",
+            "export",
+        ):
+            if marker in lower:
+                modifiers.append(marker)
+        modifier_text = ", ".join(dict.fromkeys(modifiers)) if modifiers else "<none>"
+        return "\n".join(
+            [
+                "SIGNATURE:",
+                f"RAW: {signature}",
+                f"PARAMS: {params}",
+                f"RETURNS: {returns}",
+                f"MODIFIERS: {modifier_text}",
+            ]
+        )
+
+    @staticmethod
+    def _build_imports_in_scope_block(
+        *,
+        imports: list[str],
+        body_text: str,
+        max_items: int = 8,
+    ) -> str:
+        """Build capped import-in-scope section based on simple lexical matching."""
+        if not imports:
+            return ""
+        body_lower = body_text.lower()
+        selected: list[str] = []
+        for statement in imports:
+            tokens = [token for token in re.split(r"[^A-Za-z0-9_]+", statement) if token]
+            token_match = any(token.lower() in body_lower for token in tokens if len(token) > 2)
+            if token_match:
+                selected.append(statement)
+            if len(selected) >= max_items:
+                break
+        if not selected:
+            return ""
+        return "IMPORTS_IN_SCOPE:\n" + "\n".join(selected)
+
+    @classmethod
+    def _split_symbol_body_parts(
+        cls,
+        *,
+        prefix: str,
+        body_lines: list[str],
+        start_line: int,
+        max_bytes: int,
+    ) -> list[tuple[int, int, str]]:
+        """Split one symbol body into deterministic parts constrained by byte budget."""
+        if not body_lines:
+            return [(start_line, start_line, "")]
+
+        prefix_bytes = len(prefix.encode("utf8"))
+        body_text = "\n".join(body_lines).strip()
+        whole_text = "\n\n".join([prefix, "BODY:", body_text]).strip()
+        if len(whole_text.encode("utf8")) <= max_bytes:
+            return [(start_line, start_line + len(body_lines) - 1, body_text)]
+
+        parts: list[tuple[int, int, str]] = []
+        current_lines: list[str] = []
+        current_start = start_line
+        for offset, line in enumerate(body_lines):
+            absolute_line = start_line + offset
+            candidate_lines = current_lines + [line]
+            candidate_text = "\n".join(candidate_lines).strip()
+            candidate_bytes = len(candidate_text.encode("utf8")) + prefix_bytes + len("BODY:") + 4
+            if current_lines and candidate_bytes > max_bytes:
+                finalized_text = "\n".join(current_lines).strip()
+                parts.append((current_start, absolute_line - 1, finalized_text))
+                current_lines = [line]
+                current_start = absolute_line
+            else:
+                current_lines.append(line)
+
+        if current_lines:
+            finalized_text = "\n".join(current_lines).strip()
+            parts.append((current_start, start_line + len(body_lines) - 1, finalized_text))
+        return parts
+
+    @staticmethod
+    def _hash_chunk_id(
+        *,
+        symbol_id: str,
+        part_index: int,
+        part_total: int,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        """Build deterministic chunk id from symbol identity and chunk coordinates."""
+        payload = "|".join(
+            [symbol_id, str(part_index), str(part_total), str(start_line), str(end_line)]
+        )
+        return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Best-effort token estimate used for chunk metadata sizing."""
+        stripped = text.strip()
+        if not stripped:
+            return 0
+        return max(1, len(stripped.split()))
+
+    def _repo_id(self, path: str) -> str:
+        """Return deterministic repo id for the path using nearest .git root."""
+        absolute = os.path.abspath(path)
+        current = absolute if os.path.isdir(absolute) else os.path.dirname(absolute)
+        while True:
+            if os.path.exists(os.path.join(current, ".git")):
+                return hashlib.sha256(current.encode("utf8")).hexdigest()
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        fallback = os.path.dirname(absolute) if os.path.isfile(absolute) else absolute
+        return hashlib.sha256(fallback.encode("utf8")).hexdigest()
+
+    def _resolve_commit(self, path: str) -> str:
+        """Resolve HEAD commit for nearest git root with deterministic fallback."""
+        absolute = os.path.abspath(path)
+        current = absolute if os.path.isdir(absolute) else os.path.dirname(absolute)
+        repo_root: str | None = None
+        while True:
+            if os.path.exists(os.path.join(current, ".git")):
+                repo_root = current
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        if repo_root is None:
+            return "unknown"
+        cached = self._commit_cache.get(repo_root)
+        if cached is not None:
+            return cached
+        try:
+            completed = subprocess.run(
+                ["git", "-C", repo_root, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            commit = completed.stdout.strip() or "unknown"
+        except Exception:
+            commit = "unknown"
+        self._commit_cache[repo_root] = commit
+        return commit

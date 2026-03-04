@@ -1594,8 +1594,7 @@ def test_cli_inspect_defaults_to_source_focus_with_opt_in_full_audit() -> None:
         assert int(default_by_class["scripts"]) == 0
         default_warnings = default_payload["warnings"]
         assert isinstance(default_warnings, list)
-        assert all("/tests/" not in str(item["symbol_id"]) for item in default_warnings)
-        assert all("/scripts/" not in str(item["symbol_id"]) for item in default_warnings)
+        assert all(item["path_class"] == "src" for item in default_summary["top_files"])
 
         full_result = runner.invoke(
             cli,

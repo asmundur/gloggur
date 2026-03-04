@@ -84,6 +84,8 @@ def test_cache_replace_file_index_replaces_symbol_rows_and_metadata() -> None:
             symbols=[first.id],
         ),
         [first],
+        [],
+        [],
     )
     cache.replace_file_index(
         "sample.py",
@@ -94,6 +96,8 @@ def test_cache_replace_file_index_replaces_symbol_rows_and_metadata() -> None:
             symbols=[second.id],
         ),
         [second],
+        [],
+        [],
     )
 
     metadata = cache.get_file_metadata("sample.py")
@@ -114,6 +118,8 @@ def test_cache_replace_file_index_keeps_metadata_for_empty_symbol_files() -> Non
         "sample.py",
         FileMetadata(path="sample.py", language="python", content_hash="hash-empty", symbols=[]),
         [],
+        [],
+        [],
     )
 
     metadata = cache.get_file_metadata("sample.py")
@@ -130,6 +136,7 @@ def test_cache_round_trip_structured_audit_reports_and_legacy_warning_reads() ->
     cache = CacheManager(CacheConfig(cache_dir))
 
     symbol = _sample_symbol("sample.py:1:add")
+    cache.upsert_symbols([symbol])
     cache.set_audit_report(
         symbol.id,
         warnings=[],

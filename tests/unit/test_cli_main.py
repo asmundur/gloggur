@@ -257,7 +257,11 @@ def test_inspect_warning_summary_groups_by_type_path_class_and_top_files() -> No
     ]
     summary = _build_inspect_warning_summary(
         warning_reports,
-        symbol_file_paths={},
+        symbol_file_paths={
+            "/tmp/repo/src/a.py:1:a": "/tmp/repo/src/a.py",
+            "/tmp/repo/tests/test_a.py:1:test_a": "/tmp/repo/tests/test_a.py",
+            "/tmp/repo/scripts/tool.py:1:tool": "/tmp/repo/scripts/tool.py",
+        },
     )
 
     assert summary["total_warnings"] == 4
@@ -365,6 +369,7 @@ def test_load_cached_inspect_reports_rehydrates_cached_reports(tmp_path: Path) -
         semantic_score=0.91,
         score_metadata={"threshold_applied": 0.2, "scored": True},
     )
+    cache.upsert_symbols([symbol])
 
     reports = _load_cached_inspect_reports(
         cache,

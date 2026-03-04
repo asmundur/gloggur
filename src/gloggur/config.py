@@ -71,6 +71,8 @@ class GloggurConfig:
     storage: dict[str, str] = field(default_factory=lambda: {"backend": "sqlite_faiss"})
     runtime: dict[str, str] = field(default_factory=lambda: {"host": "python_local"})
     index_version: str = "1"
+    max_symbol_chunk_bytes: int = 12000
+    max_symbol_chunk_tokens: int = 2000
 
     def embedding_profile(self) -> str:
         """Return a stable profile string for the active embedding configuration."""
@@ -232,4 +234,18 @@ class GloggurConfig:
             data["storage"] = {"backend": _env_value("GLOGGUR_STORAGE_BACKEND")}
         if _env_value("GLOGGUR_RUNTIME_HOST"):
             data["runtime"] = {"host": _env_value("GLOGGUR_RUNTIME_HOST")}
+        if _env_value("GLOGGUR_MAX_SYMBOL_CHUNK_BYTES"):
+            try:
+                data["max_symbol_chunk_bytes"] = int(
+                    _env_value("GLOGGUR_MAX_SYMBOL_CHUNK_BYTES") or "12000"
+                )
+            except ValueError:
+                pass
+        if _env_value("GLOGGUR_MAX_SYMBOL_CHUNK_TOKENS"):
+            try:
+                data["max_symbol_chunk_tokens"] = int(
+                    _env_value("GLOGGUR_MAX_SYMBOL_CHUNK_TOKENS") or "2000"
+                )
+            except ValueError:
+                pass
         return data

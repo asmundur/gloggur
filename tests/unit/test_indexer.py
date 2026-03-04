@@ -72,14 +72,8 @@ def test_indexer_skips_unchanged_files() -> None:
 
 def test_indexer_replaces_changed_file_symbols_and_updates_counts() -> None:
     """Reindexing a changed file should replace stale symbol rows and refresh totals."""
-    initial_source = (
-        "def alpha(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
-    updated_source = (
-        "def beta(value: int) -> int:\n"
-        "    return value + 2\n"
-    )
+    initial_source = "def alpha(value: int) -> int:\n" "    return value + 1\n"
+    updated_source = "def beta(value: int) -> int:\n" "    return value + 2\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": initial_source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -110,14 +104,8 @@ def test_indexer_replaces_changed_file_symbols_and_updates_counts() -> None:
 
 def test_indexer_prunes_deleted_files_and_reports_symbol_removals() -> None:
     """Reindex should remove stale file symbols when files are deleted from disk."""
-    keep_source = (
-        "def keep_me(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
-    drop_source = (
-        "def drop_me(value: int) -> int:\n"
-        "    return value + 2\n"
-    )
+    keep_source = "def keep_me(value: int) -> int:\n" "    return value + 1\n"
+    drop_source = "def drop_me(value: int) -> int:\n" "    return value + 2\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"keep.py": keep_source, "drop.py": drop_source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -150,14 +138,8 @@ def test_indexer_surfaces_stale_cleanup_failures_with_deterministic_reason_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cleanup failure for stale files should not report success and should include remediation."""
-    keep_source = (
-        "def keep_me(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
-    drop_source = (
-        "def drop_me(value: int) -> int:\n"
-        "    return value + 2\n"
-    )
+    keep_source = "def keep_me(value: int) -> int:\n" "    return value + 1\n"
+    drop_source = "def drop_me(value: int) -> int:\n" "    return value + 2\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"keep.py": keep_source, "drop.py": drop_source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -192,6 +174,59 @@ def test_indexer_surfaces_stale_cleanup_failures_with_deterministic_reason_code(
         assert guidance["stale_cleanup_error"]
 
 
+def test_indexer_persists_graph_edges_for_file() -> None:
+    """Indexing should persist deterministic graph edges per file."""
+    source = (
+        "import math\n\n"
+        "def helper(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def target(value: int) -> int:\n"
+        "    computed = helper(value)\n"
+        "    return unknown_api(computed)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+
+        result = indexer.index_repository(str(repo))
+
+        assert result.failed == 0
+        edges = cache.list_edges_for_file(str(repo / "sample.py"))
+        edge_types = {edge.edge_type for edge in edges}
+        assert "DEFINES" in edge_types
+        assert "CALLS" in edge_types
+        assert "IMPORTS" in edge_types
+        unresolved_calls = [
+            edge for edge in edges if edge.edge_type == "CALLS" and "unresolved:" in edge.to_id
+        ]
+        assert unresolved_calls
+
+
+def test_indexer_removes_edges_for_deleted_files() -> None:
+    """Reindexing after file deletion should garbage-collect file-local edges."""
+    source = "def keep(value: int) -> int:\n" "    return value + 1\n"
+    drop_source = "def drop(value: int) -> int:\n" "    return value + 2\n"
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"keep.py": source, "drop.py": drop_source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+
+        first = indexer.index_repository(str(repo))
+        assert first.failed == 0
+        drop_path = str(repo / "drop.py")
+        assert cache.list_edges_for_file(drop_path)
+
+        os.remove(drop_path)
+        second = indexer.index_repository(str(repo))
+        assert second.failed == 0
+        assert cache.list_edges_for_file(drop_path) == []
+
+
 def test_indexer_rolls_back_file_state_after_transient_vector_upsert_failure() -> None:
     """Transient vector persistence failures should not leave sticky cache/vector divergence."""
 
@@ -220,7 +255,7 @@ def test_indexer_rolls_back_file_state_after_transient_vector_upsert_failure() -
                 self._fail_once = False
                 raise RuntimeError("simulated transient vector upsert failure")
             for symbol in symbols:
-                symbol_id = getattr(symbol, "id", None)
+                symbol_id = getattr(symbol, "chunk_id", None)
                 if isinstance(symbol_id, str):
                     self._ids.add(symbol_id)
 
@@ -230,10 +265,7 @@ def test_indexer_rolls_back_file_state_after_transient_vector_upsert_failure() -
         def save(self) -> None:
             return
 
-    source = (
-        "def alpha(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source = "def alpha(value: int) -> int:\n" "    return value + 1\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -267,7 +299,8 @@ def test_indexer_rolls_back_file_state_after_transient_vector_upsert_failure() -
         metadata = cache.get_file_metadata(sample_path)
         assert metadata is not None
         assert cache.count_symbols() == 1
-        assert vector_store.list_symbol_ids() == metadata.symbols
+        expected_chunk_ids = [chunk.chunk_id for chunk in cache.list_chunks_for_file(sample_path)]
+        assert vector_store.list_symbol_ids() == expected_chunk_ids
 
 
 def test_indexer_detects_vector_metadata_mismatch_under_symbol_removal() -> None:
@@ -294,7 +327,7 @@ def test_indexer_detects_vector_metadata_mismatch_under_symbol_removal() -> None
 
         def upsert_vectors(self, symbols: list[object]) -> None:
             for symbol in symbols:
-                symbol_id = getattr(symbol, "id", None)
+                symbol_id = getattr(symbol, "chunk_id", None)
                 if isinstance(symbol_id, str):
                     self._ids.add(symbol_id)
 
@@ -310,10 +343,7 @@ def test_indexer_detects_vector_metadata_mismatch_under_symbol_removal() -> None
         "def beta(value: int) -> int:\n"
         "    return value + 2\n"
     )
-    source_with_one = (
-        "def alpha(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source_with_one = "def alpha(value: int) -> int:\n" "    return value + 1\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source_with_two})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -369,10 +399,7 @@ def test_indexer_fails_closed_when_vector_consistency_is_unverifiable() -> None:
         def save(self) -> None:
             return
 
-    source = (
-        "def alpha(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source = "def alpha(value: int) -> int:\n" "    return value + 1\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -467,22 +494,22 @@ def test_apply_embeddings_calls_progress_callback() -> None:
 
     assert result.indexed_symbols > 0
 
-    # Now test _apply_embeddings directly with progress_callback
-    from gloggur.models import Symbol
+    # Now test _apply_embeddings directly with progress_callback.
+    from gloggur.models import SymbolChunk
 
-    def _make_symbol(name: str) -> Symbol:
-        return Symbol(
-            id=name,
-            name=name,
-            kind="function",
+    def _make_chunk(name: str) -> SymbolChunk:
+        return SymbolChunk(
+            chunk_id=f"chunk-{name}",
+            symbol_id=f"sym-{name}",
+            chunk_part_index=1,
+            chunk_part_total=1,
+            text=f"def {name}():\n    pass",
             file_path="f.py",
             start_line=1,
             end_line=3,
-            signature=f"def {name}():",
-            body_hash="abc",
         )
 
-    symbols = [_make_symbol(f"fn{i}") for i in range(5)]
+    chunks = [_make_chunk(f"fn{i}") for i in range(5)]
     progress_calls: list[tuple[int, int]] = []
 
     fake_provider = FakeProvider()
@@ -496,14 +523,14 @@ def test_apply_embeddings_calls_progress_callback() -> None:
         embedding_provider=fake_provider,
     )
 
-    result_symbols = indexer2._apply_embeddings(
-        symbols,
-        "def fn0(): pass\ndef fn1(): pass\ndef fn2(): pass\ndef fn3(): pass\ndef fn4(): pass\n",
+    result_chunks = indexer2._apply_embeddings(
+        chunks,
         progress_callback=lambda done, total: progress_calls.append((done, total)),
     )
 
-    total = len(symbols)
-    assert len(result_symbols) == total
+    total = len(chunks)
+    assert len(result_chunks) == total
+    assert all(chunk.embedding_vector == [0.1, 0.2] for chunk in result_chunks)
     assert len(progress_calls) >= 1
     # All totals should be the total symbol count
     assert all(t == total for _, t in progress_calls)
@@ -530,21 +557,21 @@ def test_apply_embeddings_no_progress_callback_works() -> None:
         def get_dimension(self) -> int:
             return 2
 
-    from gloggur.models import Symbol
+    from gloggur.models import SymbolChunk
 
-    def _make_symbol(name: str) -> Symbol:
-        return Symbol(
-            id=name,
-            name=name,
-            kind="function",
+    def _make_chunk(name: str) -> SymbolChunk:
+        return SymbolChunk(
+            chunk_id=f"chunk-{name}",
+            symbol_id=f"sym-{name}",
+            chunk_part_index=1,
+            chunk_part_total=1,
+            text=f"def {name}():\n    pass",
             file_path="f.py",
             start_line=1,
             end_line=2,
-            signature=f"def {name}():",
-            body_hash="abc",
         )
 
-    symbols = [_make_symbol(f"s{i}") for i in range(3)]
+    chunks = [_make_chunk(f"s{i}") for i in range(3)]
     fake_provider = FakeProvider()
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     config = GloggurConfig(cache_dir=cache_dir)
@@ -556,9 +583,9 @@ def test_apply_embeddings_no_progress_callback_works() -> None:
         embedding_provider=fake_provider,
     )
 
-    result = indexer._apply_embeddings(symbols, "def s0(): pass\ndef s1(): pass\ndef s2(): pass\n")
+    result = indexer._apply_embeddings(chunks)
     assert len(result) == 3
-    assert all(s.embedding_vector == [0.5, 0.5] for s in result)
+    assert all(chunk.embedding_vector == [0.5, 0.5] for chunk in result)
 
 
 def test_apply_embeddings_fails_closed_on_provider_vector_count_mismatch() -> None:
@@ -579,18 +606,18 @@ def test_apply_embeddings_fails_closed_on_provider_vector_count_mismatch() -> No
         def get_dimension(self) -> int:
             return 2
 
-    from gloggur.models import Symbol
+    from gloggur.models import SymbolChunk
 
-    symbols = [
-        Symbol(
-            id=f"s{i}",
-            name=f"s{i}",
-            kind="function",
+    chunks = [
+        SymbolChunk(
+            chunk_id=f"chunk-s{i}",
+            symbol_id=f"sym-s{i}",
+            chunk_part_index=1,
+            chunk_part_total=1,
+            text=f"def s{i}():\n    pass",
             file_path="f.py",
             start_line=1,
             end_line=2,
-            signature=f"def s{i}():",
-            body_hash="abc",
         )
         for i in range(2)
     ]
@@ -605,8 +632,8 @@ def test_apply_embeddings_fails_closed_on_provider_vector_count_mismatch() -> No
         embedding_provider=FakeProvider(),
     )
 
-    with pytest.raises(EmbeddingProviderError, match="returned 1 vectors for 2 symbols"):
-        indexer._apply_embeddings(symbols, "def s0(): pass\ndef s1(): pass\n")
+    with pytest.raises(EmbeddingProviderError, match="returned 1 vectors for 2 chunks"):
+        indexer._apply_embeddings(chunks)
 
 
 def test_index_file_with_outcome_classifies_embedding_provider_failures() -> None:

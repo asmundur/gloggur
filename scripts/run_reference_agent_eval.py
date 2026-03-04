@@ -19,6 +19,8 @@ DEFAULT_EVIDENCE_MIN_CONFIDENCE = 0.0
 DEFAULT_EVIDENCE_MIN_ITEMS = 1
 DEFAULT_MIN_PASS_RATE = 0.8
 MAX_RETRY_TOP_K = 64
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = REPO_ROOT / "src"
 
 
 @dataclass(frozen=True)
@@ -524,6 +526,12 @@ class ReferenceAgentHarness:
 
     def _env(self) -> Dict[str, str]:
         env = dict(os.environ)
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(SOURCE_ROOT)
+            if not existing_pythonpath
+            else f"{SOURCE_ROOT}{os.pathsep}{existing_pythonpath}"
+        )
         env["GLOGGUR_CACHE_DIR"] = str(self.cache_dir)
         env["GLOGGUR_EMBEDDING_PROVIDER"] = "test"
         return env

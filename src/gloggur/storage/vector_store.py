@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
 from gloggur.io_failures import wrap_io_error
-from gloggur.models import Symbol
+from gloggur.models import Symbol, SymbolChunk
 
-SQLITE_BUSY_TIMEOUT_MS = 5_000
-SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
+
+def _vector_item_id(item: Symbol | SymbolChunk) -> str | None:
+    """Return vector identity for symbol or chunk payloads."""
+    if isinstance(item, SymbolChunk):
+        return item.chunk_id
+    return item.id
 
 
 @dataclass
@@ -66,21 +69,18 @@ class VectorStore:
         if load_existing:
             self.load()
 
-    def add_vectors(self, symbols: Iterable[Symbol]) -> None:
-        """Backward-compatible alias for upsert semantics."""
-
-        self.upsert_vectors(symbols)
-
-    def upsert_vectors(self, symbols: Iterable[Symbol]) -> None:
-        """Insert or replace symbol vectors in the underlying index."""
+    def upsert_vectors(self, symbols: Iterable[Symbol | SymbolChunk]) -> None:
+        """Insert or replace vectors in the underlying index."""
 
         updates: list[tuple[str, list[float]]] = []
         remove_candidates: list[str] = []
         for symbol in symbols:
-            if symbol.embedding_vector is None:
+            symbol_id = _vector_item_id(symbol)
+            vector = getattr(symbol, "embedding_vector", None)
+            if symbol_id is None or vector is None:
                 continue
-            remove_candidates.append(symbol.id)
-            updates.append((symbol.id, symbol.embedding_vector))
+            remove_candidates.append(symbol_id)
+            updates.append((symbol_id, vector))
         if not updates:
             return
 
@@ -204,7 +204,7 @@ class VectorStore:
     def load(self) -> None:
         """Load vectors and id mapping from disk."""
 
-        legacy_map = self._load_id_map()
+        self._load_id_map()
         if self._faiss_available and os.path.exists(self.config.index_path):
             import faiss
 
@@ -218,10 +218,6 @@ class VectorStore:
                 ) from exc
         else:
             self._load_fallback_vectors()
-
-        if legacy_map:
-            self._migrate_legacy_vectors()
-            return
         self._id_map_dirty = False
 
     def clear(self) -> None:
@@ -297,8 +293,8 @@ class VectorStore:
         )
         self._id_map_dirty = False
 
-    def _load_id_map(self) -> bool:
-        """Read id mapping from disk. Returns True when legacy format is detected."""
+    def _load_id_map(self) -> None:
+        """Read id mapping from disk; reset incompatible artifacts when schema is unsupported."""
 
         self._symbol_to_vector_id = {}
         self._vector_id_to_symbol = {}
@@ -306,7 +302,7 @@ class VectorStore:
         self._fallback_order = []
         self._id_map_dirty = False
         if not os.path.exists(self.config.id_map_path):
-            return False
+            return
         try:
             with open(self.config.id_map_path, encoding="utf8") as handle:
                 payload = json.load(handle)
@@ -316,28 +312,28 @@ class VectorStore:
                 operation="read vector id map",
                 path=self.config.id_map_path,
             ) from exc
-        if isinstance(payload, list):
-            for idx, symbol_id in enumerate(payload, start=1):
-                self._symbol_to_vector_id[str(symbol_id)] = idx
-                self._vector_id_to_symbol[idx] = str(symbol_id)
-            self._next_vector_id = len(payload) + 1
-            return True
         if not isinstance(payload, dict):
-            return False
+            self.clear()
+            return
+        if payload.get("schema_version") != 2:
+            self.clear()
+            return
 
         raw_map = payload.get("symbol_to_vector_id", {})
-        if isinstance(raw_map, dict):
-            try:
-                for symbol_id, vector_id in raw_map.items():
-                    numeric_id = int(vector_id)
-                    self._symbol_to_vector_id[str(symbol_id)] = numeric_id
-                    self._vector_id_to_symbol[numeric_id] = str(symbol_id)
-            except (TypeError, ValueError) as exc:
-                raise wrap_io_error(
-                    exc,
-                    operation="read vector id map",
-                    path=self.config.id_map_path,
-                ) from exc
+        if not isinstance(raw_map, dict):
+            self.clear()
+            return
+        try:
+            for symbol_id, vector_id in raw_map.items():
+                numeric_id = int(vector_id)
+                self._symbol_to_vector_id[str(symbol_id)] = numeric_id
+                self._vector_id_to_symbol[numeric_id] = str(symbol_id)
+        except (TypeError, ValueError) as exc:
+            raise wrap_io_error(
+                exc,
+                operation="read vector id map",
+                path=self.config.id_map_path,
+            ) from exc
         raw_next = payload.get("next_vector_id")
         try:
             if raw_next is None:
@@ -353,7 +349,8 @@ class VectorStore:
         raw_order = payload.get("fallback_order", [])
         if isinstance(raw_order, list):
             self._fallback_order = [str(symbol_id) for symbol_id in raw_order]
-        return False
+        else:
+            self._fallback_order = []
 
     def _load_fallback_vectors(self) -> None:
         """Load fallback vectors from .npy file."""
@@ -385,64 +382,6 @@ class VectorStore:
             symbol_ids = symbol_ids[: len(matrix)]
         for symbol_id, vector in zip(symbol_ids, matrix.tolist(), strict=True):
             self._fallback_vectors[symbol_id] = vector
-
-    def _migrate_legacy_vectors(self) -> None:
-        """Rebuild vector artifacts from cached symbol embeddings after legacy map detection."""
-
-        vectors = self._load_vectors_from_db()
-        self._index = None
-        self._fallback_vectors = {}
-        self._fallback_order = []
-        self._symbol_to_vector_id = {}
-        self._vector_id_to_symbol = {}
-        self._next_vector_id = 1
-        self._id_map_dirty = False
-        if self._faiss_available:
-            self._upsert_faiss_vectors(vectors)
-        else:
-            for symbol_id, vector in vectors:
-                self._ensure_vector_id(symbol_id)
-                self._fallback_vectors[symbol_id] = vector
-            self._id_map_dirty = True
-        self.save()
-
-    def _load_vectors_from_db(self) -> list[tuple[str, list[float]]]:
-        """Load (symbol_id, embedding_vector) tuples from index.db."""
-
-        db_path = os.path.join(self.config.cache_dir, "index.db")
-        if not os.path.exists(db_path):
-            return []
-        try:
-            conn = sqlite3.connect(db_path, timeout=SQLITE_CONNECT_TIMEOUT_SECONDS)
-            conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
-        except (OSError, sqlite3.OperationalError) as exc:
-            if "conn" in locals():
-                conn.close()
-            raise wrap_io_error(
-                exc,
-                operation="open cache database for vector migration",
-                path=db_path,
-            ) from exc
-        try:
-            rows = conn.execute(
-                "SELECT id, embedding_vector FROM symbols WHERE embedding_vector IS NOT NULL"
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
-        finally:
-            conn.close()
-        vectors: list[tuple[str, list[float]]] = []
-        for symbol_id, raw_vector in rows:
-            if not raw_vector:
-                continue
-            try:
-                vector = json.loads(raw_vector)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(vector, list):
-                continue
-            vectors.append((str(symbol_id), [float(item) for item in vector]))
-        return vectors
 
     @staticmethod
     def _create_index(dimension: int):

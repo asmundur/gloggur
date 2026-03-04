@@ -4,7 +4,7 @@ from collections.abc import Iterable, Sequence
 from typing import Protocol
 
 from gloggur.embeddings.base import EmbeddingProvider
-from gloggur.models import Symbol
+from gloggur.models import Symbol, SymbolChunk
 from gloggur.parsers.base import ParsedFile
 
 
@@ -51,7 +51,7 @@ class MetadataBackend(Protocol):
 class VectorBackend(Protocol):
     """Vector backend contract used by index/search flows."""
 
-    def upsert_vectors(self, symbols: Iterable[Symbol]) -> None:
+    def upsert_vectors(self, symbols: Iterable[Symbol | SymbolChunk]) -> None:
         """Insert/replace vectors for a symbol batch."""
 
     def remove_ids(self, symbol_ids: Iterable[str]) -> None:

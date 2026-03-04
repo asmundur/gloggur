@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from gloggur.io_failures import wrap_io_error
-from gloggur.models import Symbol
+from gloggur.models import EdgeRecord, Symbol, SymbolChunk
 
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
@@ -93,6 +93,106 @@ class MetadataStore:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM symbols ORDER BY file_path, start_line").fetchall()
             return [self._row_to_symbol(row) for row in rows]
+
+    def list_chunks(self) -> list[SymbolChunk]:
+        """List all symbol chunks in deterministic order."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT * FROM chunks
+                ORDER BY file_path, start_line, chunk_part_index, chunk_id
+                """).fetchall()
+            return [self._row_to_chunk(row) for row in rows]
+
+    def get_chunk(self, chunk_id: str) -> SymbolChunk | None:
+        """Return one chunk row by id."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM chunks WHERE chunk_id = ?", (chunk_id,)).fetchone()
+            if not row:
+                return None
+            return self._row_to_chunk(row)
+
+    def list_chunks_for_symbol(self, symbol_id: str) -> list[SymbolChunk]:
+        """Return chunk rows for one symbol."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM chunks
+                WHERE symbol_id = ?
+                ORDER BY chunk_part_index, chunk_id
+                """,
+                (symbol_id,),
+            ).fetchall()
+            return [self._row_to_chunk(row) for row in rows]
+
+    def filter_chunks_by_path(self, file_path: str) -> list[SymbolChunk]:
+        """Return chunk rows for one file path."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM chunks
+                WHERE file_path = ?
+                ORDER BY start_line, chunk_part_index, chunk_id
+                """,
+                (file_path,),
+            ).fetchall()
+            return [self._row_to_chunk(row) for row in rows]
+
+    def list_edges(self) -> list[EdgeRecord]:
+        """Return all edge records."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM edges ORDER BY file_path, line, edge_type, edge_id"
+            ).fetchall()
+            return [self._row_to_edge(row) for row in rows]
+
+    def list_edges_for_file(self, file_path: str) -> list[EdgeRecord]:
+        """Return edge rows emitted for one file path."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM edges
+                WHERE file_path = ?
+                ORDER BY line, edge_type, edge_id
+                """,
+                (file_path,),
+            ).fetchall()
+            return [self._row_to_edge(row) for row in rows]
+
+    def list_edges_for_symbol(
+        self,
+        symbol_id: str,
+        *,
+        direction: str = "both",
+        edge_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[EdgeRecord]:
+        """Return incoming/outgoing/bidirectional edges for a symbol."""
+        clauses = []
+        params: list[object] = []
+        if direction == "incoming":
+            clauses.append("to_id = ?")
+            params.append(symbol_id)
+        elif direction == "outgoing":
+            clauses.append("from_id = ?")
+            params.append(symbol_id)
+        else:
+            clauses.append("(from_id = ? OR to_id = ?)")
+            params.extend([symbol_id, symbol_id])
+        if edge_type:
+            clauses.append("edge_type = ?")
+            params.append(edge_type)
+        where = " AND ".join(clauses) if clauses else "1=1"
+        query = (
+            "SELECT * FROM edges "
+            f"WHERE {where} "
+            "ORDER BY confidence DESC, file_path, line, edge_id"
+        )
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_to_edge(row) for row in rows]
 
     def _filter_symbols_exact_or_prefix(
         self,
@@ -205,52 +305,10 @@ class MetadataStore:
 
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
         invariants = json.loads(row["invariants"]) if row["invariants"] else []
-        calls = json.loads(row["calls"]) if "calls" in row.keys() and row["calls"] else []
-        covered_by = (
-            json.loads(row["covered_by"])
-            if "covered_by" in row.keys() and row["covered_by"]
-            else []
-        )
-        signals = json.loads(row["signals"]) if "signals" in row.keys() and row["signals"] else []
-        if not signals:
-            for expression in invariants:
-                signals.append(
-                    {
-                        "type": "code.invariant",
-                        "payload": {"expression": expression},
-                        "source": "legacy_projection",
-                    }
-                )
-            for target in calls:
-                signals.append(
-                    {
-                        "type": "code.call",
-                        "payload": {"target": target},
-                        "source": "legacy_projection",
-                    }
-                )
-            if bool(row["is_serialization_boundary"]):
-                signals.append(
-                    {
-                        "type": "boundary.serialization",
-                        "payload": {"detector": "legacy_projection"},
-                        "source": "legacy_projection",
-                    }
-                )
-            implicit_contract = row["implicit_contract"]
-            if implicit_contract:
-                signals.append(
-                    {
-                        "type": "test.implicit_contract",
-                        "payload": {"text": implicit_contract},
-                        "source": "legacy_projection",
-                    }
-                )
-        attributes = (
-            json.loads(row["attributes"])
-            if "attributes" in row.keys() and row["attributes"]
-            else {}
-        )
+        calls = json.loads(row["calls"]) if row["calls"] else []
+        covered_by = json.loads(row["covered_by"]) if row["covered_by"] else []
+        signals = json.loads(row["signals"]) if row["signals"] else []
+        attributes = json.loads(row["attributes"]) if row["attributes"] else {}
         if not isinstance(attributes, dict):
             attributes = {}
 
@@ -258,14 +316,24 @@ class MetadataStore:
             id=row["id"],
             name=row["name"],
             kind=row["kind"],
+            fqname=row["fqname"],
             file_path=row["file_path"],
             start_line=row["start_line"],
             end_line=row["end_line"],
+            container_id=row["container_id"],
+            container_fqname=row["container_fqname"],
             signature=row["signature"],
             docstring=row["docstring"],
             body_hash=row["body_hash"],
             embedding_vector=vector,
             language=row["language"],
+            repo_id=row["repo_id"],
+            commit=row["commit_hash"],
+            visibility=row["visibility"],
+            exported=bool(row["exported"]) if row["exported"] is not None else None,
+            tokens_estimate=(
+                int(row["tokens_estimate"]) if row["tokens_estimate"] is not None else None
+            ),
             invariants=invariants,
             calls=calls,
             covered_by=covered_by,
@@ -273,4 +341,50 @@ class MetadataStore:
             implicit_contract=row["implicit_contract"],
             signals=signals,
             attributes=attributes,
+        )
+
+    @staticmethod
+    def _row_to_chunk(row: sqlite3.Row) -> SymbolChunk:
+        """Convert a chunks table row into a SymbolChunk."""
+        import json
+
+        vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
+        return SymbolChunk(
+            chunk_id=row["chunk_id"],
+            symbol_id=row["symbol_id"],
+            chunk_part_index=int(row["chunk_part_index"]),
+            chunk_part_total=int(row["chunk_part_total"]),
+            text=row["text"],
+            file_path=row["file_path"],
+            start_line=int(row["start_line"]),
+            end_line=int(row["end_line"]),
+            tokens_estimate=(
+                int(row["tokens_estimate"]) if row["tokens_estimate"] is not None else None
+            ),
+            language=row["language"],
+            repo_id=row["repo_id"],
+            commit=row["commit_hash"],
+            embedding_vector=vector,
+        )
+
+    @staticmethod
+    def _row_to_edge(row: sqlite3.Row) -> EdgeRecord:
+        """Convert an edges table row into an EdgeRecord."""
+        import json
+
+        vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
+        return EdgeRecord(
+            edge_id=row["edge_id"],
+            edge_type=row["edge_type"],
+            from_id=row["from_id"],
+            to_id=row["to_id"],
+            from_kind=row["from_kind"],
+            to_kind=row["to_kind"],
+            file_path=row["file_path"],
+            line=int(row["line"]),
+            confidence=float(row["confidence"]),
+            repo_id=row["repo_id"],
+            commit=row["commit_hash"],
+            text=row["text"],
+            embedding_vector=vector,
         )

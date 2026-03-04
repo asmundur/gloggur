@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterable
 
 from gloggur.embeddings.base import EmbeddingProvider
-from gloggur.models import Symbol
+from gloggur.models import Symbol, SymbolChunk
 from gloggur.search.hybrid_search import HybridSearch
 
 
@@ -40,6 +40,23 @@ class FakeMetadataStore:
 
     def __init__(self, symbols: list[Symbol]) -> None:
         self._symbols = {symbol.id: symbol for symbol in symbols}
+        self._chunks_by_id: dict[str, SymbolChunk] = {}
+        self._chunks_by_symbol_id: dict[str, list[SymbolChunk]] = {}
+        for symbol in symbols:
+            chunk = SymbolChunk(
+                chunk_id=_chunk_id(symbol.id),
+                symbol_id=symbol.id,
+                chunk_part_index=1,
+                chunk_part_total=1,
+                text=f"FQNAME: {symbol.name}\n\nBODY:\ndef {symbol.name}():\n    pass",
+                file_path=symbol.file_path,
+                start_line=symbol.start_line,
+                end_line=symbol.end_line,
+                language=symbol.language,
+                embedding_vector=symbol.embedding_vector,
+            )
+            self._chunks_by_id[chunk.chunk_id] = chunk
+            self._chunks_by_symbol_id[symbol.id] = [chunk]
 
     def get_symbol(self, symbol_id: str) -> Symbol | None:
         return self._symbols.get(symbol_id)
@@ -97,6 +114,16 @@ class FakeMetadataStore:
     def list_symbols(self) -> list[Symbol]:
         return list(self._symbols.values())
 
+    def get_chunk(self, chunk_id: str) -> SymbolChunk | None:
+        return self._chunks_by_id.get(chunk_id)
+
+    def list_chunks_for_symbol(self, symbol_id: str) -> list[SymbolChunk]:
+        return list(self._chunks_by_symbol_id.get(symbol_id, []))
+
+
+def _chunk_id(symbol_id: str) -> str:
+    return f"{symbol_id}::chunk-1"
+
 
 def _symbol(
     *,
@@ -138,8 +165,8 @@ def test_identifier_query_prefers_exact_source_symbol_over_higher_similarity_tes
     vector_store = FakeVectorStore(
         {
             (1.0, 0.0): [
-                (test_symbol.id, 0.02),  # higher raw similarity
-                (src_symbol.id, 0.09),
+                (_chunk_id(test_symbol.id), 0.02),  # higher raw similarity
+                (_chunk_id(src_symbol.id), 0.09),
             ]
         }
     )
@@ -175,8 +202,8 @@ def test_explicit_test_intent_disables_default_test_penalty() -> None:
     vector_store = FakeVectorStore(
         {
             (2.0, 0.0): [
-                (test_symbol.id, 0.02),  # stays first when penalties are disabled
-                (src_symbol.id, 0.20),
+                (_chunk_id(test_symbol.id), 0.02),  # stays first when penalties are disabled
+                (_chunk_id(src_symbol.id), 0.20),
             ]
         }
     )
@@ -210,8 +237,8 @@ def test_source_first_mode_demotes_tests_for_semantic_queries() -> None:
     vector_store = FakeVectorStore(
         {
             (3.0, 0.0): [
-                (test_symbol.id, 0.02),  # much higher raw similarity than src
-                (src_symbol.id, 0.24),
+                (_chunk_id(test_symbol.id), 0.02),  # much higher raw similarity than src
+                (_chunk_id(src_symbol.id), 0.24),
             ]
         }
     )
@@ -245,8 +272,8 @@ def test_search_ranking_uses_deterministic_file_line_symbol_tiebreaks() -> None:
     vector_store = FakeVectorStore(
         {
             (4.0, 0.0): [
-                (symbol_b.id, 0.20),  # intentionally reverse preferred order
-                (symbol_a.id, 0.20),
+                (_chunk_id(symbol_b.id), 0.20),  # intentionally reverse preferred order
+                (_chunk_id(symbol_a.id), 0.20),
             ]
         }
     )

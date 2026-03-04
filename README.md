@@ -63,9 +63,19 @@ Search for symbols:
 
 ```bash
 gloggur search "streaming parser" --top-k 5 --json
+gloggur search "pkg.module.Handler.handle" --search-mode by_fqname --json
+gloggur search "src/services" --search-mode by_path --json
 ```
 
 Use `--ranking-mode source-first` to prefer source definitions over test mocks. You can filter results to a path prefix with `--file src/` and adjust the amount of surrounding context with `--context-radius 15`.
+
+Traverse the reference graph:
+
+```bash
+gloggur graph neighbors <symbol-id> --json
+gloggur graph incoming <symbol-id> --edge-type CALLS --json
+gloggur graph search "who calls retry policy" --json
+```
 
 Inspect docstrings:
 
@@ -111,7 +121,9 @@ Environment variables override configuration settings and are documented in the 
 
 ## Output schema
 
-Search results are returned as structured JSON with a `query` field, a list of `results` and a `metadata` section describing the search. Each result includes the symbol name, kind, file path, line number, signature, docstring (if present), similarity score, ranking score and a code snippet. This format is stable and suitable for consumption by agents or dashboards.
+Search results are returned as structured JSON with a `query` field, a list of `results` and a `metadata` section describing the search. Each result is chunk-aware and includes `symbol_id`, `chunk_id`, `chunk_part_index`, `chunk_part_total`, symbol metadata (`symbol`, `fqname`, `kind`), location fields (`file`, `line`, `line_end`), and chunk text/context (`chunk_text`, `context`) with similarity/ranking scores.
+
+Graph commands return edge records with deterministic IDs and endpoint metadata (`edge_id`, `edge_type`, `from_id`, `to_id`, `file_path`, `line`, `confidence`) for neighbor traversal and semantic graph search.
 
 ## Further reading
 

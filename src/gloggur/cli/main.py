@@ -42,6 +42,7 @@ from gloggur.embeddings.errors import (
     wrap_embedding_error,
 )
 from gloggur.embeddings.factory import create_embedding_provider, list_embedding_provider_adapters
+from gloggur.graph.service import GraphService
 from gloggur.indexer.cache import (
     CACHE_SCHEMA_VERSION,
     CacheConfig,
@@ -2653,6 +2654,17 @@ def _search_with_bounded_retry(
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--kind", type=str, default=None)
 @click.option("--file", "file_path", type=str, default=None)
+@click.option("--language", type=str, default=None)
+@click.option(
+    "--search-mode",
+    type=click.Choice(
+        ["semantic", "by_fqname", "by_fqname_regex", "by_path"],
+        case_sensitive=False,
+    ),
+    default="semantic",
+    show_default=True,
+    help="Search mode: semantic chunk retrieval or exact/regex/path metadata lookup.",
+)
 @click.option("--top-k", type=int, default=10)
 @click.option(
     "--context-radius",
@@ -2734,6 +2746,8 @@ def search(
     as_json: bool,
     kind: str | None,
     file_path: str | None,
+    language: str | None,
+    search_mode: str,
     top_k: int,
     context_radius: int,
     ranking_mode: str,
@@ -2838,11 +2852,13 @@ def search(
     )
     metadata_store = _create_metadata_store(config)
     searcher = HybridSearch(embedding, vector_store, metadata_store)
-    filters = {"ranking_mode": ranking_mode}
+    filters = {"ranking_mode": ranking_mode, "mode": search_mode}
     if kind:
         filters["kind"] = kind
     if file_path:
         filters["file"] = file_path
+    if language:
+        filters["language"] = language
     try:
         result, confidence_payload = _search_with_bounded_retry(
             searcher=searcher,
@@ -2956,6 +2972,116 @@ def search(
     _emit(result, as_json)
 
 
+@cli.group()
+def graph() -> None:
+    """Traverse and search extracted reference-graph edges."""
+
+
+@graph.command("neighbors")
+@click.argument("symbol_id", type=str)
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--edge-type", "edge_type", type=str, default=None)
+@click.option(
+    "--direction",
+    type=click.Choice(["both", "incoming", "outgoing"], case_sensitive=False),
+    default="both",
+    show_default=True,
+)
+@click.option("--k", type=click.IntRange(1, 1000), default=20, show_default=True)
+@_with_io_failure_handling
+def graph_neighbors(
+    symbol_id: str,
+    config_path: str | None,
+    as_json: bool,
+    edge_type: str | None,
+    direction: str,
+    k: int,
+) -> None:
+    """Return ranked neighboring edges for a symbol endpoint."""
+    config = _load_config(config_path)
+    metadata_store = _create_metadata_store(config)
+    service = GraphService(metadata_store=metadata_store)
+    payload = service.neighbors(
+        symbol_id,
+        edge_type=edge_type,
+        direction=direction.lower(),
+        k=k,
+    )
+    _emit(payload, as_json)
+
+
+@graph.command("incoming")
+@click.argument("symbol_id", type=str)
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--edge-type", "edge_type", type=str, default=None)
+@click.option("--k", type=click.IntRange(1, 1000), default=20, show_default=True)
+@_with_io_failure_handling
+def graph_incoming(
+    symbol_id: str,
+    config_path: str | None,
+    as_json: bool,
+    edge_type: str | None,
+    k: int,
+) -> None:
+    """Return incoming edges for a symbol."""
+    config = _load_config(config_path)
+    metadata_store = _create_metadata_store(config)
+    service = GraphService(metadata_store=metadata_store)
+    payload = service.incoming(symbol_id, edge_type=edge_type, k=k)
+    _emit(payload, as_json)
+
+
+@graph.command("outgoing")
+@click.argument("symbol_id", type=str)
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--edge-type", "edge_type", type=str, default=None)
+@click.option("--k", type=click.IntRange(1, 1000), default=20, show_default=True)
+@_with_io_failure_handling
+def graph_outgoing(
+    symbol_id: str,
+    config_path: str | None,
+    as_json: bool,
+    edge_type: str | None,
+    k: int,
+) -> None:
+    """Return outgoing edges for a symbol."""
+    config = _load_config(config_path)
+    metadata_store = _create_metadata_store(config)
+    service = GraphService(metadata_store=metadata_store)
+    payload = service.outgoing(symbol_id, edge_type=edge_type, k=k)
+    _emit(payload, as_json)
+
+
+@graph.command("search")
+@click.argument("query", type=str)
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--edge-type", "edge_type", type=str, default=None)
+@click.option("--k", type=click.IntRange(1, 1000), default=20, show_default=True)
+@click.option("--embedding-provider", type=str, default=None)
+@_with_io_failure_handling
+def graph_search(
+    query: str,
+    config_path: str | None,
+    as_json: bool,
+    edge_type: str | None,
+    k: int,
+    embedding_provider: str | None,
+) -> None:
+    """Semantic search over edge fact records."""
+    config = _load_config(config_path)
+    if embedding_provider:
+        config.embedding_provider = embedding_provider
+    embedding = _create_embedding_provider_for_command(config, require_provider=True)
+    metadata_store = _create_metadata_store(config)
+    service = GraphService(metadata_store=metadata_store, embedding_provider=embedding)
+    payload = service.search(query, edge_type=edge_type, k=k)
+    _emit(payload, as_json)
+
+
 def _inspect_path_class(path: str) -> str:
     """Classify a path into src/tests/scripts/other buckets for inspect summaries."""
     normalized = os.path.normpath(os.path.abspath(path))
@@ -2989,14 +3115,6 @@ def _warning_type(warning: str) -> str:
     return warning.split(" (", 1)[0]
 
 
-def _symbol_id_file_path(symbol_id: str) -> str | None:
-    """Best-effort extraction of file path from symbol id format path:start:name."""
-    parts = symbol_id.rsplit(":", 2)
-    if len(parts) != 3:
-        return None
-    return parts[0]
-
-
 def _build_inspect_warning_summary(
     warning_reports: list[dict[str, object]],
     *,
@@ -3026,7 +3144,7 @@ def _build_inspect_warning_summary(
         report_warnings = report.get("warnings")
         if not isinstance(report_warnings, list):
             continue
-        file_path = symbol_file_paths.get(symbol_id) or _symbol_id_file_path(symbol_id)
+        file_path = symbol_file_paths.get(symbol_id)
         path_class = _inspect_path_class(file_path) if file_path else "other"
         report_counts_by_path_class[path_class] += 1
         if file_path:
@@ -3270,6 +3388,7 @@ def inspect(
         cache.set_audit_report(
             report.symbol_id,
             warnings=report.warnings,
+            file_path=symbol_file_paths.get(report.symbol_id),
             semantic_score=report.semantic_score,
             score_metadata=report.score_metadata,
         )

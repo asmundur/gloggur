@@ -2,15 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
-
-from gloggur.cli.main import (
-    CLI_FAILURE_REMEDIATION,
-    INSPECT_FAILURE_REMEDIATION,
-    RESUME_REMEDIATION,
-    WATCH_STATUS_FAILURE_REMEDIATION,
-)
-from gloggur.indexer.indexer import FAILURE_REMEDIATION as INDEX_FAILURE_REMEDIATION
 
 REQUIRED_HEADINGS = [
     "## CLI Contract Errors",
@@ -21,7 +14,24 @@ REQUIRED_HEADINGS = [
 ]
 
 
+def _prepend_source_root() -> None:
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    source_root_str = str(source_root)
+    if source_root_str in sys.path:
+        sys.path.remove(source_root_str)
+    sys.path.insert(0, source_root_str)
+
+
 def _section_codes() -> dict[str, list[str]]:
+    _prepend_source_root()
+    from gloggur.cli.main import (
+        CLI_FAILURE_REMEDIATION,
+        INSPECT_FAILURE_REMEDIATION,
+        RESUME_REMEDIATION,
+        WATCH_STATUS_FAILURE_REMEDIATION,
+    )
+    from gloggur.indexer.indexer import FAILURE_REMEDIATION as INDEX_FAILURE_REMEDIATION
+
     return {
         "cli": sorted(CLI_FAILURE_REMEDIATION),
         "index": sorted(INDEX_FAILURE_REMEDIATION),
