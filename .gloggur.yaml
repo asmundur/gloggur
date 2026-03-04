@@ -1,0 +1,7 @@
+watch_enabled: true
+watch_path: /Users/auzi/.codex/worktrees/4089/gloggur
+watch_debounce_ms: 300
+watch_mode: daemon
+watch_state_file: .gloggur-cache/watch_state.json
+watch_pid_file: .gloggur-cache/watch.pid
+watch_log_file: .gloggur-cache/watch.log
