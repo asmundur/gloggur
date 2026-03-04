@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-02-28 13:58:00",
+  "generated_at": "2026-03-04 18:20:45",
   "fixture": {
     "kind": "generated",
     "file_count": 32,
@@ -15,26 +15,26 @@
     "metrics": {
       "cold_index_duration": {
         "name": "cold_index_duration",
-        "duration_ms": 1750.0,
+        "duration_ms": 1697.0,
         "throughput": null,
         "throughput_unit": null
       },
       "unchanged_incremental_duration": {
         "name": "unchanged_incremental_duration",
-        "duration_ms": 100.0,
+        "duration_ms": 360.0,
         "throughput": null,
         "throughput_unit": null
       },
       "search_average_latency": {
         "name": "search_average_latency",
-        "duration_ms": 11.0,
+        "duration_ms": 132.0,
         "throughput": null,
         "throughput_unit": null
       },
       "index_throughput": {
         "name": "index_throughput",
         "duration_ms": null,
-        "throughput": 240.0,
+        "throughput": 112.67605633802818,
         "throughput_unit": "symbols/s"
       }
     }
