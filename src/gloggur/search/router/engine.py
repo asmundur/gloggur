@@ -15,6 +15,7 @@ from gloggur.search.router.backends import (
 )
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
+from gloggur.search.router.query_compat import ParsedQueryCompat, parse_query_compat
 from gloggur.search.router.telemetry import log_router_event
 from gloggur.search.router.types import (
     BackendHit,
@@ -27,6 +28,7 @@ from gloggur.search.router.types import (
     SearchConstraints,
 )
 from gloggur.storage.metadata_store import MetadataStore
+from gloggur.symbol_index.store import SymbolIndexStore
 
 _TOKEN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 _BACKEND_TIE_PRIORITY = {
@@ -34,6 +36,20 @@ _BACKEND_TIE_PRIORITY = {
     "symbol": 1,
     "semantic": 2,
 }
+
+
+def _normalize_string_tuple(values: object) -> tuple[str, ...]:
+    if not isinstance(values, (list, tuple)):
+        return ()
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in values:
+        candidate = str(raw).strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return tuple(ordered)
 
 
 def _normalize_constraints(
@@ -72,13 +88,62 @@ def _normalize_constraints(
     )
     if search_mode not in {"semantic", "by_fqname", "by_fqname_regex", "by_path"}:
         search_mode = "semantic"
+    path_filters = _normalize_string_tuple(base.path_filters)
+    include_globs = _normalize_string_tuple(base.include_globs)
+    exclude_globs = _normalize_string_tuple(base.exclude_globs)
+    case_mode: str | None = None
+    if isinstance(base.case_mode, str):
+        normalized_case = base.case_mode.strip().lower()
+        if normalized_case in {"ignore", "smart"}:
+            case_mode = normalized_case
     return SearchConstraints(
         search_mode=search_mode,
         language=language,
         path_prefix=path_prefix,
+        path_filters=path_filters,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        case_mode=case_mode,
+        word_match=bool(base.word_match),
+        fixed_string=bool(base.fixed_string),
         max_files=max_files,
         max_snippets=max_snippets,
         time_budget_ms=time_budget_ms,
+    )
+
+
+def _merge_constraints_with_query_compat(
+    constraints: SearchConstraints,
+    *,
+    parsed: ParsedQueryCompat,
+) -> SearchConstraints:
+    if parsed.source != "grep_compat" or parsed.fallback_used:
+        return constraints
+    merged_path_filters = list(constraints.path_filters)
+    for candidate in parsed.path_filters:
+        if candidate not in merged_path_filters:
+            merged_path_filters.append(candidate)
+    include_globs = list(constraints.include_globs)
+    for candidate in parsed.include_globs:
+        if candidate not in include_globs:
+            include_globs.append(candidate)
+    exclude_globs = list(constraints.exclude_globs)
+    for candidate in parsed.exclude_globs:
+        if candidate not in exclude_globs:
+            exclude_globs.append(candidate)
+    return SearchConstraints(
+        search_mode=constraints.search_mode,
+        language=constraints.language,
+        path_prefix=constraints.path_prefix,
+        path_filters=tuple(merged_path_filters),
+        include_globs=tuple(include_globs),
+        exclude_globs=tuple(exclude_globs),
+        case_mode=parsed.case_mode if parsed.case_mode is not None else constraints.case_mode,
+        word_match=constraints.word_match or parsed.word_match,
+        fixed_string=constraints.fixed_string or parsed.fixed_string,
+        max_files=constraints.max_files,
+        max_snippets=constraints.max_snippets,
+        time_budget_ms=constraints.time_budget_ms,
     )
 
 
@@ -338,10 +403,12 @@ class SearchRouter:
         searcher: HybridSearch | None,
         metadata_store: MetadataStore | None,
         config: SearchRouterConfig,
+        symbol_store: SymbolIndexStore | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.searcher = searcher
         self.metadata_store = metadata_store
+        self.symbol_store = symbol_store
         self.config = config
 
     def _resolve_backends(self, mode: str) -> tuple[str, ...]:
@@ -350,7 +417,7 @@ class SearchRouter:
         )
         if self.searcher is None:
             enabled = tuple(name for name in enabled if name != "semantic")
-        if self.metadata_store is None:
+        if self.symbol_store is None:
             enabled = tuple(name for name in enabled if name != "symbol")
         if mode == "exact":
             return tuple(name for name in enabled if name == "exact") or ("exact",)
@@ -376,7 +443,40 @@ class SearchRouter:
             normalized_mode = "auto"
 
         resolved_constraints = _normalize_constraints(constraints, self.config)
-        hints = extract_query_hints(query)
+        parsed_query = parse_query_compat(query)
+        effective_query = query
+        if (
+            parsed_query.source == "grep_compat"
+            and not parsed_query.fallback_used
+            and isinstance(parsed_query.pattern, str)
+            and parsed_query.pattern.strip()
+        ):
+            effective_query = parsed_query.pattern.strip()
+        resolved_constraints = _merge_constraints_with_query_compat(
+            resolved_constraints,
+            parsed=parsed_query,
+        )
+        hints = extract_query_hints(effective_query)
+        if (
+            parsed_query.source == "grep_compat"
+            and not parsed_query.fallback_used
+            and parsed_query.pattern_quoted
+            and isinstance(parsed_query.pattern, str)
+            and parsed_query.pattern.strip()
+        ):
+            quoted_pattern = parsed_query.pattern.strip()
+            symbols = list(hints.symbols)
+            if quoted_pattern not in symbols:
+                symbols.append(quoted_pattern)
+            identifier_tokens = list(hints.identifier_tokens)
+            lowered = quoted_pattern.lower()
+            if lowered not in identifier_tokens:
+                identifier_tokens.append(lowered)
+            hints = replace(
+                hints,
+                symbols=tuple(symbols),
+                identifier_tokens=tuple(identifier_tokens),
+            )
         backend_names = self._resolve_backends(normalized_mode)
 
         backend_results: list[BackendResult] = []
@@ -388,7 +488,7 @@ class SearchRouter:
                     futures[
                         executor.submit(
                             run_exact_backend,
-                            query=query,
+                            query=effective_query,
                             hints=hints,
                             repo_root=self.repo_root,
                             constraints=resolved_constraints,
@@ -409,7 +509,7 @@ class SearchRouter:
                     futures[
                         executor.submit(
                             run_semantic_backend,
-                            query=query,
+                            query=effective_query,
                             searcher=self.searcher,
                             repo_root=self.repo_root,
                             constraints=resolved_constraints,
@@ -417,7 +517,7 @@ class SearchRouter:
                         )
                     ] = name
                 elif name == "symbol":
-                    if self.metadata_store is None:
+                    if self.symbol_store is None:
                         backend_results.append(
                             BackendResult(
                                 name="symbol",
@@ -430,9 +530,9 @@ class SearchRouter:
                     futures[
                         executor.submit(
                             run_symbol_backend,
-                            metadata_store=self.metadata_store,
+                            symbol_store=self.symbol_store,
                             hints=hints,
-                            query=query,
+                            query=effective_query,
                             repo_root=self.repo_root,
                             constraints=resolved_constraints,
                             config=self.config,
@@ -525,10 +625,17 @@ class SearchRouter:
                 "search_mode": resolved_constraints.search_mode,
                 "language": resolved_constraints.language,
                 "path_prefix": resolved_constraints.path_prefix,
+                "path_filters": list(resolved_constraints.path_filters),
+                "include_globs": list(resolved_constraints.include_globs),
+                "exclude_globs": list(resolved_constraints.exclude_globs),
+                "case_mode": resolved_constraints.case_mode,
+                "word_match": resolved_constraints.word_match,
+                "fixed_string": resolved_constraints.fixed_string,
                 "max_files": resolved_constraints.max_files,
                 "max_snippets": resolved_constraints.max_snippets,
                 "time_budget_ms": resolved_constraints.time_budget_ms,
             },
+            "parsed_query": parsed_query.to_debug_payload(),
         }
 
         log_router_event(

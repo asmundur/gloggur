@@ -24,6 +24,8 @@
 Optional:
 
 - `debug` is included only when `--debug-router` is enabled.
+- `debug.parsed_query` is included for grep-compatible inputs (`rg ...` / `grep ...`) and
+  reports parsed pattern/flags/path/glob hints plus fallback state.
 
 ## Removed top-level keys
 
@@ -40,6 +42,7 @@ These keys are no longer emitted by the CLI.
 - `results[i].line_end` -> `hits[i].span.end_line`
 - `results[i].context` -> `hits[i].snippet`
 - `results[i].similarity_score` -> `hits[i].score`
+- `results[i].tags` -> `hits[i].tags` (includes symbol tags like `symbol_def`/`symbol_ref`)
 - `metadata.search_time_ms` -> `debug.timings.total_ms` (when `--debug-router` is set)
 
 ## Behavioral contracts preserved

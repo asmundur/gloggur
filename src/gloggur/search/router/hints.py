@@ -29,6 +29,13 @@ def _ordered_unique(values: list[str]) -> tuple[str, ...]:
 def extract_query_hints(query: str) -> QueryHints:
     """Extract deterministic hints used by routing and scoring."""
     raw_literals = _ordered_unique(_QUOTED_RE.findall(query))
+    literal_symbol_candidates: list[str] = []
+    for literal in raw_literals:
+        for match in _SYMBOL_RE.findall(literal):
+            normalized = match.strip()
+            if not normalized:
+                continue
+            literal_symbol_candidates.append(normalized)
 
     raw_symbols: list[str] = []
     for match in _SYMBOL_RE.findall(query):
@@ -37,6 +44,11 @@ def extract_query_hints(query: str) -> QueryHints:
         if lowered in {"the", "and", "for", "with", "from", "error", "line"}:
             continue
         if len(match) < 3:
+            continue
+        raw_symbols.append(match)
+    for match in literal_symbol_candidates:
+        lowered = match.lower()
+        if lowered in {"the", "and", "for", "with", "from", "error", "line"}:
             continue
         raw_symbols.append(match)
 
@@ -53,7 +65,12 @@ def extract_query_hints(query: str) -> QueryHints:
             continue
         stack_locations.append((path, line))
 
-    identifier_tokens = _ordered_unique([token.lower() for token in _TOKEN_RE.findall(query)])
+    identifier_tokens_list = [token.lower() for token in _TOKEN_RE.findall(query) if len(token) >= 3]
+    for literal in literal_symbol_candidates:
+        token = literal.lower()
+        if token not in identifier_tokens_list:
+            identifier_tokens_list.append(token)
+    identifier_tokens = _ordered_unique(identifier_tokens_list)
 
     return QueryHints(
         symbols=_ordered_unique(raw_symbols),

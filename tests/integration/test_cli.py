@@ -120,6 +120,264 @@ def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
         assert "metadata" not in payload
 
 
+def test_cli_index_builds_symbol_index_and_reports_incremental_counters() -> None:
+    runner = CliRunner()
+    source = (
+        "def Foo(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def caller(value: int) -> int:\n"
+        "    return Foo(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        first = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert first.exit_code == 0, first.output
+        first_payload = _parse_json_output(first.output)
+        symbol_index = first_payload.get("symbol_index")
+        assert isinstance(symbol_index, dict)
+        db_path = symbol_index.get("db_path")
+        assert isinstance(db_path, str)
+        assert db_path.endswith(".gloggur/index/symbols.db")
+        assert Path(db_path).exists()
+        assert int(symbol_index.get("files_changed", 0)) >= 1
+
+        second = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert second.exit_code == 0, second.output
+        second_payload = _parse_json_output(second.output)
+        second_symbol_index = second_payload.get("symbol_index")
+        assert isinstance(second_symbol_index, dict)
+        assert int(second_symbol_index.get("files_changed", 0)) == 0
+        assert int(second_symbol_index.get("files_unchanged", 0)) >= 1
+
+
+def test_cli_single_file_index_writes_symbol_db_at_repo_root() -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"src/sample.py": "def Foo() -> int:\n    return 1\n"})
+        (repo / ".git").mkdir(exist_ok=True)
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["index", str(repo / "src" / "sample.py"), "--json"], env=env)
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        symbol_index = payload.get("symbol_index")
+        assert isinstance(symbol_index, dict)
+        db_path = symbol_index.get("db_path")
+        assert isinstance(db_path, str)
+        assert Path(db_path).resolve() == (repo / ".gloggur" / "index" / "symbols.db").resolve()
+
+
+def test_cli_symbol_queries_return_def_and_ref_tags() -> None:
+    runner = CliRunner()
+    source = (
+        "def Foo(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def caller(value: int) -> int:\n"
+        "    return Foo(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        router_config_dir = repo / ".gloggur"
+        router_config_dir.mkdir(exist_ok=True)
+        (router_config_dir / "config.toml").write_text(
+            "[search_router]\n"
+            'enabled_backends = ["symbol"]\n',
+            encoding="utf8",
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        definition = runner.invoke(
+            cli,
+            ["search", "where is Foo defined", "--json", "--debug-router"],
+            env=env,
+        )
+        assert definition.exit_code == 0, definition.output
+        definition_payload = _parse_json_output(definition.output)
+        definition_hits = definition_payload.get("hits")
+        assert isinstance(definition_hits, list)
+        assert any(
+            "symbol_def" in hit.get("tags", [])
+            for hit in definition_hits
+            if isinstance(hit, dict)
+        )
+
+        references = runner.invoke(
+            cli,
+            ["search", "who calls Foo", "--json", "--debug-router"],
+            env=env,
+        )
+        assert references.exit_code == 0, references.output
+        references_payload = _parse_json_output(references.output)
+        reference_hits = references_payload.get("hits")
+        assert isinstance(reference_hits, list)
+        assert any(
+            "symbol_ref" in hit.get("tags", [])
+            for hit in reference_hits
+            if isinstance(hit, dict)
+        )
+
+
+def test_cli_symbol_backend_reports_missing_or_corrupt_index_non_fatally() -> None:
+    runner = CliRunner()
+    source = (
+        "def Foo(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def caller(value: int) -> int:\n"
+        "    return Foo(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+        index_payload = _parse_json_output(index_result.output)
+        symbol_index = index_payload.get("symbol_index")
+        assert isinstance(symbol_index, dict)
+        db_path_raw = symbol_index.get("db_path")
+        assert isinstance(db_path_raw, str)
+        db_path = Path(db_path_raw)
+        assert db_path.exists()
+
+        db_path.unlink()
+        missing_result = runner.invoke(
+            cli,
+            ["search", "where is Foo defined", "--json", "--debug-router"],
+            env=env,
+        )
+        assert missing_result.exit_code == 0, missing_result.output
+        missing_payload = _parse_json_output(missing_result.output)
+        missing_debug = missing_payload.get("debug")
+        assert isinstance(missing_debug, dict)
+        missing_errors = missing_debug.get("backend_errors")
+        assert isinstance(missing_errors, dict)
+        missing_symbol_error = missing_errors.get("symbol")
+        assert isinstance(missing_symbol_error, str)
+        assert "symbol index unavailable" in missing_symbol_error
+
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_bytes(b"not-a-sqlite-db")
+        corrupt_result = runner.invoke(
+            cli,
+            ["search", "where is Foo defined", "--json", "--debug-router"],
+            env=env,
+        )
+        assert corrupt_result.exit_code == 0, corrupt_result.output
+        corrupt_payload = _parse_json_output(corrupt_result.output)
+        corrupt_debug = corrupt_payload.get("debug")
+        assert isinstance(corrupt_debug, dict)
+        corrupt_errors = corrupt_debug.get("backend_errors")
+        assert isinstance(corrupt_errors, dict)
+        corrupt_symbol_error = corrupt_errors.get("symbol")
+        assert isinstance(corrupt_symbol_error, str)
+        assert "symbol index unavailable" in corrupt_symbol_error
+
+
+def test_cli_search_accepts_grep_compatible_query_syntax() -> None:
+    runner = CliRunner()
+    source = "def AuthToken() -> str:\n    return 'x'\n"
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        for query in (
+            "rg Foo",
+            "rg -S Foo",
+            'rg -g "*.py" Foo',
+            "grep -R foo_bar src/",
+            "rg --max-count 10 Foo",
+        ):
+            result = runner.invoke(
+                cli,
+                ["search", query, "--json", "--debug-router"],
+                env=env,
+            )
+            assert result.exit_code == 0, result.output
+            payload = _parse_json_output(result.output)
+            debug = payload.get("debug")
+            assert isinstance(debug, dict)
+            parsed = debug.get("parsed_query")
+            assert isinstance(parsed, dict)
+            assert parsed.get("source") == "grep_compat"
+            assert parsed.get("fallback_used") is False
+            assert parsed.get("pattern_quoted") is False
+
+        quoted_short = runner.invoke(
+            cli,
+            ["search", 'rg "id"', "--json", "--debug-router"],
+            env=env,
+        )
+        assert quoted_short.exit_code == 0, quoted_short.output
+        quoted_payload = _parse_json_output(quoted_short.output)
+        quoted_debug = quoted_payload.get("debug")
+        assert isinstance(quoted_debug, dict)
+        quoted_parsed = quoted_debug.get("parsed_query")
+        assert isinstance(quoted_parsed, dict)
+        assert quoted_parsed.get("pattern") == "id"
+        assert quoted_parsed.get("pattern_quoted") is True
+
+        unquoted_short = runner.invoke(
+            cli,
+            ["search", "rg id", "--json", "--debug-router"],
+            env=env,
+        )
+        assert unquoted_short.exit_code == 0, unquoted_short.output
+        unquoted_payload = _parse_json_output(unquoted_short.output)
+        unquoted_debug = unquoted_payload.get("debug")
+        assert isinstance(unquoted_debug, dict)
+        unquoted_parsed = unquoted_debug.get("parsed_query")
+        assert isinstance(unquoted_parsed, dict)
+        assert unquoted_parsed.get("pattern") == "id"
+        assert unquoted_parsed.get("pattern_quoted") is False
+
+        malformed = runner.invoke(
+            cli,
+            ["search", "rg -g", "--json", "--debug-router"],
+            env=env,
+        )
+        assert malformed.exit_code == 0, malformed.output
+        malformed_payload = _parse_json_output(malformed.output)
+        malformed_debug = malformed_payload.get("debug")
+        assert isinstance(malformed_debug, dict)
+        malformed_parsed = malformed_debug.get("parsed_query")
+        assert isinstance(malformed_parsed, dict)
+        assert malformed_parsed.get("source") == "grep_compat"
+        assert malformed_parsed.get("fallback_used") is True
+
+
 def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
     """Low-signal search should return empty bounded evidence with deterministic metadata."""
     runner = CliRunner()

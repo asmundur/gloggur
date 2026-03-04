@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -10,7 +11,8 @@ from pathlib import Path
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.types import BackendHit, BackendResult, QueryHints, SearchConstraints
-from gloggur.storage.metadata_store import MetadataStore
+from gloggur.symbol_index.models import SymbolOccurrence
+from gloggur.symbol_index.store import SymbolIndexStore
 
 
 def _normalize_path(path: str) -> str:
@@ -81,6 +83,65 @@ def _is_ignored(path: str, ignore_globs: tuple[str, ...]) -> bool:
     """Return True if a path matches any ignore glob."""
     normalized = path.replace("\\", "/")
     return any(fnmatch.fnmatch(normalized, pattern) for pattern in ignore_globs)
+
+
+def _path_matches_any_prefix(path: str, prefixes: tuple[str, ...], *, repo_root: Path) -> bool:
+    if not prefixes:
+        return True
+    return any(_path_matches_prefix(path, prefix, repo_root=repo_root) for prefix in prefixes)
+
+
+def _glob_candidates(path: str, *, repo_root: Path) -> tuple[str, ...]:
+    normalized = path.replace("\\", "/")
+    candidates: set[str] = {normalized}
+    try:
+        relative = os.path.relpath(path, str(repo_root))
+    except ValueError:
+        relative = path
+    candidates.add(relative.replace("\\", "/"))
+    return tuple(sorted(candidates))
+
+
+def _matches_include_globs(path: str, globs: tuple[str, ...], *, repo_root: Path) -> bool:
+    if not globs:
+        return True
+    candidates = _glob_candidates(path, repo_root=repo_root)
+    for pattern in globs:
+        for candidate in candidates:
+            if fnmatch.fnmatch(candidate, pattern):
+                return True
+    return False
+
+
+def _matches_exclude_globs(path: str, globs: tuple[str, ...], *, repo_root: Path) -> bool:
+    if not globs:
+        return False
+    candidates = _glob_candidates(path, repo_root=repo_root)
+    for pattern in globs:
+        for candidate in candidates:
+            if fnmatch.fnmatch(candidate, pattern):
+                return True
+    return False
+
+
+def _path_allowed(
+    path: str,
+    *,
+    constraints: SearchConstraints,
+    config: SearchRouterConfig,
+    repo_root: Path,
+) -> bool:
+    if _matches_exclude_globs(path, config.ignore_globs, repo_root=repo_root):
+        return False
+    if not _path_matches_prefix(path, constraints.path_prefix, repo_root=repo_root):
+        return False
+    if not _path_matches_any_prefix(path, constraints.path_filters, repo_root=repo_root):
+        return False
+    if not _matches_include_globs(path, constraints.include_globs, repo_root=repo_root):
+        return False
+    if _matches_exclude_globs(path, constraints.exclude_globs, repo_root=repo_root):
+        return False
+    return True
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -154,7 +215,7 @@ def run_exact_backend(
     per_pattern_timeout = max(0.05, min(time_budget_seconds, 0.35))
 
     search_target = "."
-    if constraints.path_prefix:
+    if constraints.path_prefix and not constraints.path_filters:
         candidate = (repo_root / constraints.path_prefix).resolve()
         if candidate.exists():
             if candidate.is_file():
@@ -177,6 +238,18 @@ def run_exact_backend(
             pattern,
             search_target,
         ]
+        if constraints.case_mode == "ignore":
+            cmd.append("-i")
+        elif constraints.case_mode == "smart":
+            cmd.append("-S")
+        if constraints.word_match:
+            cmd.append("-w")
+        if constraints.fixed_string:
+            cmd.append("-F")
+        for include_glob in constraints.include_globs:
+            cmd.extend(["--glob", include_glob])
+        for exclude_glob in constraints.exclude_globs:
+            cmd.extend(["--glob", f"!{exclude_glob}"])
         for ignore_glob in config.ignore_globs:
             cmd.extend(["--glob", f"!{ignore_glob}"])
         cmd_fragments.append(" ".join(shlex.quote(part) for part in cmd))
@@ -212,19 +285,18 @@ def run_exact_backend(
                 continue
             if line_number < 1:
                 continue
-            if _is_ignored(relative_path, config.ignore_globs):
-                continue
-            if not _path_matches_prefix(
-                relative_path,
-                constraints.path_prefix,
-                repo_root=repo_root,
-            ):
-                continue
             absolute_path = relative_path
             if os.path.isabs(absolute_path):
                 absolute_path = os.path.abspath(absolute_path)
             else:
                 absolute_path = os.path.abspath(str(repo_root / relative_path))
+            if not _path_allowed(
+                absolute_path,
+                constraints=constraints,
+                config=config,
+                repo_root=repo_root,
+            ):
+                continue
 
             key = (absolute_path, line_number, line_number)
             snippet = _load_snippet(
@@ -308,9 +380,12 @@ def run_semantic_backend(
             normalized_path = os.path.abspath(normalized_path)
         else:
             normalized_path = os.path.abspath(str(repo_root / normalized_path))
-        if _is_ignored(normalized_path, config.ignore_globs):
-            continue
-        if not _path_matches_prefix(normalized_path, constraints.path_prefix, repo_root=repo_root):
+        if not _path_allowed(
+            normalized_path,
+            constraints=constraints,
+            config=config,
+            repo_root=repo_root,
+        ):
             continue
         try:
             start_line = int(item.get("line", 1))
@@ -360,113 +435,197 @@ def run_semantic_backend(
     )
 
 
+_USAGE_INTENT_RE = re.compile(r"(?i)\b(call|calls|called|use|used|usage|reference|references)\b")
+
+
+def _usage_intent(query: str) -> bool:
+    lowered = query.lower()
+    return "who calls" in lowered or bool(_USAGE_INTENT_RE.search(query))
+
+
+def _resolve_case_sensitive(
+    *,
+    symbol_candidates: tuple[str, ...],
+    constraints: SearchConstraints,
+) -> bool:
+    if constraints.case_mode == "ignore":
+        return False
+    if constraints.case_mode == "smart":
+        return any(any(char.isupper() for char in candidate) for candidate in symbol_candidates)
+    return False
+
+
 def _symbol_match_score(
     symbol_name: str,
     symbol_candidates: tuple[str, ...],
+    *,
     query_tokens: tuple[str, ...],
+    case_sensitive: bool,
+    fixed_string: bool,
+    word_match: bool,
 ) -> float:
-    """Score one symbol name against extracted hints."""
-    lowered = symbol_name.lower()
+    """Score one indexed symbol token against extracted query hints."""
+    normalized_symbol = symbol_name if case_sensitive else symbol_name.lower()
     best = 0.0
     for candidate in symbol_candidates:
-        candidate_lower = candidate.lower()
-        if lowered == candidate_lower:
+        normalized_candidate = candidate if case_sensitive else candidate.lower()
+        tail = normalized_candidate.split(".")[-1].split(":")[-1].split("#")[-1]
+        if normalized_symbol == normalized_candidate:
             best = max(best, 1.0)
             continue
-        tail = candidate_lower.split(".")[-1].split(":")[-1].split("#")[-1]
-        if lowered == tail:
-            best = max(best, 0.92)
+        if normalized_symbol == tail:
+            best = max(best, 0.96)
             continue
-        if tail in lowered or lowered in tail:
-            best = max(best, 0.75)
+        if word_match or fixed_string:
+            continue
+        if tail and (tail in normalized_symbol or normalized_symbol in tail):
+            best = max(best, 0.74)
     for token in query_tokens:
-        if len(token) < 3:
+        normalized_token = token if case_sensitive else token.lower()
+        if len(normalized_token) < 3:
             continue
-        if lowered == token:
-            best = max(best, 0.84)
-        elif token in lowered:
-            best = max(best, 0.65)
+        if normalized_symbol == normalized_token:
+            best = max(best, 0.82)
+        elif not fixed_string and not word_match and normalized_token in normalized_symbol:
+            best = max(best, 0.62)
     return best
+
+
+def _kind_bonus(*, occurrence_kind: str, usage_intent: bool) -> float:
+    if usage_intent:
+        return 0.08 if occurrence_kind == "ref" else -0.12
+    return 0.08 if occurrence_kind == "def" else 0.0
 
 
 def run_symbol_backend(
     *,
-    metadata_store: MetadataStore,
+    symbol_store: SymbolIndexStore,
     hints: QueryHints,
     query: str,
     repo_root: Path,
     constraints: SearchConstraints,
     config: SearchRouterConfig,
 ) -> BackendResult:
-    """Run symbol-name deterministic backend using existing metadata index."""
+    """Run symbol occurrence backend over .gloggur/index/symbols.db."""
     started = time.perf_counter()
 
     top_k = max(1, constraints.max_snippets or config.symbol_top_k)
+    if not symbol_store.available:
+        return BackendResult(
+            name="symbol",
+            hits=(),
+            timing_ms=int((time.perf_counter() - started) * 1000),
+            error="symbol index unavailable: missing or unreadable symbols.db",
+            commands=("symbol index lookup",),
+        )
     try:
-        symbols = metadata_store.list_symbols()
+        prefix_filters: tuple[str, ...] = ()
+        if constraints.path_prefix:
+            prefix_filters = (constraints.path_prefix,)
+        if constraints.path_filters:
+            prefix_filters = tuple(list(prefix_filters) + list(constraints.path_filters))
+        occurrences = symbol_store.list_occurrences(
+            path_prefixes=prefix_filters,
+            language=constraints.language,
+        )
     except Exception as exc:
         return BackendResult(
             name="symbol",
             hits=(),
             timing_ms=int((time.perf_counter() - started) * 1000),
-            error=f"metadata unavailable: {exc}",
-            commands=("metadata list symbols",),
+            error=f"symbol index unavailable: {exc}",
+            commands=("symbol index lookup",),
         )
 
-    query_tokens = tuple(token for token in query.lower().split() if token)
-    symbol_candidates = hints.symbols
+    if not occurrences:
+        return BackendResult(
+            name="symbol",
+            hits=(),
+            timing_ms=int((time.perf_counter() - started) * 1000),
+            commands=("symbol index lookup",),
+        )
+
+    symbol_candidates = hints.symbols or tuple(
+        token for token in hints.identifier_tokens if len(token) >= 3
+    )
+    if not symbol_candidates:
+        return BackendResult(
+            name="symbol",
+            hits=(),
+            timing_ms=int((time.perf_counter() - started) * 1000),
+            commands=("symbol index lookup",),
+        )
+
+    case_sensitive = _resolve_case_sensitive(
+        symbol_candidates=symbol_candidates,
+        constraints=constraints,
+    )
+    query_tokens = tuple(token for token in hints.identifier_tokens if token)
+    usage_intent = _usage_intent(query)
 
     hits: list[BackendHit] = []
-    for symbol in symbols:
-        path = symbol.file_path
-        if os.path.isabs(path):
-            path = os.path.abspath(path)
-        else:
+    file_hit_counts: dict[str, int] = {}
+    scored_occurrences: list[tuple[float, SymbolOccurrence, str]] = []
+    for occurrence in occurrences:
+        path = occurrence.path
+        if not os.path.isabs(path):
             path = os.path.abspath(str(repo_root / path))
-        if _is_ignored(path, config.ignore_globs):
-            continue
-        if not _path_matches_prefix(path, constraints.path_prefix, repo_root=repo_root):
-            continue
-        if constraints.language and symbol.language and symbol.language != constraints.language:
+        if not _path_allowed(
+            path,
+            constraints=constraints,
+            config=config,
+            repo_root=repo_root,
+        ):
             continue
 
         score = _symbol_match_score(
-            symbol.name,
+            occurrence.symbol,
             symbol_candidates,
-            hints.identifier_tokens or query_tokens,
+            query_tokens=query_tokens,
+            case_sensitive=case_sensitive,
+            fixed_string=constraints.fixed_string,
+            word_match=constraints.word_match,
         )
         if score <= 0.0:
             continue
+        score = max(0.0, min(1.0, score + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent)))
+        scored_occurrences.append((score, occurrence, path))
+        file_hit_counts[path] = file_hit_counts.get(path, 0) + 1
 
+    for base_score, occurrence, path in scored_occurrences:
+        group_count = file_hit_counts.get(path, 1)
+        group_bonus = min(0.06, 0.02 * (group_count - 1))
+        score = max(0.0, min(1.0, base_score + group_bonus))
         snippet = _load_snippet(
             repo_root,
             path,
-            start_line=symbol.start_line,
-            end_line=symbol.end_line,
+            start_line=occurrence.line,
+            end_line=occurrence.line,
             radius=2,
             max_chars=config.max_snippet_chars,
         )
+        tags = ("symbol_def",) if occurrence.kind == "def" else ("symbol_ref",)
         hits.append(
             BackendHit(
                 backend="symbol",
                 path=path,
-                start_line=symbol.start_line,
-                end_line=symbol.end_line,
+                start_line=occurrence.line,
+                end_line=occurrence.line,
                 snippet=snippet,
-                raw_score=max(0.0, min(1.0, score)),
-                tags=("symbol_match",),
+                raw_score=score,
+                tags=tags,
             )
         )
 
     ordered = tuple(
         sorted(
             hits,
-            key=lambda item: (-item.raw_score, item.path, item.start_line),
+            key=lambda item: (-item.raw_score, item.path, item.start_line, item.end_line),
         )[:top_k]
     )
     return BackendResult(
         name="symbol",
         hits=ordered,
         timing_ms=int((time.perf_counter() - started) * 1000),
-        commands=("symbol index scan",),
+        commands=("symbol index lookup",),
     )

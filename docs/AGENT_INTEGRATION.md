@@ -113,6 +113,7 @@ For the single-path onboarding flow with provider setup and troubleshooting code
 2. **Locate relevant code** with semantic search:
    ```bash
    scripts/gloggur search "<query>" --top-k 5 --json
+   scripts/gloggur search "rg -S -g '*.py' AuthToken" --json
    ```
 3. **Confirm coverage**:
    ```bash
@@ -148,11 +149,17 @@ Pytest defaults for this repo:
 - Use `--top-k` to widen or narrow results based on the task.
 - Use `--stream` if you are integrating results into a tool chain.
 - For identifier-heavy lookups where tests are noisy, use `--ranking-mode source-first`.
+- Grep/ripgrep style queries are accepted as input compatibility (`rg Foo`, `rg -g "*.py" Foo`, `grep -R foo_bar src/`).
+- Quoted short grep patterns are preserved in router debug (`parsed_query.pattern_quoted=true` for queries like `rg "id"`).
 - Use `--file` for exact file or directory-prefix scoping (`exact_or_prefix` with
   normalized `src/` vs `./src/` behavior); check
   `metadata.file_filter_warning_codes` for `file_filter_no_match`.
 - Use `--context-radius` (default `12`, range `1..200`) when agents need more or
   less surrounding implementation detail per hit.
+- Symbol-backed hits can include `symbol_def` and `symbol_ref` tags; if `.gloggur/index/symbols.db`
+  is missing, search still runs but symbol-tagged hits are absent until reindex.
+- Missing/corrupt symbol index stays non-fatal: use `--debug-router` and inspect
+  `debug.backend_errors.symbol` for deterministic diagnostics.
 
 Grounded retrieve -> validate -> emit/repair flow (recommended for agent outputs):
 

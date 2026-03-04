@@ -20,6 +20,13 @@ def test_extract_query_hints_parses_symbols_literals_paths_and_stack_locations()
     assert ("src/app.py", 42) in hints.stack_locations
 
 
+def test_extract_query_hints_keeps_short_quoted_identifiers() -> None:
+    hints = extract_query_hints('find uses of "id" in parser')
+
+    assert "id" in hints.symbols
+    assert "id" in hints.identifier_tokens
+
+
 def test_search_router_auto_prefers_exact_on_quality_tie(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     exact_result = BackendResult(
         name="exact",
@@ -170,3 +177,44 @@ def test_search_router_output_is_deterministic_for_same_input(
     pack_b = router.search(query="stable ordering", constraints=constraints, mode="auto")
 
     assert [hit.to_dict() for hit in pack_a.hits] == [hit.to_dict() for hit in pack_b.hits]
+
+
+def test_search_router_keeps_quoted_short_grep_pattern_for_symbol_hints(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _symbol_backend(**kwargs):
+        hints = kwargs["hints"]
+        assert "id" in hints.symbols
+        return BackendResult(
+            name="symbol",
+            hits=(
+                BackendHit(
+                    backend="symbol",
+                    path="src/symbols.py",
+                    start_line=7,
+                    end_line=7,
+                    snippet="id = get_id()",
+                    raw_score=0.9,
+                    tags=("symbol_ref",),
+                ),
+            ),
+            timing_ms=5,
+        )
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_symbol_backend", _symbol_backend)
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("symbol",)),
+    )
+    pack = router.search(query='rg "id"', mode="auto", include_debug=True)
+
+    assert pack.hits
+    assert pack.hits[0].path == "src/symbols.py"
+    assert isinstance(pack.debug, dict)
+    parsed = pack.debug.get("parsed_query")
+    assert isinstance(parsed, dict)
+    assert parsed.get("pattern_quoted") is True

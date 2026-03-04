@@ -6,6 +6,7 @@ Gloggur is a symbol-level codebase indexer and semantic search tool designed to 
 
 - Multi-language symbol extraction - uses Tree-sitter parsers to recognise functions, classes, interfaces and other symbols across Python, JavaScript/TypeScript, Go, Rust, Java and more.
 - Efficient indexing - initial indexing builds a vector database for your project, and subsequent runs update only changed files so searches stay fast.
+- Always-on symbol occurrence index - `gloggur index` also updates `.gloggur/index/symbols.db` with deterministic `def`/`ref` file-line occurrences.
 - Pluggable embeddings - choose from OpenAI, Gemini or a local hugging-face compatible model. Embedding providers are configured in `.gloggur.yaml` or via environment variables.
 - Semantic search with FAISS - quickly retrieve the most similar symbols and view surrounding context; optionally filter to a file or directory prefix and control the amount of context returned.
 - Docstring audit - inspect symbols and score how well their docstrings match their implementation.
@@ -65,6 +66,8 @@ Search for symbols:
 gloggur search "streaming parser" --top-k 5 --json
 gloggur search "pkg.module.Handler.handle" --search-mode by_fqname --json
 gloggur search "src/services" --search-mode by_path --json
+gloggur search "rg -S -g '*.py' AuthToken" --json
+gloggur search "grep -R foo_bar src/" --json
 ```
 
 `search --json` now emits **ContextPack v2** only:
@@ -75,9 +78,14 @@ gloggur search "src/services" --search-mode by_path --json
 - `hits[]` (`path`, `span`, `snippet`, `score`, `tags`)
 - optional `debug` via `--debug-router`
 
+`hits[].tags` may include `symbol_def` / `symbol_ref` when symbol-occurrence matches are returned.  
+For grep-compatible queries (`rg ...` / `grep ...`), `--debug-router` includes `debug.parsed_query` with parsed pattern/flags/path/glob hints, including `pattern_quoted` for short quoted identifiers like `rg "id"`.
+
 Legacy top-level `results` + `metadata` keys were removed. See [Search JSON v2 migration](docs/SEARCH_JSON_V2_MIGRATION.md) for field mapping and upgrade guidance.
 
 You can filter results to a path prefix with `--file src/`, choose router mode via `--mode auto|exact|semantic|hybrid`, and include router timings/scores with `--debug-router`.
+If `.gloggur/index/symbols.db` is missing, search still works, but symbol-tagged hits are omitted until the next `gloggur index`.
+When `--debug-router` is enabled, symbol-index availability issues are surfaced in `debug.backend_errors.symbol` without failing the search command.
 
 Traverse the reference graph:
 

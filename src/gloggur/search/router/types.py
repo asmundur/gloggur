@@ -10,6 +10,12 @@ class SearchConstraints:
     search_mode: str = "semantic"
     language: str | None = None
     path_prefix: str | None = None
+    path_filters: tuple[str, ...] = ()
+    include_globs: tuple[str, ...] = ()
+    exclude_globs: tuple[str, ...] = ()
+    case_mode: str | None = None
+    word_match: bool = False
+    fixed_string: bool = False
     max_files: int | None = None
     max_snippets: int | None = None
     time_budget_ms: int | None = None

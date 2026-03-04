@@ -67,6 +67,8 @@ from gloggur.search.router import (
 from gloggur.storage.backends import create_storage_backend, list_storage_backends
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
+from gloggur.symbol_index.indexer import SymbolIndexer
+from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 from gloggur.watch.service import (
     DEFAULT_WATCH_FAILURE_REMEDIATION,
     WatchService,
@@ -2274,13 +2276,14 @@ def index(
             config,
             require_provider=True,
         )
+        parser_registry = ParserRegistry(
+            extension_map=config.parser_extension_map,
+            adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+        )
         indexer = Indexer(
             config=config,
             cache=cache,
-            parser_registry=ParserRegistry(
-                extension_map=config.parser_extension_map,
-                adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
-            ),
+            parser_registry=parser_registry,
             embedding_provider=embedding,
             vector_store=vector_store,
         )
@@ -2307,11 +2310,17 @@ def index(
 
         if os.path.isdir(path):
             result = indexer.index_repository(path)
+            symbol_payload = _run_symbol_index(
+                index_target=path,
+                config=config,
+                parser_registry=parser_registry,
+            )
             if not as_json:
                 click.echo("", err=True)  # newline after final progress line
             if result.failed == 0:
                 _persist_last_success_resume_state(config, cache)
             payload = result.as_payload()
+            payload["symbol_index"] = symbol_payload
             if as_json and result.failed > 0 and not allow_partial:
                 _attach_primary_error_from_failure_contract(
                     payload,
@@ -2429,6 +2438,11 @@ def index(
             "indexed_symbols": indexed_symbols,
             "duration_ms": 0,
         }
+        result["symbol_index"] = _run_symbol_index(
+            index_target=path,
+            config=config,
+            parser_registry=parser_registry,
+        )
         result.update(_build_index_failure_contract(failed_reasons))
         if as_json and failed > 0 and not allow_partial:
             _attach_primary_error_from_failure_contract(
@@ -2543,6 +2557,35 @@ def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) 
     if all(Path(item) == common for item in normalized_paths):
         common = common.parent
     return common if str(common).strip() else fallback
+
+
+def _resolve_symbol_index_root(index_target: str) -> Path:
+    """Resolve repo root used for .gloggur/index/symbols.db storage."""
+    target = Path(index_target).resolve()
+    current = target if target.is_dir() else target.parent
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists() or (candidate / ".gloggur").exists():
+            return candidate
+    if target.is_dir():
+        return target
+    return target.parent
+
+
+def _run_symbol_index(
+    *,
+    index_target: str,
+    config: GloggurConfig,
+    parser_registry: ParserRegistry,
+) -> dict[str, object]:
+    """Build/update local symbol occurrence index and return additive payload fields."""
+    repo_root = _resolve_symbol_index_root(index_target)
+    indexer = SymbolIndexer(
+        repo_root=repo_root,
+        config=config,
+        parser_registry=parser_registry,
+    )
+    result = indexer.index_path(index_target)
+    return result.as_payload()
 
 
 def _resolve_search_ranking_metadata(
@@ -3012,11 +3055,16 @@ def search(
         metadata_store=metadata_store,
         fallback=Path.cwd(),
     )
+    symbol_store = SymbolIndexStore(
+        SymbolIndexStoreConfig(repo_root=router_repo_root),
+        create_if_missing=False,
+    )
     router_config = load_search_router_config(router_repo_root)
     router = SearchRouter(
         repo_root=router_repo_root,
         searcher=searcher,
         metadata_store=metadata_store,
+        symbol_store=symbol_store,
         config=router_config,
     )
     constraints = SearchConstraints(
