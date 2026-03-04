@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import sys
 import tarfile
 import tempfile
@@ -134,6 +135,104 @@ def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
         assert metadata["initial_top_k"] == 2
         assert metadata["final_top_k"] == 4
         assert metadata["low_confidence"] is True
+
+
+def test_cli_search_file_filter_prefix_boundary_and_context_radius() -> None:
+    """File filter should support exact+prefix matching with boundary safety and context metadata."""
+    runner = CliRunner()
+    source_src = (
+        "# prelude\n"
+        "def src_target() -> str:\n"
+        "    token = 'src-token'\n"
+        "    token = token + '-a'\n"
+        "    token = token + '-b'\n"
+        "    token = token + '-c'\n"
+        "    token = token + '-d'\n"
+        "    token = token + '-e'\n"
+        "    return token\n"
+    )
+    source_src2 = (
+        "def src2_target() -> str:\n"
+        "    return 'src2-token'\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/feature.py": source_src,
+                "src2/feature.py": source_src2,
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        previous_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            index_result = runner.invoke(cli, ["index", ".", "--json"], env=env)
+            assert index_result.exit_code == 0, index_result.output
+
+            src_filter_result = runner.invoke(
+                cli,
+                ["search", "token", "--json", "--file", "src", "--top-k", "10"],
+                env=env,
+            )
+            assert src_filter_result.exit_code == 0, src_filter_result.output
+            src_payload = _parse_json_output(src_filter_result.output)
+            src_results = src_payload["results"]
+            assert isinstance(src_results, list) and src_results
+            assert all("/src/" in str(item["file"]).replace("\\", "/") for item in src_results)
+            assert all("/src2/" not in str(item["file"]).replace("\\", "/") for item in src_results)
+            src_metadata = src_payload["metadata"]
+            assert src_metadata["file_filter"] == "src"
+            assert src_metadata["file_filter_match_mode"] == "exact_or_prefix"
+            assert src_metadata["file_filter_warning_codes"] == []
+
+            missing_filter_result = runner.invoke(
+                cli,
+                ["search", "token", "--json", "--file", "missing/", "--top-k", "5"],
+                env=env,
+            )
+            assert missing_filter_result.exit_code == 0, missing_filter_result.output
+            missing_payload = _parse_json_output(missing_filter_result.output)
+            missing_metadata = missing_payload["metadata"]
+            assert int(missing_metadata["total_results"]) == 0
+            assert missing_metadata["file_filter"] == "missing/"
+            assert missing_metadata["file_filter_warning_codes"] == ["file_filter_no_match"]
+
+            default_radius_result = runner.invoke(
+                cli,
+                ["search", "token", "--json", "--file", "src", "--top-k", "1"],
+                env=env,
+            )
+            assert default_radius_result.exit_code == 0, default_radius_result.output
+            default_payload = _parse_json_output(default_radius_result.output)
+            default_metadata = default_payload["metadata"]
+            assert default_metadata["context_radius"] == 12
+            default_context_lines = str(default_payload["results"][0]["context"]).splitlines()
+
+            custom_radius_result = runner.invoke(
+                cli,
+                [
+                    "search",
+                    "token",
+                    "--json",
+                    "--file",
+                    "src",
+                    "--top-k",
+                    "1",
+                    "--context-radius",
+                    "15",
+                ],
+                env=env,
+            )
+            assert custom_radius_result.exit_code == 0, custom_radius_result.output
+            custom_payload = _parse_json_output(custom_radius_result.output)
+            custom_metadata = custom_payload["metadata"]
+            assert custom_metadata["context_radius"] == 15
+            custom_context_lines = str(custom_payload["results"][0]["context"]).splitlines()
+            assert len(custom_context_lines) >= len(default_context_lines)
+        finally:
+            os.chdir(previous_cwd)
 
 
 def test_cli_search_emits_evidence_trace_and_validation_for_grounded_query() -> None:

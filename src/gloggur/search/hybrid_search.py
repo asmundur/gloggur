@@ -59,6 +59,9 @@ _UNFILTERED_BASE_FETCH_MULTIPLIER = 2
 _BALANCED_IDENTIFIER_FETCH_MULTIPLIER = 8
 _SOURCE_FIRST_FETCH_MULTIPLIER = 10
 _MAX_EXPANDED_CANDIDATES = 250
+_DEFAULT_CONTEXT_RADIUS = 12
+_FILE_FILTER_MATCH_MODE = "exact_or_prefix"
+_FILE_FILTER_NO_MATCH_WARNING = "file_filter_no_match"
 _BALANCED_POLICY = RankingPolicy(
     exact_identifier_tail_bonus=0.22,
     source_path_bonus=0.06,
@@ -92,6 +95,7 @@ class HybridSearch:
         query: str,
         filters: dict[str, str] | None = None,
         top_k: int = 10,
+        context_radius: int = _DEFAULT_CONTEXT_RADIUS,
     ) -> dict[str, object]:
         """Search for symbols matching the query and filters."""
         start = time.time()
@@ -112,21 +116,30 @@ class HybridSearch:
                 metadata_filters,
                 top_k,
                 ranking_context=ranking_context,
+                context_radius=context_radius,
             )
         else:
-            results = self._search_unfiltered(query_vector, top_k, ranking_context=ranking_context)
+            results = self._search_unfiltered(
+                query_vector,
+                top_k,
+                ranking_context=ranking_context,
+                context_radius=context_radius,
+            )
         duration_ms = int((time.time() - start) * 1000)
+        metadata = {
+            "total_results": len(results),
+            "search_time_ms": duration_ms,
+            "ranking_mode": ranking_context.ranking_mode,
+            "query_intent": self._query_intent_label(ranking_context.query_intent),
+            "explicit_test_intent": ranking_context.explicit_test_intent,
+            "test_penalty_applied": ranking_context.test_penalty_applied,
+            "context_radius": context_radius,
+        }
+        metadata.update(self._file_filter_metadata(filters=filters, results=results))
         return {
             "query": query,
             "results": results,
-            "metadata": {
-                "total_results": len(results),
-                "search_time_ms": duration_ms,
-                "ranking_mode": ranking_context.ranking_mode,
-                "query_intent": self._query_intent_label(ranking_context.query_intent),
-                "explicit_test_intent": ranking_context.explicit_test_intent,
-                "test_penalty_applied": ranking_context.test_penalty_applied,
-            },
+            "metadata": metadata,
         }
 
     def get_semantic_neighborhood(
@@ -167,6 +180,7 @@ class HybridSearch:
                 symbol.embedding_vector,
                 top_k=top_k + 1,
                 ranking_context=self._build_ranking_context("", {}),
+                context_radius=_DEFAULT_CONTEXT_RADIUS,
             )
             for res in vector_results:
                 if res["symbol_id"] != symbol_id:
@@ -194,11 +208,19 @@ class HybridSearch:
     ) -> dict[str, object]:
         """Return ranking metadata fields for one query/filter combination."""
         ranking_context = cls._build_ranking_context(query, filters or {})
+        file_filter: str | None = None
+        if isinstance((filters or {}).get("file"), str):
+            raw_file_filter = str((filters or {}).get("file") or "").strip()
+            if raw_file_filter:
+                file_filter = raw_file_filter
         return {
             "ranking_mode": ranking_context.ranking_mode,
             "query_intent": cls._query_intent_label(ranking_context.query_intent),
             "explicit_test_intent": ranking_context.explicit_test_intent,
             "test_penalty_applied": ranking_context.test_penalty_applied,
+            "file_filter": file_filter,
+            "file_filter_match_mode": _FILE_FILTER_MATCH_MODE,
+            "file_filter_warning_codes": [],
         }
 
     def _search_unfiltered(
@@ -207,6 +229,7 @@ class HybridSearch:
         top_k: int,
         *,
         ranking_context: RankingContext,
+        context_radius: int,
     ) -> list[dict[str, object]]:
         """Search via vector index without any filters."""
         if top_k < 1:
@@ -242,6 +265,7 @@ class HybridSearch:
                     symbol,
                     similarity_score=similarity_score,
                     ranking_score=ranking_score,
+                    context_radius=context_radius,
                 )
             )
         return results
@@ -253,6 +277,7 @@ class HybridSearch:
         top_k: int,
         *,
         ranking_context: RankingContext,
+        context_radius: int,
     ) -> list[dict[str, object]]:
         """Search within metadata-filtered symbols and rank by similarity."""
         if top_k < 1:
@@ -288,6 +313,7 @@ class HybridSearch:
                     symbol,
                     similarity_score=similarity_score,
                     ranking_score=ranking_score,
+                    context_radius=context_radius,
                 )
             )
         return results
@@ -299,6 +325,9 @@ class HybridSearch:
         file_path = filters.get("file")
         if not file_path:
             return self.metadata_store.filter_symbols(kinds=kinds, language=language)
+        file_matcher = getattr(self.metadata_store, "filter_symbols_by_file_match", None)
+        if callable(file_matcher):
+            return file_matcher(file_path=file_path, kinds=kinds, language=language)
         for candidate in self._file_path_candidates(file_path):
             symbols = self.metadata_store.filter_symbols(
                 kinds=kinds,
@@ -512,6 +541,26 @@ class HybridSearch:
             candidates.append(abs_candidate)
         return candidates
 
+    @staticmethod
+    def _file_filter_metadata(
+        *,
+        filters: dict[str, str],
+        results: list[dict[str, object]],
+    ) -> dict[str, object]:
+        """Return stable metadata describing file-filter behavior."""
+        file_filter: str | None = None
+        raw_filter = filters.get("file")
+        if isinstance(raw_filter, str) and raw_filter.strip():
+            file_filter = raw_filter
+        warnings: list[str] = []
+        if file_filter and not results:
+            warnings.append(_FILE_FILTER_NO_MATCH_WARNING)
+        return {
+            "file_filter": file_filter,
+            "file_filter_match_mode": _FILE_FILTER_MATCH_MODE,
+            "file_filter_warning_codes": warnings,
+        }
+
     def _score_symbol(self, query_vector: list[float], symbol) -> float | None:
         """Return similarity score for a symbol or None if scoring fails."""
         if not symbol.embedding_vector:
@@ -542,6 +591,7 @@ class HybridSearch:
         *,
         similarity_score: float,
         ranking_score: float | None = None,
+        context_radius: int = _DEFAULT_CONTEXT_RADIUS,
     ) -> dict[str, object]:
         """Build the JSON-friendly result payload for a symbol."""
         if ranking_score is None:
@@ -557,12 +607,18 @@ class HybridSearch:
             "docstring": symbol.docstring,
             "similarity_score": similarity_score,
             "ranking_score": ranking_score,
-            "context": self._load_context(symbol.file_path, symbol.start_line),
+            "context": self._load_context(
+                symbol.file_path,
+                symbol.start_line,
+                radius=context_radius,
+            ),
         }
 
     @staticmethod
-    def _load_context(path: str, line: int, radius: int = 3) -> str:
+    def _load_context(path: str, line: int, radius: int = _DEFAULT_CONTEXT_RADIUS) -> str:
         """Load a small context window around a symbol."""
+        if radius < 1:
+            radius = 1
         try:
             with open(path, encoding="utf8") as handle:
                 lines = handle.readlines()

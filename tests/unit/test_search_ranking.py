@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 
 from gloggur.embeddings.base import EmbeddingProvider
@@ -57,6 +58,41 @@ class FakeMetadataStore:
         if language:
             values = [symbol for symbol in values if symbol.language == language]
         return values
+
+    def filter_symbols_by_file_match(
+        self,
+        *,
+        file_path: str,
+        kinds: list[str] | None = None,
+        language: str | None = None,
+    ) -> list[Symbol]:
+        values = self.filter_symbols(kinds=kinds, language=language)
+        prefix = file_path.strip().rstrip("/\\")
+        if not prefix:
+            return []
+        candidates: list[str] = []
+        for candidate in (prefix, os.path.normpath(prefix)):
+            normalized = candidate.rstrip("/\\")
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+        if not os.path.isabs(prefix):
+            dot_candidate = os.path.join(".", prefix)
+            for candidate in (dot_candidate, os.path.normpath(dot_candidate)):
+                normalized = candidate.rstrip("/\\")
+                if normalized and normalized not in candidates:
+                    candidates.append(normalized)
+        matched: list[Symbol] = []
+        for symbol in values:
+            normalized_path = symbol.file_path.rstrip("/\\")
+            for candidate in candidates:
+                if (
+                    normalized_path == candidate
+                    or normalized_path.startswith(f"{candidate}/")
+                    or normalized_path.startswith(f"{candidate}\\")
+                ):
+                    matched.append(symbol)
+                    break
+        return matched
 
     def list_symbols(self) -> list[Symbol]:
         return list(self._symbols.values())
@@ -247,3 +283,56 @@ def test_file_filter_into_tests_suppresses_test_penalty_even_in_source_first_mod
     assert metadata["test_penalty_applied"] is False
     result = payload["results"][0]
     assert result["ranking_score"] == result["similarity_score"]
+
+
+def test_file_filter_prefix_matches_src_but_not_src2() -> None:
+    src_symbol = _symbol(
+        symbol_id="./src/requests/sessions.py:801:mount",
+        name="mount",
+        file_path="./src/requests/sessions.py",
+        start_line=802,
+        embedding_vector=[0.0, 0.0],
+    )
+    src2_symbol = _symbol(
+        symbol_id="./src2/requests/sessions.py:801:mount_alt",
+        name="mount_alt",
+        file_path="./src2/requests/sessions.py",
+        start_line=802,
+        embedding_vector=[0.0, 0.0],
+    )
+    query = "Session.mount"
+    embedding = FakeEmbeddingProvider({query: [0.0, 0.0]})
+    vector_store = FakeVectorStore({})
+    metadata_store = FakeMetadataStore([src_symbol, src2_symbol])
+    searcher = HybridSearch(embedding, vector_store, metadata_store)
+
+    payload = searcher.search(query, filters={"file": "src"}, top_k=10)
+
+    assert [item["symbol_id"] for item in payload["results"]] == [src_symbol.id]
+    metadata = payload["metadata"]
+    assert metadata["file_filter"] == "src"
+    assert metadata["file_filter_match_mode"] == "exact_or_prefix"
+    assert metadata["file_filter_warning_codes"] == []
+
+
+def test_file_filter_no_match_emits_warning_code() -> None:
+    src_symbol = _symbol(
+        symbol_id="./src/requests/sessions.py:801:mount",
+        name="mount",
+        file_path="./src/requests/sessions.py",
+        start_line=802,
+        embedding_vector=[0.0, 0.0],
+    )
+    query = "Session.mount"
+    embedding = FakeEmbeddingProvider({query: [0.0, 0.0]})
+    vector_store = FakeVectorStore({})
+    metadata_store = FakeMetadataStore([src_symbol])
+    searcher = HybridSearch(embedding, vector_store, metadata_store)
+
+    payload = searcher.search(query, filters={"file": "missing"}, top_k=10)
+
+    assert payload["results"] == []
+    metadata = payload["metadata"]
+    assert metadata["file_filter"] == "missing"
+    assert metadata["file_filter_match_mode"] == "exact_or_prefix"
+    assert metadata["file_filter_warning_codes"] == ["file_filter_no_match"]

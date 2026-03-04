@@ -176,6 +176,25 @@ Prefer source definitions for agent-heavy workflows:
 gloggur search "Session.mount" --top-k 5 --json --ranking-mode source-first
 ```
 
+Filter to an exact file or a directory-style prefix (boundary-safe):
+
+```bash
+gloggur search "Session.mount" --top-k 5 --json --file src/
+```
+
+`--file` matching is `exact_or_prefix` and normalizes common relative forms, so
+`src/` and `./src/` are treated equivalently for indexed `./src/...` paths.
+When a file filter resolves to no indexed paths, search stays non-fatal and emits
+`metadata.file_filter_warning_codes=["file_filter_no_match"]`.
+
+Increase/decrease returned code context per result:
+
+```bash
+gloggur search "Session.mount" --top-k 5 --json --context-radius 15
+```
+
+`--context-radius` defaults to `12` and accepts `1..200`.
+
 Stream results as line-delimited JSON:
 
 ```bash

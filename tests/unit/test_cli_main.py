@@ -88,6 +88,30 @@ def test_profile_reindex_reason_profile_matches() -> None:
     assert reason is None
 
 
+def test_profile_reindex_reason_hf_snapshot_alias_matches_short_model() -> None:
+    """Local/test HuggingFace snapshot aliases should not trigger false profile drift."""
+    reason = _profile_reindex_reason(
+        metadata_present=True,
+        cached_profile=(
+            "local:/Users/example/.cache/huggingface/hub/"
+            "models--microsoft--codebert-base/snapshots/abc123"
+        ),
+        expected_profile="local:microsoft/codebert-base",
+    )
+    assert reason is None
+
+
+def test_profile_reindex_reason_non_hf_local_path_stays_strict() -> None:
+    """Non-HuggingFace local model paths should continue to require exact profile matches."""
+    reason = _profile_reindex_reason(
+        metadata_present=True,
+        cached_profile="local:/tmp/custom-model-path",
+        expected_profile="local:microsoft/codebert-base",
+    )
+    assert reason is not None
+    assert "embedding profile changed" in reason
+
+
 def test_metadata_reindex_reason_missing_metadata() -> None:
     """Missing index metadata should report an explicit rebuild reason."""
     reason = _metadata_reindex_reason(metadata_present=False)
@@ -621,6 +645,28 @@ def test_resume_contract_profile_change_is_machine_readable() -> None:
     assert payload["resume_decision"] == "reindex_required"
     assert payload["resume_reason_codes"] == ["embedding_profile_changed"]
     assert payload["resume_fingerprint_match"] is False
+
+
+def test_resume_contract_hf_snapshot_alias_is_resume_compatible() -> None:
+    """HuggingFace snapshot-path aliases should not force false reindex decisions."""
+    metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
+    payload = _build_resume_contract(
+        metadata=metadata,
+        schema_version="2",
+        expected_profile="local:microsoft/codebert-base",
+        cached_profile=(
+            "local:/Users/example/.cache/huggingface/hub/"
+            "models--microsoft--codebert-base/snapshots/abc123"
+        ),
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+    )
+
+    assert payload["resume_decision"] == "resume_ok"
+    assert payload["resume_reason_codes"] == []
+    assert payload["resume_fingerprint_match"] is True
 
 
 def test_resume_contract_missing_metadata_has_machine_reason_code() -> None:
@@ -1954,9 +2000,11 @@ def test_search_json_allows_explicit_tool_version_drift_override(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = filters
             _ = top_k
+            _ = context_radius
             return {
                 "query": query,
                 "results": [
@@ -2050,10 +2098,12 @@ def test_search_json_retries_once_for_low_confidence_and_emits_metadata(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = query
             _ = filters
             search_top_k_calls.append(top_k)
+            _ = context_radius
             score = 0.2 if len(search_top_k_calls) == 1 else 0.95
             return {
                 "query": "needle",
@@ -2158,10 +2208,12 @@ def test_search_json_requery_is_bounded_by_max_attempts(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = query
             _ = filters
             search_top_k_calls.append(top_k)
+            _ = context_radius
             return {
                 "query": "needle",
                 "results": [
@@ -2262,10 +2314,12 @@ def test_search_json_disable_bounded_requery_skips_retry(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = query
             _ = filters
             search_top_k_calls.append(top_k)
+            _ = context_radius
             return {
                 "query": "needle",
                 "results": [
@@ -2440,10 +2494,12 @@ def test_search_json_opt_in_evidence_trace_and_validation_pass(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = query
             _ = filters
             _ = top_k
+            _ = context_radius
             return {
                 "query": "needle",
                 "results": [
@@ -2550,10 +2606,12 @@ def test_search_json_fail_on_ungrounded_exits_nonzero_with_contract(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = query
             _ = filters
             _ = top_k
+            _ = context_radius
             return {
                 "query": "needle",
                 "results": [],
@@ -2642,10 +2700,12 @@ def test_search_json_default_is_backward_compatible_without_trace_payload(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = query
             _ = filters
             _ = top_k
+            _ = context_radius
             return {
                 "query": "needle",
                 "results": [
@@ -2738,9 +2798,11 @@ def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
             *,
             filters: dict[str, str],
             top_k: int,
+            context_radius: int,
         ) -> dict[str, object]:
             _ = query
             _ = top_k
+            _ = context_radius
             captured_filters.update(filters)
             return {
                 "query": "needle query",
@@ -2787,6 +2849,99 @@ def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
     assert metadata["query_intent"] == "semantic"
     assert metadata["explicit_test_intent"] is False
     assert metadata["test_penalty_applied"] is True
+
+
+def test_search_json_context_radius_is_forwarded_and_reflected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """search --context-radius should flow to HybridSearch and metadata payloads."""
+    runner = CliRunner()
+    captured_context_radius: list[int] = []
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return IndexMetadata(version="1", total_symbols=1, indexed_files=1)
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return "local:microsoft/codebert-base"
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> str:
+            return cli_main.GLOGGUR_VERSION
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+            context_radius: int,
+        ) -> dict[str, object]:
+            _ = query
+            _ = filters
+            _ = top_k
+            captured_context_radius.append(context_radius)
+            return {
+                "query": "needle",
+                "results": [],
+                "metadata": {"total_results": 0, "search_time_ms": 1},
+            }
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
+
+    result = runner.invoke(
+        cli_main.cli,
+        [
+            "search",
+            "needle",
+            "--json",
+            "--context-radius",
+            "15",
+            "--max-requery-attempts",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured_context_radius == [15]
+    payload = _parse_json_output(result.output)
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["context_radius"] == 15
 
 
 def test_search_json_wraps_metadata_store_connect_failure(

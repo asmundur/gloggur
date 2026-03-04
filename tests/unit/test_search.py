@@ -51,6 +51,10 @@ def test_hybrid_search_returns_ranked_results() -> None:
         payload = searcher.search("add", top_k=5)
 
         assert payload["metadata"]["total_results"] > 0
+        assert payload["metadata"]["context_radius"] == 12
+        assert payload["metadata"]["file_filter"] is None
+        assert payload["metadata"]["file_filter_match_mode"] == "exact_or_prefix"
+        assert payload["metadata"]["file_filter_warning_codes"] == []
         first = payload["results"][0]
         assert 0.0 <= first["similarity_score"] <= 1.0
         assert 0.0 <= first["ranking_score"] <= 1.0
@@ -97,3 +101,55 @@ def func_c(): return 3
         assert len(neighborhood["structural_neighbors"]) == 2
         # Semantic should contain func_b and func_c (top_k up to 5)
         assert len(neighborhood["semantic_neighbors"]) <= 2
+
+
+def test_hybrid_search_context_radius_controls_context_window_size() -> None:
+    """Context radius should be configurable and reflected in payload metadata."""
+    source = "\n".join(
+        [
+            "# header",
+            "",
+            "def target(value: int) -> int:",
+            "    total = value",
+            "    total += 1",
+            "    total += 2",
+            "    total += 3",
+            "    total += 4",
+            "    total += 5",
+            "    return total",
+            "",
+            "def other() -> int:",
+            "    return 0",
+            "",
+            "# footer",
+        ]
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        config = GloggurConfig(cache_dir=cache_dir, local_embedding_model="local")
+        cache = CacheManager(CacheConfig(cache_dir))
+        embedding = DeterministicTestEmbeddingProvider()
+        vector_store = VectorStore(VectorStoreConfig(cache_dir))
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=embedding,
+            vector_store=vector_store,
+        )
+
+        indexer.index_repository(str(repo))
+
+        metadata_store = MetadataStore(MetadataStoreConfig(cache_dir))
+        searcher = HybridSearch(embedding, vector_store, metadata_store)
+        small = searcher.search("target", top_k=1, context_radius=1)
+        large = searcher.search("target", top_k=1, context_radius=12)
+
+        assert small["metadata"]["context_radius"] == 1
+        assert large["metadata"]["context_radius"] == 12
+        small_context = str(small["results"][0]["context"]).splitlines()
+        large_context = str(large["results"][0]["context"]).splitlines()
+        assert len(large_context) >= len(small_context)
+        assert len(large_context) > 0

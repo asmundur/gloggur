@@ -177,6 +177,54 @@ def test_resume_schema_version_mismatch_emits_machine_reason_codes() -> None:
         assert payload["last_success_tool_version_match"] is None
 
 
+def test_resume_profile_alias_treats_hf_snapshot_and_short_name_as_compatible() -> None:
+    """Snapshot-path aliases should not trigger false embedding_profile_changed reindex blocks."""
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+            "GLOGGUR_LOCAL_MODEL": "microsoft/codebert-base",
+        }
+
+        index_run = _run_cli(["index", str(repo), "--json"], env)
+        assert index_run.returncode == 0, f"{index_run.stderr}\n{index_run.stdout}"
+
+        _set_cache_meta(
+            cache_dir,
+            "index_profile",
+            (
+                "test:/Users/example/.cache/huggingface/hub/"
+                "models--microsoft--codebert-base/snapshots/abc123"
+            ),
+        )
+
+        status_run = _run_cli(["status", "--json"], env)
+        assert status_run.returncode == 0, f"{status_run.stderr}\n{status_run.stdout}"
+        payload = _parse_json_payload(status_run.stdout)
+        assert payload["resume_decision"] == "resume_ok"
+        assert payload["needs_reindex"] is False
+        assert "embedding_profile_changed" not in set(payload["resume_reason_codes"])
+        assert payload["expected_index_profile"] == "test:microsoft/codebert-base"
+        assert payload["cached_index_profile"] == "test:microsoft/codebert-base"
+
+        search_run = _run_cli(["search", "add", "--json"], env)
+        assert search_run.returncode == 0, f"{search_run.stderr}\n{search_run.stdout}"
+        search_payload = _parse_json_payload(search_run.stdout)
+        results = search_payload["results"]
+        assert isinstance(results, list)
+        assert results
+        metadata = search_payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["resume_decision"] == "resume_ok"
+        assert metadata["needs_reindex"] is False
+        assert "embedding_profile_changed" not in set(metadata["resume_reason_codes"])
+
+
 def test_resume_requires_reindex_when_last_success_tool_version_is_tampered() -> None:
     """Tampered last-success tool-version markers should fail closed with a machine-readable code."""
     source = TestFixtures.create_sample_python_file()

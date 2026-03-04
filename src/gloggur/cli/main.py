@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -145,10 +146,12 @@ DEFAULT_CLI_FAILURE_REMEDIATION = (
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1"
 DEFAULT_RETRIEVAL_CONFIDENCE_THRESHOLD = 0.55
 DEFAULT_MAX_REQUERY_ATTEMPTS = 1
+DEFAULT_SEARCH_CONTEXT_RADIUS = 12
 DEFAULT_EVIDENCE_MIN_CONFIDENCE = 0.6
 DEFAULT_EVIDENCE_MIN_ITEMS = 1
 MAX_REQUERY_TOP_K = 64
 REQUERY_STRATEGY_TOP_K_EXPANSION = "top_k_expansion"
+_HF_CACHE_MODEL_SEGMENT_RE = re.compile(r"^models--(?P<org>[^/\\]+)--(?P<repo>[^/\\]+)$")
 CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "cli_usage_error": [
         "Fix command arguments/options and rerun with `--help` for usage details.",
@@ -567,18 +570,57 @@ def _hash_content(source: str) -> str:
     return hashlib.sha256(source.encode("utf8")).hexdigest()
 
 
+def _canonicalize_hf_snapshot_model(model: str) -> str:
+    """Canonicalize HuggingFace cache/snapshot paths to stable org/repo model ids."""
+    normalized = model.strip().replace("\\", "/")
+    if not normalized:
+        return model.strip()
+    segments = [segment for segment in normalized.split("/") if segment]
+    for segment in segments:
+        match = _HF_CACHE_MODEL_SEGMENT_RE.fullmatch(segment)
+        if not match:
+            continue
+        org = match.group("org")
+        repo = match.group("repo")
+        if org and repo:
+            return f"{org}/{repo}"
+    return model.strip()
+
+
+def _canonicalize_embedding_profile(profile: str | None) -> str | None:
+    """Return canonical embedding profile for compatibility checks/fingerprinting."""
+    if profile is None:
+        return None
+    normalized = profile.strip()
+    if not normalized:
+        return normalized
+    provider, separator, model = normalized.partition(":")
+    if not separator:
+        return normalized
+    normalized_provider = provider.strip()
+    normalized_model = model.strip()
+    if normalized_provider.lower() in {"local", "test"}:
+        normalized_model = _canonicalize_hf_snapshot_model(normalized_model)
+    return f"{normalized_provider}:{normalized_model}"
+
+
 def _profile_reindex_reason(
     metadata_present: bool,
     cached_profile: str | None,
     expected_profile: str,
 ) -> str | None:
     """Return a reason why cached index data should be rebuilt."""
+    normalized_expected = _canonicalize_embedding_profile(expected_profile) or expected_profile
+    normalized_cached = _canonicalize_embedding_profile(cached_profile)
     if cached_profile is None:
         if metadata_present:
             return "cached embedding profile is unknown"
         return None
-    if cached_profile != expected_profile:
-        return f"embedding profile changed (cached={cached_profile}, current={expected_profile})"
+    if normalized_cached != normalized_expected:
+        return (
+            "embedding profile changed "
+            f"(cached={normalized_cached}, current={normalized_expected})"
+        )
     return None
 
 
@@ -665,6 +707,10 @@ def _build_resume_contract(
     allow_tool_version_drift: bool = False,
 ) -> dict[str, object]:
     """Build deterministic resume/fingerprint metadata for status and search JSON payloads."""
+    normalized_expected_profile = (
+        _canonicalize_embedding_profile(expected_profile) or expected_profile
+    )
+    normalized_cached_profile = _canonicalize_embedding_profile(cached_profile)
     metadata_present = metadata is not None
     metadata_signal = _metadata_reindex_signal(
         metadata_present=metadata_present,
@@ -672,7 +718,11 @@ def _build_resume_contract(
             last_success_resume_fingerprint is not None or last_success_resume_at is not None
         ),
     )
-    profile_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
+    profile_reason = _profile_reindex_reason(
+        metadata_present,
+        normalized_cached_profile,
+        normalized_expected_profile,
+    )
     tool_version_reason = _tool_version_reindex_reason(
         last_success_tool_version=last_success_tool_version,
         current_tool_version=tool_version,
@@ -718,7 +768,7 @@ def _build_resume_contract(
         {
             "workspace_path_hash": workspace_path_hash,
             "schema_version": schema_version or CACHE_SCHEMA_VERSION,
-            "index_profile": expected_profile,
+            "index_profile": normalized_expected_profile,
             "metadata_digest": metadata_digest,
             "tool_version": tool_version,
         }
@@ -727,7 +777,7 @@ def _build_resume_contract(
         {
             "workspace_path_hash": workspace_path_hash,
             "schema_version": schema_version,
-            "index_profile": cached_profile,
+            "index_profile": normalized_cached_profile,
             "metadata_digest": metadata_digest,
             "tool_version": cached_tool_version,
         }
@@ -1175,13 +1225,13 @@ def _create_runtime(
     if embedding_provider:
         config.embedding_provider = embedding_provider
     config = _normalize_watch_paths(config, resolved_config_path)
-    expected_profile = config.embedding_profile()
+    expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     cache = _create_cache_manager(config.cache_dir)
     vector_store = _create_vector_store(config)
     if cache.last_reset_reason:
         vector_store.clear()
     metadata_present = cache.get_index_metadata() is not None
-    cached_profile = cache.get_index_profile()
+    cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
     reindex_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
     if reindex_reason and rebuild_on_profile_change:
         click.echo(
@@ -1251,10 +1301,10 @@ def _build_status_payload(
     allow_tool_version_drift: bool = False,
 ) -> dict[str, object]:
     """Build status payload from cache metadata/profile state."""
-    expected_profile = config.embedding_profile()
+    expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     metadata = cache.get_index_metadata()
     schema_version = cache.get_schema_version()
-    cached_profile = cache.get_index_profile()
+    cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
     last_success_tool_version = cache.get_last_success_tool_version()
     metadata_reason = _metadata_reindex_reason(metadata is not None)
     profile_reason = _profile_reindex_reason(
@@ -2414,12 +2464,15 @@ def _resolve_search_ranking_metadata(
     query: str,
     ranking_mode: str,
     file_path: str | None,
+    context_radius: int,
 ) -> dict[str, object]:
     """Resolve stable ranking metadata for search payloads."""
     ranking_filters: dict[str, str] = {"ranking_mode": ranking_mode}
     if file_path:
         ranking_filters["file"] = file_path
-    return hybrid_search_module.HybridSearch.build_ranking_metadata(query, ranking_filters)
+    metadata = hybrid_search_module.HybridSearch.build_ranking_metadata(query, ranking_filters)
+    metadata["context_radius"] = context_radius
+    return metadata
 
 
 def _resolve_allow_tool_version_drift(
@@ -2534,12 +2587,20 @@ def _search_with_bounded_retry(
     query: str,
     filters: dict[str, str],
     initial_top_k: int,
+    context_radius: int,
     confidence_threshold: float,
     max_requery_attempts: int,
     disable_bounded_requery: bool,
 ) -> tuple[dict[str, object], dict[str, object]]:
     """Run search with optional bounded retry and deterministic confidence telemetry."""
-    result = _validate_search_payload(searcher.search(query, filters=filters, top_k=initial_top_k))
+    result = _validate_search_payload(
+        searcher.search(
+            query,
+            filters=filters,
+            top_k=initial_top_k,
+            context_radius=context_radius,
+        )
+    )
     initial_confidence = _compute_retrieval_confidence(result.get("results"))
     final_confidence = initial_confidence
     final_top_k = initial_top_k
@@ -2561,7 +2622,12 @@ def _search_with_bounded_retry(
         retry_strategy = REQUERY_STRATEGY_TOP_K_EXPANSION
         final_top_k = next_top_k
         result = _validate_search_payload(
-            searcher.search(query, filters=filters, top_k=final_top_k)
+            searcher.search(
+                query,
+                filters=filters,
+                top_k=final_top_k,
+                context_radius=context_radius,
+            )
         )
         final_confidence = _compute_retrieval_confidence(result.get("results"))
 
@@ -2588,6 +2654,13 @@ def _search_with_bounded_retry(
 @click.option("--kind", type=str, default=None)
 @click.option("--file", "file_path", type=str, default=None)
 @click.option("--top-k", type=int, default=10)
+@click.option(
+    "--context-radius",
+    type=click.IntRange(1, 200),
+    default=DEFAULT_SEARCH_CONTEXT_RADIUS,
+    show_default=True,
+    help="Number of context lines to include on each side of a symbol match.",
+)
 @click.option(
     "--ranking-mode",
     type=click.Choice(["balanced", "source-first"], case_sensitive=False),
@@ -2662,6 +2735,7 @@ def search(
     kind: str | None,
     file_path: str | None,
     top_k: int,
+    context_radius: int,
     ranking_mode: str,
     confidence_threshold: float,
     max_requery_attempts: int,
@@ -2691,6 +2765,7 @@ def search(
         query=query,
         ranking_mode=ranking_mode,
         file_path=file_path,
+        context_radius=context_radius,
     )
     if stream and (with_evidence_trace or validate_grounding or fail_on_ungrounded):
         raise CLIContractError(
@@ -2698,10 +2773,10 @@ def search(
             error_code="search_stream_contract_conflict",
         )
     config, cache, vector_store = _create_runtime(config_path=config_path)
-    expected_profile = config.embedding_profile()
+    expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     metadata = cache.get_index_metadata()
     metadata_present = metadata is not None
-    cached_profile = cache.get_index_profile()
+    cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
     last_success_tool_version = cache.get_last_success_tool_version()
     metadata_reason = _metadata_reindex_reason(metadata_present)
     profile_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
@@ -2774,6 +2849,7 @@ def search(
             query=query,
             filters=filters,
             initial_top_k=top_k,
+            context_radius=context_radius,
             confidence_threshold=confidence_threshold,
             max_requery_attempts=max_requery_attempts,
             disable_bounded_requery=disable_bounded_requery,
@@ -2797,6 +2873,16 @@ def search(
             "test_penalty_applied",
             ranking_metadata["test_penalty_applied"],
         )
+        metadata_payload.setdefault("file_filter", ranking_metadata["file_filter"])
+        metadata_payload.setdefault(
+            "file_filter_match_mode",
+            ranking_metadata["file_filter_match_mode"],
+        )
+        metadata_payload.setdefault(
+            "file_filter_warning_codes",
+            ranking_metadata["file_filter_warning_codes"],
+        )
+        metadata_payload.setdefault("context_radius", ranking_metadata["context_radius"])
         metadata_payload.update(confidence_payload)
         metadata_payload.update(resume_contract)
     else:

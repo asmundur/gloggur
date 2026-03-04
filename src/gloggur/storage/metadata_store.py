@@ -64,11 +64,97 @@ class MetadataStore:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_symbol(row) for row in rows]
 
+    def filter_symbols_by_file_match(
+        self,
+        *,
+        file_path: str,
+        kinds: list[str] | None = None,
+        language: str | None = None,
+    ) -> list[Symbol]:
+        """Filter symbols by exact file path or boundary-safe directory prefix matching."""
+        candidates = self._file_match_candidates(file_path)
+        if not candidates:
+            return []
+        symbols_by_id: dict[str, Symbol] = {}
+        for candidate in candidates:
+            for symbol in self._filter_symbols_exact_or_prefix(
+                candidate,
+                kinds=kinds,
+                language=language,
+            ):
+                if symbol.id not in symbols_by_id:
+                    symbols_by_id[symbol.id] = symbol
+        symbols = list(symbols_by_id.values())
+        symbols.sort(key=lambda item: (item.file_path, item.start_line, item.id))
+        return symbols
+
     def list_symbols(self) -> list[Symbol]:
         """List all symbols ordered by file and start line."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM symbols ORDER BY file_path, start_line").fetchall()
             return [self._row_to_symbol(row) for row in rows]
+
+    def _filter_symbols_exact_or_prefix(
+        self,
+        file_path: str,
+        *,
+        kinds: list[str] | None = None,
+        language: str | None = None,
+    ) -> list[Symbol]:
+        """Filter symbols using exact-path equality plus escaped LIKE prefix clauses."""
+        prefix_root = file_path.rstrip("/\\")
+        if not prefix_root:
+            return []
+        query = "SELECT * FROM symbols WHERE 1=1"
+        params: list[str] = []
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            query += f" AND kind IN ({placeholders})"
+            params.extend(kinds)
+        if language:
+            query += " AND language = ?"
+            params.append(language)
+        escaped_prefix = self._escape_sql_like(prefix_root)
+        prefix_patterns = [f"{escaped_prefix}/%"]
+        windows_pattern = f"{escaped_prefix}\\\\%"
+        if windows_pattern not in prefix_patterns:
+            prefix_patterns.append(windows_pattern)
+        query += " AND (file_path = ?"
+        params.append(prefix_root)
+        for pattern in prefix_patterns:
+            query += " OR file_path LIKE ? ESCAPE '\\'"
+            params.append(pattern)
+        query += ") ORDER BY file_path, start_line"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._row_to_symbol(row) for row in rows]
+
+    @staticmethod
+    def _escape_sql_like(value: str) -> str:
+        """Escape wildcard metacharacters for SQL LIKE clauses."""
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
+    def _file_match_candidates(file_path: str) -> list[str]:
+        """Return de-duplicated file-match candidates across relative path forms."""
+        raw = file_path.strip()
+        if not raw:
+            return []
+        candidates: list[str] = []
+        for candidate in (raw, os.path.normpath(raw)):
+            normalized = candidate.rstrip("/\\")
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+        if not os.path.isabs(raw):
+            dot_candidate = os.path.join(".", raw)
+            for candidate in (dot_candidate, os.path.normpath(dot_candidate)):
+                normalized = candidate.rstrip("/\\")
+                if normalized and normalized not in candidates:
+                    candidates.append(normalized)
+        abs_candidate = os.path.abspath(raw).rstrip("/\\")
+        if abs_candidate and abs_candidate not in candidates:
+            candidates.append(abs_candidate)
+        return candidates
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

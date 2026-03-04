@@ -148,6 +148,11 @@ Pytest defaults for this repo:
 - Use `--top-k` to widen or narrow results based on the task.
 - Use `--stream` if you are integrating results into a tool chain.
 - For identifier-heavy lookups where tests are noisy, use `--ranking-mode source-first`.
+- Use `--file` for exact file or directory-prefix scoping (`exact_or_prefix` with
+  normalized `src/` vs `./src/` behavior); check
+  `metadata.file_filter_warning_codes` for `file_filter_no_match`.
+- Use `--context-radius` (default `12`, range `1..200`) when agents need more or
+  less surrounding implementation detail per hit.
 
 Grounded retrieve -> validate -> emit/repair flow (recommended for agent outputs):
 

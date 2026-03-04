@@ -6,6 +6,45 @@ import sqlite3
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 
 
+def _insert_symbol(
+    conn: sqlite3.Connection,
+    *,
+    symbol_id: str,
+    name: str,
+    file_path: str,
+    start_line: int = 1,
+    kind: str = "function",
+) -> None:
+    """Insert one symbol row into the metadata test table."""
+    conn.execute(
+        """
+        INSERT INTO symbols (
+            id, name, kind, file_path, start_line, end_line,
+            signature, docstring, body_hash, embedding_vector, language,
+            invariants, calls, covered_by, is_serialization_boundary, implicit_contract
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            symbol_id,
+            name,
+            kind,
+            file_path,
+            start_line,
+            start_line + 1,
+            f"def {name}():",
+            None,
+            f"hash-{symbol_id}",
+            None,
+            "python",
+            "[]",
+            "[]",
+            "[]",
+            0,
+            None,
+        ),
+    )
+
+
 def _seed_symbols(db_path: str) -> None:
     """Seed a metadata store database with sample symbols."""
     conn = sqlite3.connect(db_path)
@@ -109,3 +148,55 @@ def test_metadata_store_get_list_and_filter(tmp_path) -> None:
 
     filtered = store.filter_symbols(file_path="alpha.py", language="python")
     assert [item.id for item in filtered] == ["sym-1"]
+
+
+def test_metadata_store_file_match_supports_exact_prefix_and_like_escaping(tmp_path) -> None:
+    """File-match filtering should support boundary-safe prefixes with escaped SQL LIKE."""
+    db_path = tmp_path / "index.db"
+    _seed_symbols(str(db_path))
+    conn = sqlite3.connect(db_path)
+    try:
+        _insert_symbol(
+            conn,
+            symbol_id="sym-3",
+            name="src_target",
+            file_path="./src/requests/models.py",
+        )
+        _insert_symbol(
+            conn,
+            symbol_id="sym-4",
+            name="src2_target",
+            file_path="./src2/requests/models.py",
+        )
+        _insert_symbol(
+            conn,
+            symbol_id="sym-5",
+            name="pct_literal",
+            file_path="./src/%tmp/example.py",
+        )
+        _insert_symbol(
+            conn,
+            symbol_id="sym-6",
+            name="pct_nonliteral",
+            file_path="./src/xtmp/example.py",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = MetadataStore(MetadataStoreConfig(cache_dir=str(tmp_path)))
+
+    src_results = store.filter_symbols_by_file_match(file_path="src")
+    src_ids = [item.id for item in src_results]
+    assert "sym-3" in src_ids
+    assert "sym-4" not in src_ids
+
+    src_dot_results = store.filter_symbols_by_file_match(file_path="./src/")
+    src_dot_ids = [item.id for item in src_dot_results]
+    assert "sym-3" in src_dot_ids
+    assert "sym-4" not in src_dot_ids
+
+    escaped_results = store.filter_symbols_by_file_match(file_path="./src/%tmp")
+    escaped_ids = [item.id for item in escaped_results]
+    assert "sym-5" in escaped_ids
+    assert "sym-6" not in escaped_ids
