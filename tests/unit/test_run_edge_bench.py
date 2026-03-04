@@ -71,3 +71,10 @@ def test_apply_baseline_contract_emits_warning_when_threshold_exceeded() -> None
 def test_benchmark_runner_uses_repo_local_cli_invocation() -> None:
     runner = _new_runner("/tmp/gloggur-cache-test")
     assert runner.base_cmd == [sys.executable, "-m", "gloggur.cli.main"]
+
+
+def test_benchmark_runner_pins_test_embedding_provider_env() -> None:
+    runner = _new_runner("/tmp/gloggur-cache-test")
+    assert runner.env is not None
+    assert runner.env.get("GLOGGUR_EMBEDDING_PROVIDER") == "test"
+    assert "GLOGGUR_LOCAL_FALLBACK" not in runner.env

@@ -266,6 +266,9 @@ def test_verification_workflow_includes_performance_regression_benchmark() -> No
     )
     assert isinstance(benchmark_step, dict)
     assert benchmark_step.get("if") == "${{ matrix.python-version == '3.13' }}"
+    benchmark_env = benchmark_step.get("env")
+    assert isinstance(benchmark_env, dict)
+    assert benchmark_env.get("GLOGGUR_EMBEDDING_PROVIDER") == "test"
     run_script = benchmark_step.get("run")
     assert isinstance(run_script, str)
     assert "set -o pipefail" in run_script
