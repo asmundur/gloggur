@@ -246,6 +246,7 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
         started_pid = int(started_payload["pid"])
         assert started_pid > 0
 
+        running_payload: dict[str, object] | None = None
         for _ in range(50):
             status = _run_cli(
                 ["watch", "status", "--config", str(config_path), "--json"],
@@ -254,9 +255,15 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
             )
             assert status.returncode == 0, f"{status.stderr}\n{status.stdout}"
             payload = _parse_json_payload(status.stdout)
-            if payload.get("running") is True:
+            status_label = str(payload.get("status", "")).strip().lower()
+            if (
+                payload.get("running") is True
+                and status_label in {"running", "running_with_errors"}
+            ):
+                running_payload = payload
                 break
             time.sleep(0.1)
+        assert running_payload is not None, "watch daemon never reached stable running state"
 
         target.write_text(
             "def watch_target() -> str:\n"
@@ -266,7 +273,8 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
         )
 
         failed_payload: dict[str, object] | None = None
-        for _ in range(120):
+        last_status_payload: dict[str, object] | None = None
+        for _ in range(200):
             status = _run_cli(
                 ["watch", "status", "--config", str(config_path), "--json"],
                 env,
@@ -274,12 +282,18 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
             )
             assert status.returncode == 0, f"{status.stderr}\n{status.stdout}"
             payload = _parse_json_payload(status.stdout)
+            last_status_payload = payload
             reasons = payload.get("failed_reasons", {})
             if isinstance(reasons, dict) and reasons.get("vector_metadata_mismatch", 0):
                 failed_payload = payload
                 break
             time.sleep(0.1)
-        assert failed_payload is not None, "watch daemon did not report vector_metadata_mismatch"
+        log_content = log_file.read_text(encoding="utf8") if log_file.exists() else "<missing log file>"
+        assert failed_payload is not None, (
+            "watch daemon did not report vector_metadata_mismatch\n"
+            f"last_status={json.dumps(last_status_payload, indent=2, sort_keys=True) if last_status_payload is not None else '<missing>'}\n"
+            f"log_file={log_content}"
+        )
 
         assert failed_payload["status"] == "running_with_errors"
         failure_codes = failed_payload.get("failure_codes", [])
