@@ -1118,6 +1118,16 @@ def test_watch_status_json_uses_last_batch_failure_reasons_when_top_level_counte
     assert "vector_metadata_mismatch" in guidance
     assert isinstance(guidance["vector_metadata_mismatch"], list)
     assert guidance["vector_metadata_mismatch"]
+    last_batch = payload.get("last_batch")
+    assert isinstance(last_batch, dict)
+    last_batch_codes = last_batch.get("failure_codes")
+    assert isinstance(last_batch_codes, list)
+    assert last_batch_codes == ["vector_metadata_mismatch"]
+    last_batch_guidance = last_batch.get("failure_guidance")
+    assert isinstance(last_batch_guidance, dict)
+    assert "vector_metadata_mismatch" in last_batch_guidance
+    assert isinstance(last_batch_guidance["vector_metadata_mismatch"], list)
+    assert last_batch_guidance["vector_metadata_mismatch"]
 
 
 def test_watch_status_json_synthesizes_last_batch_inconsistent_failure_contract(

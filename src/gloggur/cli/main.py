@@ -1136,20 +1136,42 @@ def _build_watch_failure_contract(state: dict[str, object]) -> dict[str, object]
     if not normalized_reasons:
         return {}
 
-    return {
-        "failed_reasons": normalized_reasons,
-        "failure_codes": sorted(normalized_reasons),
-        "failure_guidance": {
-            reason: FAILURE_REMEDIATION.get(
+    failure_codes = sorted(normalized_reasons)
+    failure_guidance = {
+        reason: FAILURE_REMEDIATION.get(
+            reason,
+            WATCH_STATUS_FAILURE_REMEDIATION.get(
                 reason,
-                WATCH_STATUS_FAILURE_REMEDIATION.get(
-                    reason,
-                    [DEFAULT_WATCH_STATUS_FAILURE_REMEDIATION],
-                ),
-            )
-            for reason in sorted(normalized_reasons)
-        },
+                [DEFAULT_WATCH_STATUS_FAILURE_REMEDIATION],
+            ),
+        )
+        for reason in failure_codes
     }
+    contract: dict[str, object] = {
+        "failed_reasons": normalized_reasons,
+        "failure_codes": failure_codes,
+        "failure_guidance": failure_guidance,
+    }
+
+    last_batch_payload = state.get("last_batch")
+    if isinstance(last_batch_payload, dict):
+        patched_batch = dict(last_batch_payload)
+        batch_failure_codes = patched_batch.get("failure_codes")
+        if not (isinstance(batch_failure_codes, list) and batch_failure_codes):
+            patched_batch["failure_codes"] = failure_codes
+            patched_batch["failure_guidance"] = failure_guidance
+            if not _normalize_reason_counts(patched_batch.get("failed_reasons")):
+                patched_batch["failed_reasons"] = normalized_reasons
+            contract["last_batch"] = patched_batch
+    else:
+        contract["last_batch"] = {
+            "failed": _failed_count,
+            "failed_reasons": normalized_reasons,
+            "failure_codes": failure_codes,
+            "failure_guidance": failure_guidance,
+        }
+
+    return contract
 
 
 def _watch_starting_state_payload(*, watch_path: str, pid: int) -> dict[str, object]:

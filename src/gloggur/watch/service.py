@@ -235,6 +235,34 @@ class WatchService:
             and batch.last_error is None
         )
 
+    def _noop_last_batch_contract(self) -> dict[str, object] | None:
+        """Keep a failure-bearing last_batch when heartbeat events would otherwise drop detail."""
+        if not self._total_failed_reasons:
+            return None
+
+        state = load_watch_state(self.config.watch_state_file)
+        last_batch_payload = state.get("last_batch")
+        if isinstance(last_batch_payload, dict):
+            existing = dict(last_batch_payload)
+            if isinstance(existing.get("failure_codes"), list) and existing["failure_codes"]:
+                return None
+            result = existing
+        else:
+            result = {}
+
+        failure_contract = self._failure_contract(self._total_failed_reasons)
+        if not failure_contract:
+            return None
+
+        result["failure_codes"] = failure_contract.get("failure_codes", [])
+        if "failure_guidance" not in result:
+            result["failure_guidance"] = failure_contract.get("failure_guidance", {})
+        if "failed_reasons" not in result:
+            result["failed_reasons"] = dict(self._total_failed_reasons)
+        if "failed" not in result:
+            result["failed"] = self._total_errors
+        return result
+
     def run_forever(self, path: str) -> dict[str, object]:
         """Watch filesystem changes and process until stopped."""
 
@@ -259,12 +287,16 @@ class WatchService:
                     break
                 batch = self.process_batch(changes, watch_root=watch_root, watch_file=watch_file)
                 if self._is_noop_batch(batch):
-                    self._write_state(
-                        running=True,
-                        watch_path=watch_root,
-                        last_heartbeat=utc_now_iso(),
-                        status="running_with_errors" if self._total_errors else "running",
-                    )
+                    heartbeat_payload = {
+                        "running": True,
+                        "watch_path": watch_root,
+                        "last_heartbeat": utc_now_iso(),
+                        "status": "running_with_errors" if self._total_errors else "running",
+                    }
+                    last_batch_contract = self._noop_last_batch_contract()
+                    if last_batch_contract is not None:
+                        heartbeat_payload["last_batch"] = last_batch_contract
+                    self._write_state(**heartbeat_payload)
                     continue
                 self._total_files_considered += batch.files_considered
                 self._total_indexed_files += batch.indexed_files
