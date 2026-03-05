@@ -155,9 +155,4 @@ Current priorities:
 - optimize retrieval ranking
 - strengthen agent CLI compatibility
 
----
-
-## License
-
-TBD
 
