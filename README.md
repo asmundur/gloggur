@@ -1,148 +1,163 @@
-# Gloggur
+# Glöggur
 
-Gloggur is a symbol-level codebase indexer and semantic search tool designed to help agents and developers answer questions about a codebase. It parses source files into symbols, embeds them with language models, stores them locally, and exposes a CLI that returns JSON for easy integration with other tools. Gloggur builds and maintains a local cache of symbol vectors that can be generated on demand and updated incrementally, and it supports pluggable embedding providers (local, OpenAI and Gemini). Its search engine is built on FAISS with a SQLite metadata store and can also audit docstrings to spot discrepancies between documentation and implementation.
+**Glöggur** is a local semantic search tool designed for coding agents and developers.  
+It augments traditional text search with embeddings so agents can locate relevant code and context even when exact keywords are missing.
 
-## Key features
+The goal is simple: **make codebases navigable for LLM agents without requiring external services or complex infrastructure.**
 
-- Multi-language symbol extraction - uses Tree-sitter parsers to recognise functions, classes, interfaces and other symbols across Python, JavaScript/TypeScript, Go, Rust, Java and more.
-- Efficient indexing - initial indexing builds a vector database for your project, and subsequent runs update only changed files so searches stay fast.
-- Always-on symbol occurrence index - `gloggur index` also updates `.gloggur/index/symbols.db` with deterministic `def`/`ref` file-line occurrences.
-- Pluggable embeddings - choose from OpenAI, Gemini or a local hugging-face compatible model. Embedding providers are configured in `.gloggur.yaml` or via environment variables.
-- Semantic search with FAISS - quickly retrieve the most similar symbols and view surrounding context; optionally filter to a file or directory prefix and control the amount of context returned.
-- Docstring audit - inspect symbols and score how well their docstrings match their implementation.
-- On-save indexing (watch mode) - run a background watcher that re-indexes changed files, making search results up-to-date.
-- Structured JSON output - all commands return machine-readable JSON envelopes to make it easy to build agents, dashboards and CI jobs around Gloggur.
+---
 
-## Installation
+## Core Idea
 
-The recommended way to install Gloggur is via `pipx`:
+Agents already know how to use tools like `grep`.  
+Glöggur keeps that workflow but adds **semantic retrieval** so agents can search by meaning, not just text.
 
-```bash
-pipx install gloggur
+Instead of:
+
 ```
 
-You can also install directly with `pip`:
+grep "authentication middleware"
 
-```bash
-pip install gloggur
 ```
 
-To use specific embeddings providers, install optional extras:
+Agents can run:
 
-```bash
-# OpenAI embeddings
-pipx install "gloggur[openai]"
-
-# Gemini embeddings
-pipx install "gloggur[gemini]"
-
-# Local model (e.g. CodeBERT)
-pipx install "gloggur[local]"
 ```
 
-For development within the repository clone, run the bootstrap script to create a virtual environment and ensure caches are refreshed:
+gloggur search --query "authentication middleware that validates jwt tokens"
 
-```bash
-scripts/bootstrap_gloggur_env.sh
-scripts/gloggur status --json
 ```
 
-This script checks readiness and can seed the cache/venv from another workspace.
+Glöggur then returns the most semantically relevant code fragments.
 
-## Quickstart
+---
 
-Index your repository:
+## Key Principles
 
-```bash
-# from the root of your project
-gloggur index . --json
+- **Local-first**  
+  Runs on your machine. No server required.
+
+- **Agent-compatible interface**  
+  CLI designed to mirror patterns agents already use (`grep`, `rg`, etc.).
+
+- **Semantic + lexical retrieval**  
+  Combines embeddings with traditional text search.
+
+- **Minimal infrastructure**  
+  Embeddings are the only optional external dependency.
+
+---
+
+## Features
+
+### 1. Semantic Code Search
+
+Find code based on intent rather than keywords.
+
 ```
 
-This parses source files, generates embeddings and stores them in `.gloggur-cache`.
+gloggur search "where does the app send password reset emails"
 
-Search for symbols:
-
-```bash
-gloggur search "streaming parser" --top-k 5 --json
-gloggur search "pkg.module.Handler.handle" --search-mode by_fqname --json
-gloggur search "src/services" --search-mode by_path --json
-gloggur search "rg -S -g '*.py' AuthToken" --json
-gloggur search "grep -R foo_bar src/" --json
 ```
 
-`search --json` now emits **ContextPack v2** only:
+Returns ranked code snippets and file locations.
 
-- `schema_version`
-- `query`
-- `summary`
-- `hits[]` (`path`, `span`, `snippet`, `score`, `tags`)
-- optional `debug` via `--debug-router`
+---
 
-`hits[].tags` may include `symbol_def` / `symbol_ref` when symbol-occurrence matches are returned.  
-For grep-compatible queries (`rg ...` / `grep ...`), `--debug-router` includes `debug.parsed_query` with parsed pattern/flags/path/glob hints, including `pattern_quoted` for short quoted identifiers like `rg "id"`.
+### 2. Agent-Friendly Grep Interface
 
-Legacy top-level `results` + `metadata` keys were removed. See [Search JSON v2 migration](docs/SEARCH_JSON_V2_MIGRATION.md) for field mapping and upgrade guidance.
+Agents frequently default to regex search.  
+Glöggur provides a compatible interface while enriching results with semantic context.
 
-You can filter results to a path prefix with `--file src/`, choose router mode via `--mode auto|exact|semantic|hybrid`, and include router timings/scores with `--debug-router`.
-If `.gloggur/index/symbols.db` is missing, search still works, but symbol-tagged hits are omitted until the next `gloggur index`.
-When `--debug-router` is enabled, symbol-index availability issues are surfaced in `debug.backend_errors.symbol` without failing the search command.
-
-Traverse the reference graph:
-
-```bash
-gloggur graph neighbors <symbol-id> --json
-gloggur graph incoming <symbol-id> --edge-type CALLS --json
-gloggur graph search "who calls retry policy" --json
 ```
 
-Inspect docstrings:
+gloggur grep "jwt|token"
 
-```bash
-gloggur inspect . --json  # audit selected paths for docstring fidelity
 ```
 
-Add `--include-tests` or `--include-scripts` to broaden the inspection scope.
+Agents can combine lexical and semantic queries.
 
-Enable watch mode:
+---
 
-```bash
-gloggur watch init . --json   # one-time setup
-gloggur watch start --daemon --json  # re-index on file changes
+### 3. Repository Indexing
+
+Before searching, a repository is indexed into an embedding store.
+
 ```
 
-Use `gloggur watch status --json` to check the watcher and `gloggur watch stop --json` to stop it.
+gloggur index .
 
-## Configuration
-
-Gloggur reads configuration from `.gloggur.yaml` or `.gloggur.json` in your project root. A typical configuration might look like:
-
-```yaml
-embedding_provider: gemini        # or 'openai' or 'local'
-local_embedding_model: microsoft/codebert-base
-cache_dir: .gloggur-cache
-watch_enabled: false              # set to true to enable background indexing
-watch_debounce_ms: 300            # debounce time for file system events
-supported_extensions:
-  - .py
-  - .js
-  - .ts
-  - .rs
-  - .go
-  - .java
-excluded_dirs:
-  - .git
-  - node_modules
-  - .gloggur-cache
 ```
 
-Environment variables override configuration settings and are documented in the [full README](https://github.com/asmundur/gloggur/blob/main/README.md) for advanced use cases. Gloggur also loads a `.env` file if present.
+Indexing extracts code chunks and metadata needed for retrieval.
 
-## Output schema
+---
 
-Search results are returned as structured JSON with a `query` field, a list of `results` and a `metadata` section describing the search. Each result is chunk-aware and includes `symbol_id`, `chunk_id`, `chunk_part_index`, `chunk_part_total`, symbol metadata (`symbol`, `fqname`, `kind`), location fields (`file`, `line`, `line_end`), and chunk text/context (`chunk_text`, `context`) with similarity/ranking scores.
+### 4. Hybrid Retrieval
 
-Graph commands return edge records with deterministic IDs and endpoint metadata (`edge_id`, `edge_type`, `from_id`, `to_id`, `file_path`, `line`, `confidence`) for neighbor traversal and semantic graph search.
+Queries combine:
 
-## Further reading
+- embedding similarity
+- keyword matches
+- file metadata
 
-This document highlights the core concepts and workflows. For detailed error codes, adapter configuration, test harnesses and advanced CLI commands such as artifact publishing or evidence-trace validation, refer to the full documentation in the `docs/` directory of this repository.
+This improves precision when agents explore unfamiliar repositories.
+
+---
+
+## Example Workflow
+
+```
+
+gloggur index .
+
+gloggur search "database connection initialization"
+
+gloggur grep "postgres|db.connect"
+
+```
+
+Agents can alternate between semantic exploration and precise filtering.
+
+---
+
+## Design Philosophy
+
+Glöggur is **not an agent framework**.
+
+It is a **tool for agents**.
+
+The focus is narrow:
+
+- make repositories searchable
+- improve agent code navigation
+- stay lightweight and composable
+
+Agents remain responsible for reasoning and decision making.
+
+---
+
+## Intended Users
+
+- coding agents
+- developers exploring large repositories
+- automated code analysis tools
+
+---
+
+## Status
+
+Active development.
+
+Current priorities:
+
+- improve indexing reliability
+- optimize retrieval ranking
+- strengthen agent CLI compatibility
+
+---
+
+## License
+
+TBD
+
