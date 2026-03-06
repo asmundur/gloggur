@@ -19,7 +19,9 @@ def _provider_remediation(provider: str) -> list[str]:
     """
     if provider == "openai":
         return [
-            "Set OPENAI_API_KEY in the environment.",
+            "Set OPENROUTER_API_KEY (preferred) or OPENAI_API_KEY in the environment.",
+            "When routing via OpenRouter, set OPENAI_BASE_URL or "
+            "GLOGGUR_OPENROUTER_BASE_URL if a non-default endpoint is required.",
             "Confirm the configured model is available (GLOGGUR_OPENAI_MODEL).",
         ]
     if provider == "gemini":

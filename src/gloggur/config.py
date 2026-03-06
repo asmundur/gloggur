@@ -14,6 +14,12 @@ class GloggurConfig:
     embedding_provider: str = "local"
     local_embedding_model: str = "microsoft/codebert-base"
     openai_embedding_model: str = "text-embedding-3-large"
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str | None = None
+    openrouter_site_url: str | None = None
+    openrouter_app_name: str | None = None
     gemini_embedding_model: str = "gemini-embedding-001"
     gemini_api_key: str | None = None
     cache_dir: str = ".gloggur-cache"
@@ -199,6 +205,18 @@ class GloggurConfig:
             data["local_embedding_model"] = _env_value("GLOGGUR_LOCAL_MODEL")
         if _env_value("GLOGGUR_OPENAI_MODEL"):
             data["openai_embedding_model"] = _env_value("GLOGGUR_OPENAI_MODEL")
+        if _env_value("OPENAI_API_KEY"):
+            data["openai_api_key"] = _env_value("OPENAI_API_KEY")
+        if _env_value("OPENAI_BASE_URL"):
+            data["openai_base_url"] = _env_value("OPENAI_BASE_URL")
+        if _env_value("OPENROUTER_API_KEY"):
+            data["openrouter_api_key"] = _env_value("OPENROUTER_API_KEY")
+        if _env_value("GLOGGUR_OPENROUTER_BASE_URL"):
+            data["openrouter_base_url"] = _env_value("GLOGGUR_OPENROUTER_BASE_URL")
+        if _env_value("GLOGGUR_OPENROUTER_SITE_URL"):
+            data["openrouter_site_url"] = _env_value("GLOGGUR_OPENROUTER_SITE_URL")
+        if _env_value("GLOGGUR_OPENROUTER_APP_NAME"):
+            data["openrouter_app_name"] = _env_value("GLOGGUR_OPENROUTER_APP_NAME")
         if _env_value("GLOGGUR_GEMINI_MODEL"):
             data["gemini_embedding_model"] = _env_value("GLOGGUR_GEMINI_MODEL")
         if _env_value("GLOGGUR_GEMINI_API_KEY"):

@@ -40,7 +40,15 @@ def _create_openai_provider(config: GloggurConfig) -> EmbeddingProvider:
             from gloggur.embeddings.openai import OpenAIEmbeddingProvider as provider_cls
         except ImportError as exc:
             raise RuntimeError("Install with pip install gloggur[openai]") from exc
-    return provider_cls(model=config.openai_embedding_model)
+    return provider_cls(
+        model=config.openai_embedding_model,
+        openai_api_key=config.openai_api_key,
+        openai_base_url=config.openai_base_url,
+        openrouter_api_key=config.openrouter_api_key,
+        openrouter_base_url=config.openrouter_base_url,
+        openrouter_site_url=config.openrouter_site_url,
+        openrouter_app_name=config.openrouter_app_name,
+    )
 
 
 def _create_gemini_provider(config: GloggurConfig) -> EmbeddingProvider:

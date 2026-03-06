@@ -32,10 +32,27 @@ export GLOGGUR_LOCAL_MODEL="microsoft/codebert-base"
 
 ### OpenAI
 
+#### Via OpenRouter (preferred)
+
+```bash
+export GLOGGUR_EMBEDDING_PROVIDER=openai
+export OPENROUTER_API_KEY="<your-openrouter-key>"
+export GLOGGUR_OPENAI_MODEL="text-embedding-3-large"
+# optional endpoint override (defaults to https://openrouter.ai/api/v1 when OPENROUTER_API_KEY is set)
+export GLOGGUR_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+# optional attribution headers sent only on OpenRouter endpoints
+export GLOGGUR_OPENROUTER_SITE_URL="https://example.com"
+export GLOGGUR_OPENROUTER_APP_NAME="gloggur"
+```
+
+#### Direct (backward-compatible)
+
 ```bash
 export GLOGGUR_EMBEDDING_PROVIDER=openai
 export OPENAI_API_KEY="<your-openai-key>"
 export GLOGGUR_OPENAI_MODEL="text-embedding-3-large"
+# optional custom OpenAI-compatible endpoint
+export OPENAI_BASE_URL="https://api.openai.com/v1"
 ```
 
 If credentials or model setup are wrong, commands fail non-zero with:
@@ -78,7 +95,7 @@ scripts/gloggur watch stop --json
 
 | Failure code | Meaning | Action |
 | --- | --- | --- |
-| `embedding_provider_error` | Provider client could not initialize or authenticate. | Set the provider API key and model env vars, then retry. |
+| `embedding_provider_error` | Provider client could not initialize or authenticate. | Set `OPENROUTER_API_KEY` or `OPENAI_API_KEY` plus model/env settings, then retry. |
 | `watch_mode_conflict` | Both `--foreground` and `--daemon` were passed. | Use exactly one watch mode flag. |
 | `watch_path_missing` | Configured watch path does not exist. | Run `scripts/gloggur watch init <existing-path> --json`. |
 | `search_contract_v1_removed` | Deprecated v1-only flags or payload assumptions were used with search JSON v2. | Remove v1 flags and parse ContextPack v2 (`summary`, `hits[]`). |

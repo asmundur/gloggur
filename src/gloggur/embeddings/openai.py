@@ -8,6 +8,23 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from gloggur.embeddings.base import EmbeddingProvider
 
+_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _optional_string(value: str | None) -> str | None:
+    """Normalize optional strings by trimming whitespace and collapsing empty values."""
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _is_openrouter_endpoint(base_url: str | None) -> bool:
+    """Return True when ``base_url`` points at an OpenRouter endpoint."""
+    if not base_url:
+        return False
+    return "openrouter.ai" in base_url.lower()
+
 
 def _normalize_vector(vector: object, *, model: str, context: str) -> list[float]:
     """Validate and normalize one embedding vector from the OpenAI client."""
@@ -35,14 +52,62 @@ def _normalize_vector(vector: object, *, model: str, context: str) -> list[float
 class OpenAIEmbeddingProvider(EmbeddingProvider):
     """Embedding provider that calls the OpenAI embeddings API."""
 
-    def __init__(self, model: str) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        openai_api_key: str | None = None,
+        openai_base_url: str | None = None,
+        openrouter_api_key: str | None = None,
+        openrouter_base_url: str | None = None,
+        openrouter_site_url: str | None = None,
+        openrouter_app_name: str | None = None,
+    ) -> None:
         """Initialize the OpenAI client and model selection."""
         self.provider = "openai"
-        api_key = os.getenv("OPENAI_API_KEY")
+        openrouter_key = _optional_string(openrouter_api_key) or _optional_string(
+            os.getenv("OPENROUTER_API_KEY")
+        )
+        openai_key = _optional_string(openai_api_key) or _optional_string(
+            os.getenv("OPENAI_API_KEY")
+        )
+        credential_source = "OPENROUTER_API_KEY" if openrouter_key else "OPENAI_API_KEY"
+        api_key = openrouter_key or openai_key
         if not api_key:
-            raise ValueError("OPENAI_API_KEY is not set")
+            raise ValueError("OPENROUTER_API_KEY or OPENAI_API_KEY is not set")
+
+        resolved_base_url = _optional_string(openai_base_url) or _optional_string(
+            os.getenv("OPENAI_BASE_URL")
+        )
+        if openrouter_key and not resolved_base_url:
+            resolved_base_url = _optional_string(openrouter_base_url) or _optional_string(
+                os.getenv("GLOGGUR_OPENROUTER_BASE_URL")
+            )
+            if not resolved_base_url:
+                resolved_base_url = _OPENROUTER_DEFAULT_BASE_URL
+
+        headers: dict[str, str] = {}
+        if openrouter_key or _is_openrouter_endpoint(resolved_base_url):
+            site_url = _optional_string(openrouter_site_url) or _optional_string(
+                os.getenv("GLOGGUR_OPENROUTER_SITE_URL")
+            )
+            app_name = _optional_string(openrouter_app_name) or _optional_string(
+                os.getenv("GLOGGUR_OPENROUTER_APP_NAME")
+            )
+            if site_url:
+                headers["HTTP-Referer"] = site_url
+            if app_name:
+                headers["X-Title"] = app_name
+
         self.model = model
-        self.client = OpenAI(api_key=api_key)
+        self.credential_source = credential_source
+        self.base_url = resolved_base_url
+        self.default_headers = dict(headers)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=resolved_base_url,
+            default_headers=headers or None,
+        )
         self._dimension: int | None = None
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)

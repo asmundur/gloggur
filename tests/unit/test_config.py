@@ -38,6 +38,12 @@ def test_load_env_values(monkeypatch) -> None:
     monkeypatch.setenv("GLOGGUR_EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("GLOGGUR_LOCAL_MODEL", "local-model")
     monkeypatch.setenv("GLOGGUR_OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("GLOGGUR_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setenv("GLOGGUR_OPENROUTER_SITE_URL", "https://example.com")
+    monkeypatch.setenv("GLOGGUR_OPENROUTER_APP_NAME", "gloggur")
     monkeypatch.setenv("GLOGGUR_GEMINI_MODEL", "gemini-model")
     monkeypatch.setenv("GLOGGUR_GEMINI_API_KEY", "gemini-key")
     monkeypatch.setenv("GLOGGUR_CACHE_DIR", "cache-dir")
@@ -47,6 +53,12 @@ def test_load_env_values(monkeypatch) -> None:
     assert config.embedding_provider == "openai"
     assert config.local_embedding_model == "local-model"
     assert config.openai_embedding_model == "openai-model"
+    assert config.openai_api_key == "openai-key"
+    assert config.openai_base_url == "https://api.openai.com/v1"
+    assert config.openrouter_api_key == "openrouter-key"
+    assert config.openrouter_base_url == "https://openrouter.ai/api/v1"
+    assert config.openrouter_site_url == "https://example.com"
+    assert config.openrouter_app_name == "gloggur"
     assert config.gemini_embedding_model == "gemini-model"
     assert config.gemini_api_key == "gemini-key"
     assert config.cache_dir == "cache-dir"

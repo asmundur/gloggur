@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from gloggur.config import GloggurConfig
+from scripts.run_provider_probe import test_openai_embeddings as _probe_openai_embeddings
 from scripts.run_provider_probe import _vector_store_stats
 from scripts.run_provider_probe import test_gemini_embeddings as _probe_gemini_embeddings
 
@@ -64,3 +66,40 @@ def test_gemini_probe_skip_message_lists_all_supported_api_key_env_vars(
     assert result.details == {
         "missing_env": "GLOGGUR_GEMINI_API_KEY or GEMINI_API_KEY or GOOGLE_API_KEY"
     }
+
+
+def test_openai_probe_skip_message_lists_openrouter_and_openai_env_vars(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    result = _probe_openai_embeddings(tmp_path, GloggurConfig())
+
+    assert result.status == "skipped"
+    assert result.details == {"missing_env": "OPENROUTER_API_KEY or OPENAI_API_KEY"}
+
+
+def test_openai_probe_reports_credential_env_with_openrouter_precedence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    def _fake_run_provider_test(**_: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            name="Test 2.2: OpenAI Embeddings",
+            status="passed",
+            message="ok",
+            details={"indexed_files": 1},
+        )
+
+    monkeypatch.setattr("scripts.run_provider_probe._run_provider_test", _fake_run_provider_test)
+
+    result = _probe_openai_embeddings(tmp_path, GloggurConfig())
+
+    assert result.status == "passed"
+    assert result.details is not None
+    assert result.details["credential_env"] == "OPENROUTER_API_KEY"

@@ -49,8 +49,10 @@ def test_index_and_search_use_selected_provider_with_mocked_embeddings(
         class FakeProvider:
             provider = "unknown"
 
-            def __init__(self, model: str, api_key: str | None = None) -> None:
-                _ = api_key
+            def __init__(
+                self, model: str, api_key: str | None = None, **kwargs: object
+            ) -> None:
+                _ = api_key, kwargs
                 observed_models.append(model)
 
             def embed_text(self, _text: str) -> list[float]:
@@ -90,7 +92,7 @@ def test_index_and_search_use_selected_provider_with_mocked_embeddings(
 @pytest.mark.parametrize(
     ("provider", "detail_hint"),
     [
-        ("openai", "OPENAI_API_KEY"),
+        ("openai", "OPENROUTER_API_KEY or OPENAI_API_KEY"),
         ("gemini", "GEMINI_API_KEY"),
     ],
 )
@@ -163,8 +165,8 @@ def test_provider_malformed_batch_response_fails_closed_in_json_mode(
     class FakeProvider:
         provider = "unknown"
 
-        def __init__(self, model: str, api_key: str | None = None) -> None:
-            _ = model, api_key
+        def __init__(self, model: str, api_key: str | None = None, **kwargs: object) -> None:
+            _ = model, api_key, kwargs
 
         def embed_text(self, _text: str) -> list[float]:
             return [0.1, 0.2, 0.3]
@@ -231,8 +233,8 @@ def test_single_file_index_provider_failures_keep_embedding_provider_error_contr
     class FakeProvider:
         provider = "unknown"
 
-        def __init__(self, model: str, api_key: str | None = None) -> None:
-            _ = model, api_key
+        def __init__(self, model: str, api_key: str | None = None, **kwargs: object) -> None:
+            _ = model, api_key, kwargs
 
         def embed_text(self, _text: str) -> list[float]:
             return [0.1, 0.2, 0.3]
@@ -289,8 +291,10 @@ def test_gemini_profile_not_overwritten_by_different_provider(
         class FakeGeminiProvider:
             provider = "gemini"
 
-            def __init__(self, model: str, api_key: str | None = None) -> None:
-                pass
+            def __init__(
+                self, model: str, api_key: str | None = None, **kwargs: object
+            ) -> None:
+                _ = model, api_key, kwargs
 
             def embed_text(self, text: str) -> list[float]:
                 return [0.1, 0.2, 0.3]
@@ -304,8 +308,10 @@ def test_gemini_profile_not_overwritten_by_different_provider(
         class FakeOpenAIProvider:
             provider = "openai"
 
-            def __init__(self, model: str, api_key: str | None = None) -> None:
-                pass
+            def __init__(
+                self, model: str, api_key: str | None = None, **kwargs: object
+            ) -> None:
+                _ = model, api_key, kwargs
 
             def embed_text(self, text: str) -> list[float]:
                 return [0.4, 0.5, 0.6]
@@ -384,7 +390,10 @@ def test_index_uses_gemini_model_and_key_from_dotenv(
         class FakeGeminiProvider:
             provider = "gemini"
 
-            def __init__(self, model: str, api_key: str | None = None) -> None:
+            def __init__(
+                self, model: str, api_key: str | None = None, **kwargs: object
+            ) -> None:
+                _ = kwargs
                 observed["model"] = model
                 observed["api_key"] = api_key
 

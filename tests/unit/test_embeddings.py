@@ -59,9 +59,130 @@ def test_local_embedding_requires_sentence_transformers(
 
 def test_openai_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenAI provider should require API key."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY or OPENAI_API_KEY"):
         OpenAIEmbeddingProvider(model="text-embedding-3-large")
+
+
+def test_openai_provider_accepts_openrouter_key_and_defaults_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter key should activate OpenAI provider with OpenRouter default base URL."""
+    captured: dict[str, object] = {}
+
+    class FakeOpenAI:
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+            captured["default_headers"] = default_headers
+            self.embeddings = SimpleNamespace(create=lambda **_: None)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("GLOGGUR_OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
+
+    assert captured["api_key"] == "openrouter-key"
+    assert captured["base_url"] == "https://openrouter.ai/api/v1"
+    assert captured["default_headers"] is None
+    assert provider.credential_source == "OPENROUTER_API_KEY"
+
+
+def test_openai_provider_prefers_openrouter_key_over_openai_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter key should win when both OpenRouter and OpenAI keys are set."""
+    captured_api_key: list[str] = []
+
+    class FakeOpenAI:
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            _ = base_url, default_headers
+            captured_api_key.append(api_key)
+            self.embeddings = SimpleNamespace(create=lambda **_: None)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
+
+    assert captured_api_key == ["openrouter-key"]
+    assert provider.credential_source == "OPENROUTER_API_KEY"
+
+
+def test_openai_provider_uses_openrouter_base_url_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter base URL override should be used when the OpenRouter key is active."""
+    captured_base_urls: list[str | None] = []
+
+    class FakeOpenAI:
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            _ = api_key, default_headers
+            captured_base_urls.append(base_url)
+            self.embeddings = SimpleNamespace(create=lambda **_: None)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("GLOGGUR_OPENROUTER_BASE_URL", "https://router.custom/v1")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-large")
+
+    assert captured_base_urls == ["https://router.custom/v1"]
+    assert provider.base_url == "https://router.custom/v1"
+
+
+def test_openai_provider_sets_openrouter_optional_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenRouter endpoint should forward optional attribution headers."""
+    captured: dict[str, object] = {}
+
+    class FakeOpenAI:
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            captured["api_key"] = api_key
+            captured["base_url"] = base_url
+            captured["default_headers"] = default_headers
+            self.embeddings = SimpleNamespace(create=lambda **_: None)
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("GLOGGUR_OPENROUTER_SITE_URL", "https://example.com")
+    monkeypatch.setenv("GLOGGUR_OPENROUTER_APP_NAME", "gloggur")
+    monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
+
+    OpenAIEmbeddingProvider(model="text-embedding-3-large")
+
+    assert captured["api_key"] == "openrouter-key"
+    assert captured["base_url"] == "https://openrouter.ai/api/v1"
+    assert captured["default_headers"] == {
+        "HTTP-Referer": "https://example.com",
+        "X-Title": "gloggur",
+    }
 
 
 def test_gemini_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,8 +210,14 @@ def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatc
 
     class FakeOpenAI:
         """Fake OpenAI client wrapper."""
-        def __init__(self, api_key: str) -> None:
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
             """Store fake embeddings client."""
+            _ = api_key, base_url, default_headers
             self.embeddings = FakeEmbeddings()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -120,8 +247,13 @@ def test_openai_embed_batch_empty_returns_empty_without_api_call(
             return SimpleNamespace(data=[])
 
     class FakeOpenAI:
-        def __init__(self, api_key: str) -> None:
-            _ = api_key
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            _ = api_key, base_url, default_headers
             self.embeddings = FakeEmbeddings()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -141,8 +273,13 @@ def test_openai_provider_api_failure_is_actionable(monkeypatch: pytest.MonkeyPat
             raise RuntimeError("401 unauthorized")
 
     class FakeOpenAI:
-        def __init__(self, api_key: str) -> None:
-            _ = api_key
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            _ = api_key, base_url, default_headers
             self.embeddings = FakeEmbeddings()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -167,8 +304,13 @@ def test_openai_provider_fails_closed_on_malformed_batch_response(
             )
 
     class FakeOpenAI:
-        def __init__(self, api_key: str) -> None:
-            _ = api_key
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            _ = api_key, base_url, default_headers
             self.embeddings = FakeEmbeddings()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -190,8 +332,13 @@ def test_openai_provider_fails_closed_on_non_numeric_vector_value(
             return SimpleNamespace(data=[SimpleNamespace(embedding=[0.1, "bad"])])
 
     class FakeOpenAI:
-        def __init__(self, api_key: str) -> None:
-            _ = api_key
+        def __init__(
+            self,
+            api_key: str,
+            base_url: str | None = None,
+            default_headers: dict[str, str] | None = None,
+        ) -> None:
+            _ = api_key, base_url, default_headers
             self.embeddings = FakeEmbeddings()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")

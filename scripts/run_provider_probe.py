@@ -179,8 +179,16 @@ def _missing_api_key_result(name: str, env_key: str) -> TestCaseResult:
 
 def test_openai_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool = False) -> TestCaseResult:
     """Check OpenAI embedding provider."""
-    if not os.getenv("OPENAI_API_KEY"):
-        return _missing_api_key_result("Test 2.2: OpenAI Embeddings", "OPENAI_API_KEY")
+    credential_env = None
+    for candidate in ("OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+        if os.getenv(candidate):
+            credential_env = candidate
+            break
+    if credential_env is None:
+        return _missing_api_key_result(
+            "Test 2.2: OpenAI Embeddings",
+            "OPENROUTER_API_KEY or OPENAI_API_KEY",
+        )
 
     model_name = config.openai_embedding_model
     with tempfile.TemporaryDirectory(prefix="gloggur-phase2-openai-") as cache_dir:
@@ -197,6 +205,9 @@ def test_openai_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool
             runner=runner,
             model_name=model_name,
         )
+        if result.details is None:
+            result.details = {}
+        result.details["credential_env"] = credential_env
         if verbose and result.details:
             print(json.dumps({"test": "openai_embeddings", "details": result.details}, indent=2))
         return result

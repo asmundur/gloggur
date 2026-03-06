@@ -45,16 +45,49 @@ def test_create_embedding_provider_openai(monkeypatch: pytest.MonkeyPatch) -> No
 
     class DummyOpenAI:
         """Dummy OpenAI provider capturing constructor args."""
-        def __init__(self, model: str) -> None:
-            """Record constructor argument."""
+        def __init__(
+            self,
+            model: str,
+            *,
+            openai_api_key: str | None = None,
+            openai_base_url: str | None = None,
+            openrouter_api_key: str | None = None,
+            openrouter_base_url: str | None = None,
+            openrouter_site_url: str | None = None,
+            openrouter_app_name: str | None = None,
+        ) -> None:
+            """Record constructor arguments."""
             created["model"] = model
+            created["openai_api_key"] = openai_api_key
+            created["openai_base_url"] = openai_base_url
+            created["openrouter_api_key"] = openrouter_api_key
+            created["openrouter_base_url"] = openrouter_base_url
+            created["openrouter_site_url"] = openrouter_site_url
+            created["openrouter_app_name"] = openrouter_app_name
 
     monkeypatch.setattr(factory, "OpenAIEmbeddingProvider", DummyOpenAI)
 
-    config = GloggurConfig(embedding_provider="openai", openai_embedding_model="openai-model")
+    config = GloggurConfig(
+        embedding_provider="openai",
+        openai_embedding_model="openai-model",
+        openai_api_key="openai-key",
+        openai_base_url="https://api.openai.com/v1",
+        openrouter_api_key="openrouter-key",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        openrouter_site_url="https://example.com",
+        openrouter_app_name="gloggur",
+    )
     provider = factory.create_embedding_provider(config)
     assert isinstance(provider, DummyOpenAI)
-    assert created == {"model": "openai-model"}
+    assert created == {
+        "model": "openai-model",
+        "openai_api_key": "openai-key",
+        "openai_base_url": "https://api.openai.com/v1",
+        "openrouter_api_key": "openrouter-key",
+        "openrouter_base_url": "https://openrouter.ai/api/v1",
+        "openrouter_site_url": "https://example.com",
+        "openrouter_app_name": "gloggur",
+    }
 
 
 def test_create_embedding_provider_gemini(monkeypatch: pytest.MonkeyPatch) -> None:
