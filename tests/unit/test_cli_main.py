@@ -126,6 +126,25 @@ def test_metadata_reindex_reason_present_metadata() -> None:
     assert reason is None
 
 
+def test_build_status_payload_surfaces_missing_search_integrity_markers(tmp_path: Path) -> None:
+    """Status should expose semantic suppression when integrity markers have not been persisted."""
+    cache_dir = str(tmp_path / "cache")
+    config = cli_main.GloggurConfig(
+        cache_dir=cache_dir,
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.set_index_metadata(IndexMetadata(version="1", total_symbols=2, indexed_files=1))
+    cache.set_index_profile("local:microsoft/codebert-base")
+
+    payload = cli_main._build_status_payload(config, cache)
+
+    assert payload["semantic_search_allowed"] is False
+    assert "vector_integrity_missing" in payload["warning_codes"]
+    assert "chunk_span_integrity_missing" in payload["warning_codes"]
+
+
 def test_tool_version_reindex_reason_is_legacy_safe() -> None:
     """Missing legacy tool-version marker should not force a reindex."""
     reason = _tool_version_reindex_reason(
@@ -1314,6 +1333,12 @@ def test_status_retries_transient_no_such_table_race_once(
 
         def get_last_success_tool_version(self) -> None:
             return None
+
+        def get_search_integrity(self) -> dict[str, object]:
+            return {
+                "vector_cache": {"status": "passed", "reason_codes": []},
+                "chunk_span": {"status": "passed", "reason_codes": []},
+            }
 
         def list_symbols(self) -> list[object]:
             return []
@@ -2974,6 +2999,12 @@ def test_search_json_wraps_metadata_store_connect_failure(
 
         def get_last_success_tool_version(self) -> None:
             return None
+
+        def get_search_integrity(self) -> dict[str, object]:
+            return {
+                "vector_cache": {"status": "passed", "reason_codes": []},
+                "chunk_span": {"status": "passed", "reason_codes": []},
+            }
 
     class FakeVectorStore:
         def search(self, _query_vector: list[float], k: int) -> list[tuple[str, float]]:

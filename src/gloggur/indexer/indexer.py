@@ -7,6 +7,7 @@ import subprocess
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.config import GloggurConfig
@@ -55,6 +56,10 @@ FAILURE_REMEDIATION: dict[str, list[str]] = {
     "vector_consistency_unverifiable": [
         "Use a vector store implementation that supports deterministic symbol-id listing.",
         "Rerun `gloggur index . --json` after enabling vector/cache consistency checks.",
+    ],
+    "chunk_span_integrity_error": [
+        "Inspect symbol boundaries and persisted chunk spans for the failed file.",
+        "Rerun `gloggur index . --json` after fixing parser output or chunk construction drift.",
     ],
 }
 
@@ -185,6 +190,23 @@ class Indexer:
         self._scan_callback: Callable[[int, int, str], None] | None = None
         self._commit_cache: dict[str, str] = {}
 
+    @staticmethod
+    def _integrity_status(
+        *,
+        name: str,
+        status: str,
+        reason_codes: list[str] | None = None,
+        detail: str | None = None,
+    ) -> dict[str, object]:
+        """Build a normalized integrity marker payload."""
+        return {
+            "name": name,
+            "status": status,
+            "reason_codes": list(reason_codes or []),
+            "detail": detail,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
 
@@ -208,6 +230,11 @@ class Indexer:
         failed_samples: list[str] = []
         seen_paths: set[str] = set()
         prepared_files: list[PreparedFileIndex] = []
+        chunk_integrity = self._integrity_status(
+            name="chunk_span",
+            status="passed",
+            detail="chunk/span integrity checks passed",
+        )
 
         for file_path in source_files:
             seen_paths.add(file_path)
@@ -227,6 +254,13 @@ class Indexer:
             failed_files += 1
             reason = outcome.reason or "indexing_error"
             failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+            if reason == "chunk_span_integrity_error":
+                chunk_integrity = self._integrity_status(
+                    name="chunk_span",
+                    status="failed",
+                    reason_codes=[reason],
+                    detail=outcome.detail,
+                )
             if len(failed_samples) < 5:
                 if outcome.detail:
                     failed_samples.append(f"{file_path}: {outcome.detail}")
@@ -303,6 +337,20 @@ class Indexer:
             if len(failed_samples) >= 5:
                 break
             failed_samples.append(sample)
+        vector_integrity = consistency.get("integrity")
+        if not isinstance(vector_integrity, dict):
+            vector_integrity = self._integrity_status(
+                name="vector_cache",
+                status="missing",
+                reason_codes=["vector_integrity_missing"],
+                detail="vector/cache integrity marker missing",
+            )
+        self.cache.set_search_integrity(
+            {
+                "vector_cache": vector_integrity,
+                "chunk_span": chunk_integrity,
+            }
+        )
 
         if failed_files == 0:
             metadata = IndexMetadata(
@@ -453,6 +501,13 @@ class Indexer:
             commit=commit,
             span_index=span_index,
         )
+        chunk_integrity_error = self._validate_chunk_span_integrity(symbols=symbols, chunks=chunks)
+        if chunk_integrity_error is not None:
+            return None, FileIndexOutcome(
+                status="failed",
+                reason="chunk_span_integrity_error",
+                detail=chunk_integrity_error,
+            )
         candidate_symbols = self.cache.list_symbols()
         edges = self._build_graph_edges(
             path=path,
@@ -499,6 +554,57 @@ class Indexer:
             symbols_removed=symbols_removed,
         )
         return prepared, FileIndexOutcome(status="prepared", symbols_indexed=len(symbols))
+
+    @staticmethod
+    def _validate_chunk_span_integrity(
+        *,
+        symbols: list[Symbol],
+        chunks: list[SymbolChunk],
+    ) -> str | None:
+        """Return first deterministic chunk/span integrity error, if any."""
+        symbols_by_id = {symbol.id: symbol for symbol in symbols}
+        chunks_by_symbol: dict[str, list[SymbolChunk]] = {}
+        for chunk in chunks:
+            symbol = symbols_by_id.get(chunk.symbol_id)
+            if symbol is None:
+                return f"chunk {chunk.chunk_id} references unknown symbol {chunk.symbol_id}"
+            if chunk.start_line < symbol.start_line or chunk.end_line > symbol.end_line:
+                return (
+                    f"chunk {chunk.chunk_id} span {chunk.start_line}-{chunk.end_line} escapes "
+                    f"symbol {symbol.id} span {symbol.start_line}-{symbol.end_line}"
+                )
+            if chunk.end_line < chunk.start_line:
+                return (
+                    f"chunk {chunk.chunk_id} has descending span "
+                    f"{chunk.start_line}-{chunk.end_line}"
+                )
+            if symbol.end_line >= symbol.start_line and not chunk.text.strip():
+                return f"chunk {chunk.chunk_id} has empty text " f"for non-empty symbol {symbol.id}"
+            chunks_by_symbol.setdefault(chunk.symbol_id, []).append(chunk)
+
+        ordered_symbols = sorted(
+            symbols,
+            key=lambda item: (item.start_line, item.end_line, item.id),
+        )
+        for symbol in ordered_symbols:
+            symbol_chunks = sorted(
+                chunks_by_symbol.get(symbol.id, []),
+                key=lambda item: (
+                    item.start_line,
+                    item.end_line,
+                    item.chunk_part_index,
+                    item.chunk_id,
+                ),
+            )
+            previous_end = symbol.start_line - 1
+            for chunk in symbol_chunks:
+                if chunk.start_line <= previous_end:
+                    return (
+                        f"chunk {chunk.chunk_id} starts before prior chunk end "
+                        f"for symbol {symbol.id} ({chunk.start_line} <= {previous_end})"
+                    )
+                previous_end = chunk.end_line
+        return None
 
     def _persist_prepared_file(self, prepared: PreparedFileIndex) -> None:
         """Persist one prepared file into cache and vector store."""
@@ -638,7 +744,20 @@ class Indexer:
     def _validate_vector_metadata_consistency(self) -> dict[str, object]:
         """Detect vector/cache symbol-id divergence and return stable failure metadata."""
         if self.embedding_provider is None or self.vector_store is None:
-            return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+            return {
+                "failed": 0,
+                "failed_reasons": {},
+                "failed_samples": [],
+                "integrity": self._integrity_status(
+                    name="vector_cache",
+                    status="missing",
+                    reason_codes=["vector_integrity_missing"],
+                    detail=(
+                        "vector/cache integrity unavailable without "
+                        "embedding provider or vector store"
+                    ),
+                ),
+            }
         list_symbol_ids = getattr(self.vector_store, "list_symbol_ids", None)
         if not callable(list_symbol_ids):
             return {
@@ -649,6 +768,12 @@ class Indexer:
                     "vector store does not expose "
                     "list_symbol_ids()"
                 ],
+                "integrity": self._integrity_status(
+                    name="vector_cache",
+                    status="missing",
+                    reason_codes=["vector_consistency_unverifiable"],
+                    detail="vector store does not expose list_symbol_ids()",
+                ),
             }
         try:
             vector_symbol_ids = {str(symbol_id) for symbol_id in list_symbol_ids()}
@@ -657,13 +782,28 @@ class Indexer:
                 "failed": 1,
                 "failed_reasons": {"vector_metadata_mismatch": 1},
                 "failed_samples": [f"vector metadata check failed: {type(exc).__name__}: {exc}"],
+                "integrity": self._integrity_status(
+                    name="vector_cache",
+                    status="failed",
+                    reason_codes=["vector_metadata_mismatch"],
+                    detail=f"vector metadata check failed: {type(exc).__name__}: {exc}",
+                ),
             }
 
         cache_chunk_ids = {chunk.chunk_id for chunk in self.cache.list_chunks()}
         missing_vectors = sorted(cache_chunk_ids - vector_symbol_ids)
         stale_vectors = sorted(vector_symbol_ids - cache_chunk_ids)
         if not missing_vectors and not stale_vectors:
-            return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+            return {
+                "failed": 0,
+                "failed_reasons": {},
+                "failed_samples": [],
+                "integrity": self._integrity_status(
+                    name="vector_cache",
+                    status="passed",
+                    detail="vector/cache integrity checks passed",
+                ),
+            }
         sample = (
             "vector/cache mismatch "
             f"(missing_vectors={len(missing_vectors)}, stale_vectors={len(stale_vectors)})"
@@ -676,6 +816,12 @@ class Indexer:
             "failed": 1,
             "failed_reasons": {"vector_metadata_mismatch": 1},
             "failed_samples": [sample],
+            "integrity": self._integrity_status(
+                name="vector_cache",
+                status="failed",
+                reason_codes=["vector_metadata_mismatch"],
+                detail=sample,
+            ),
         }
 
     def validate_vector_metadata_consistency(self) -> dict[str, object]:

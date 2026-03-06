@@ -262,6 +262,33 @@ def _threshold_for(backend: str, config: SearchRouterConfig) -> float:
     return config.threshold_semantic
 
 
+def _evidence_kind_for_backend(name: str) -> str:
+    if name == "exact":
+        return "lexical"
+    if name == "symbol":
+        return "symbol"
+    return "semantic"
+
+
+def _backend_threshold_status(
+    results: list[BackendResult],
+    config: SearchRouterConfig,
+) -> dict[str, dict[str, object]]:
+    """Return per-backend threshold/debug status for summary/debug payloads."""
+    status: dict[str, dict[str, object]] = {}
+    for result in results:
+        top_hit_score = max((hit.raw_score for hit in result.hits), default=0.0)
+        threshold = _threshold_for(result.name, config)
+        status[result.name] = {
+            "top_hit_score": top_hit_score,
+            "quality_score": result.quality_score,
+            "threshold": threshold,
+            "threshold_met": bool(result.hits and result.quality_score >= threshold),
+            "evidence_kind": _evidence_kind_for_backend(result.name),
+        }
+    return status
+
+
 def _route_auto(results: list[BackendResult], config: SearchRouterConfig) -> RouterOutcome:
     qualified = [
         result
@@ -283,6 +310,19 @@ def _route_auto(results: list[BackendResult], config: SearchRouterConfig) -> Rou
             winner=chosen.name,
             considered=tuple(result.name for result in results),
             backend_scores={result.name: result.quality_score for result in results},
+        )
+
+    has_non_semantic_evidence = any(
+        result.name in {"exact", "symbol"} and result.hits for result in results
+    )
+    if not has_non_semantic_evidence:
+        return RouterOutcome(
+            strategy="suppressed",
+            reason="semantic_only_below_threshold",
+            winner=None,
+            considered=tuple(result.name for result in results),
+            backend_scores={result.name: result.quality_score for result in results},
+            warning_codes=("ungrounded_results_suppressed",),
         )
 
     return RouterOutcome(
@@ -578,6 +618,8 @@ class SearchRouter:
                     results_by_name,
                     resolved_constraints.max_snippets or self.config.max_snippets,
                 )
+            elif outcome.strategy == "suppressed":
+                selected_hits = []
             else:
                 winner_result = results_by_name.get(outcome.strategy)
                 selected_hits = list(winner_result.hits if winner_result is not None else ())
@@ -590,11 +632,14 @@ class SearchRouter:
         )
 
         total_ms = int((time.perf_counter() - started) * 1000)
+        backend_thresholds = _backend_threshold_status(enriched_results, self.config)
         summary: dict[str, object] = {
             "strategy": outcome.strategy,
             "reason": outcome.reason,
             "winner": outcome.winner,
             "hits": len(packed_hits),
+            "warning_codes": list(outcome.warning_codes),
+            "backend_thresholds": backend_thresholds,
         }
 
         debug_payload: dict[str, object] = {
@@ -607,6 +652,7 @@ class SearchRouter:
                 "semantic": self.config.threshold_semantic,
                 "symbol": self.config.threshold_symbol,
             },
+            "backend_thresholds": backend_thresholds,
             "backend_scores": {result.name: result.quality_score for result in enriched_results},
             "backend_errors": {
                 result.name: result.error for result in enriched_results if result.error is not None

@@ -76,6 +76,7 @@ def test_error_catalog_contract_passes_when_required_headings_and_codes_exist(
                 "`storage_error`",
                 "`embedding_provider_error`",
                 "`stale_cleanup_error`",
+                "`chunk_span_integrity_error`",
                 "`vector_metadata_mismatch`",
                 "`vector_consistency_unverifiable`",
                 "## Inspect Failure Codes",

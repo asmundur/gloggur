@@ -130,3 +130,4 @@ class RouterOutcome:
     winner: str | None
     considered: tuple[str, ...] = ()
     backend_scores: dict[str, float] = field(default_factory=dict)
+    warning_codes: tuple[str, ...] = ()

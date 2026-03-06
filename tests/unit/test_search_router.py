@@ -151,6 +151,53 @@ def test_search_router_hybrid_merges_when_threshold_not_met(
     assert "src/b.py" in paths
 
 
+def test_search_router_suppresses_ungrounded_semantic_only_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Semantic-only below-threshold hits should be suppressed instead of merged into junk."""
+    semantic_result = BackendResult(
+        name="semantic",
+        hits=(
+            BackendHit(
+                backend="semantic",
+                path="src/engine/oauth_integration_engine.py",
+                start_line=91,
+                end_line=92,
+                snippet="class OAuthStartResult:\n    auth_url: str",
+                raw_score=0.91,
+                tags=("semantic_match", "semantic_high_conf"),
+            ),
+        ),
+        timing_ms=8,
+    )
+
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(name="exact", hits=(), timing_ms=3),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_semantic_backend",
+        lambda **_kwargs: semantic_result,
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.2 if result.name == "semantic" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact", "semantic")),
+    )
+    pack = router.search(query="Database setup", mode="auto")
+
+    assert pack.summary["strategy"] == "suppressed"
+    assert pack.summary["warning_codes"] == ["ungrounded_results_suppressed"]
+    assert pack.hits == ()
+
+
 def test_search_router_output_is_deterministic_for_same_input(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

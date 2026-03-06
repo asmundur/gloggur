@@ -67,6 +67,15 @@ def attach_legacy_search_contract(payload: dict[str, object]) -> dict[str, objec
         "search_time_ms": total_ms,
         "needs_reindex": bool(summary.get("needs_reindex", False)),
         "reindex_reason": summary.get("reindex_reason"),
+        "entrypoint": summary.get("entrypoint"),
+        "contract_version": summary.get("contract_version"),
+        "source_schema_version": payload.get("schema_version"),
+        "source_entrypoint": summary.get("entrypoint"),
+        "warning_codes": (
+            list(summary.get("warning_codes", []))
+            if isinstance(summary.get("warning_codes"), list)
+            else []
+        ),
         "file_filter": summary.get("file_filter"),
         "file_filter_match_mode": "exact_or_prefix" if summary.get("file_filter") else None,
         "file_filter_warning_codes": (
@@ -90,6 +99,8 @@ def attach_legacy_search_contract(payload: dict[str, object]) -> dict[str, objec
         "explicit_test_intent": False,
         "test_penalty_applied": False,
         "tool_version": summary.get("tool_version"),
+        "semantic_search_allowed": summary.get("semantic_search_allowed"),
+        "search_integrity": summary.get("search_integrity"),
     }
 
     # Resume-contract fields are flattened into search summary in v2 for compatibility.

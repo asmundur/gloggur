@@ -24,6 +24,7 @@ INDEX_PROFILE_KEY = "index_profile"
 LAST_SUCCESS_RESUME_FINGERPRINT_KEY = "last_success_resume_fingerprint"
 LAST_SUCCESS_RESUME_AT_KEY = "last_success_resume_at"
 LAST_SUCCESS_TOOL_VERSION_KEY = "last_success_tool_version"
+SEARCH_INTEGRITY_KEY = "search_integrity"
 CACHE_SCHEMA_VERSION = "7"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
@@ -626,6 +627,30 @@ class CacheManager:
                 (LAST_SUCCESS_TOOL_VERSION_KEY, version),
             )
 
+    def get_search_integrity(self) -> dict[str, object] | None:
+        """Return persisted search-integrity markers, if present."""
+        with self._connect() as conn:
+            raw = self._read_meta_value(conn, SEARCH_INTEGRITY_KEY)
+        if raw is None:
+            return None
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def set_search_integrity(self, integrity: dict[str, object]) -> None:
+        """Persist search-integrity markers as JSON."""
+        payload = json.dumps(integrity, sort_keys=True, separators=(",", ":"))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (SEARCH_INTEGRITY_KEY, payload),
+            )
+
     def set_audit_warnings(
         self,
         symbol_id: str,
@@ -794,6 +819,7 @@ class CacheManager:
                 "DELETE FROM meta WHERE key = ?",
                 (LAST_SUCCESS_TOOL_VERSION_KEY,),
             )
+            conn.execute("DELETE FROM meta WHERE key = ?", (SEARCH_INTEGRITY_KEY,))
 
     def _schema_reset_plan(self) -> _ResetPlan | None:
         """Return a reset plan if schema is incompatible or DB corruption is detected."""

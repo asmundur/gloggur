@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from gloggur.cli import main as cli_main
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
@@ -55,6 +56,9 @@ def test_hybrid_search_returns_ranked_results() -> None:
         assert payload["metadata"]["file_filter"] is None
         assert payload["metadata"]["file_filter_match_mode"] == "exact_or_prefix"
         assert payload["metadata"]["file_filter_warning_codes"] == []
+        assert payload["metadata"]["entrypoint"] == "hybrid_search_legacy"
+        assert payload["metadata"]["contract_version"] == "legacy"
+        assert "legacy_search_surface" in payload["metadata"]["warning_codes"]
         first = payload["results"][0]
         assert 0.0 <= first["similarity_score"] <= 1.0
         assert 0.0 <= first["ranking_score"] <= 1.0
@@ -153,3 +157,47 @@ def test_hybrid_search_context_radius_controls_context_window_size() -> None:
         large_context = str(large["results"][0]["context"]).splitlines()
         assert len(large_context) >= len(small_context)
         assert len(large_context) > 0
+
+
+def test_hybrid_search_blocks_when_health_requires_reindex() -> None:
+    """Legacy HybridSearch should fail closed when shared health marks the index unusable."""
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        config = GloggurConfig(cache_dir=cache_dir, local_embedding_model="local")
+        cache = CacheManager(CacheConfig(cache_dir))
+        embedding = DeterministicTestEmbeddingProvider()
+        vector_store = VectorStore(VectorStoreConfig(cache_dir))
+        metadata_store = MetadataStore(MetadataStoreConfig(cache_dir))
+
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=embedding,
+            vector_store=vector_store,
+        )
+        indexer.index_repository(str(repo))
+        cache.delete_index_metadata()
+
+        searcher = HybridSearch(
+            embedding,
+            vector_store,
+            metadata_store,
+            health_evaluator=lambda: cli_main._build_search_health_snapshot(
+                config,
+                cache,
+                entrypoint="hybrid_search_legacy",
+                contract_version="legacy",
+            ),
+        )
+
+        payload = searcher.search("add", top_k=5)
+
+        assert payload["results"] == []
+        metadata = payload["metadata"]
+        assert metadata["needs_reindex"] is True
+        assert "missing_index_metadata" in metadata["resume_reason_codes"]
+        assert "reindex_required" in metadata["warning_codes"]

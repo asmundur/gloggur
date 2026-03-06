@@ -860,6 +860,165 @@ def _build_resume_contract(
     }
 
 
+def _integrity_marker(
+    *,
+    name: str,
+    status: str,
+    reason_codes: list[str] | None = None,
+    detail: str | None = None,
+    checked_at: str | None = None,
+) -> dict[str, object]:
+    """Build one normalized integrity marker payload."""
+    return {
+        "name": name,
+        "status": status,
+        "reason_codes": list(reason_codes or []),
+        "detail": detail,
+        "checked_at": checked_at,
+    }
+
+
+def _default_search_integrity() -> dict[str, object]:
+    """Return default missing integrity markers for older caches."""
+    return {
+        "vector_cache": _integrity_marker(
+            name="vector_cache",
+            status="missing",
+            reason_codes=["vector_integrity_missing"],
+            detail="vector/cache integrity marker missing",
+        ),
+        "chunk_span": _integrity_marker(
+            name="chunk_span",
+            status="missing",
+            reason_codes=["chunk_span_integrity_missing"],
+            detail="chunk/span integrity marker missing",
+        ),
+    }
+
+
+def _normalize_search_integrity(raw: object) -> dict[str, object]:
+    """Normalize persisted integrity markers into a stable payload shape."""
+    payload = _default_search_integrity()
+    if not isinstance(raw, dict):
+        return payload
+    for key in ("vector_cache", "chunk_span"):
+        candidate = raw.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        status = str(candidate.get("status") or payload[key]["status"])
+        reason_codes_raw = candidate.get("reason_codes")
+        reason_codes = (
+            [str(item) for item in reason_codes_raw if str(item)]
+            if isinstance(reason_codes_raw, list)
+            else list(payload[key]["reason_codes"])
+        )
+        payload[key] = _integrity_marker(
+            name=key,
+            status=status,
+            reason_codes=reason_codes,
+            detail=(
+                str(candidate.get("detail"))
+                if candidate.get("detail") is not None
+                else str(payload[key]["detail"])
+            ),
+            checked_at=(
+                str(candidate.get("checked_at"))
+                if candidate.get("checked_at") is not None
+                else None
+            ),
+        )
+    return payload
+
+
+def _build_search_health_snapshot(
+    config: GloggurConfig,
+    cache: CacheManager,
+    *,
+    entrypoint: str,
+    contract_version: str,
+    allow_tool_version_drift: bool = False,
+) -> dict[str, object]:
+    """Build shared search-health payload for status, CLI search, and legacy searcher calls."""
+    expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
+    metadata = cache.get_index_metadata()
+    cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
+    last_success_tool_version = cache.get_last_success_tool_version()
+    metadata_reason = _metadata_reindex_reason(metadata is not None)
+    profile_reason = _profile_reindex_reason(
+        metadata_present=metadata is not None,
+        cached_profile=cached_profile,
+        expected_profile=expected_profile,
+    )
+    tool_version_reason = _tool_version_reindex_reason(
+        last_success_tool_version=last_success_tool_version,
+        current_tool_version=GLOGGUR_VERSION,
+    )
+    effective_tool_version_reason = tool_version_reason
+    if allow_tool_version_drift and tool_version_reason is not None:
+        effective_tool_version_reason = None
+    reindex_reason = metadata_reason or profile_reason or effective_tool_version_reason
+    if cache.last_reset_reason:
+        reset_label = "cache schema rebuilt"
+        if "cache corruption detected" in cache.last_reset_reason:
+            reset_label = "cache corruption recovered"
+        reindex_reason = f"{reset_label} ({cache.last_reset_reason})"
+    needs_reindex = metadata is None or reindex_reason is not None
+    resume_contract = _build_resume_contract(
+        metadata=metadata,
+        schema_version=cache.get_schema_version(),
+        expected_profile=expected_profile,
+        cached_profile=cached_profile,
+        reset_reason=cache.last_reset_reason,
+        needs_reindex=needs_reindex,
+        last_success_resume_fingerprint=cache.get_last_success_resume_fingerprint(),
+        last_success_resume_at=cache.get_last_success_resume_at(),
+        tool_version=GLOGGUR_VERSION,
+        last_success_tool_version=last_success_tool_version,
+        allow_tool_version_drift=allow_tool_version_drift,
+    )
+    get_search_integrity = getattr(cache, "get_search_integrity", None)
+    raw_integrity = get_search_integrity() if callable(get_search_integrity) else None
+    search_integrity = _normalize_search_integrity(raw_integrity)
+    warning_codes: list[str] = []
+    if contract_version == "legacy":
+        warning_codes.append("legacy_search_contract")
+    if entrypoint == "hybrid_search_legacy":
+        warning_codes.append("legacy_search_surface")
+    if needs_reindex:
+        warning_codes.append("reindex_required")
+
+    semantic_search_allowed = not needs_reindex
+    for key, missing_code, failed_code in (
+        ("vector_cache", "vector_integrity_missing", "vector_integrity_failed"),
+        ("chunk_span", "chunk_span_integrity_missing", "chunk_span_integrity_failed"),
+    ):
+        marker = search_integrity[key]
+        status = str(marker.get("status") or "missing")
+        if status != "passed":
+            semantic_search_allowed = False
+        if status == "failed":
+            warning_codes.append(failed_code)
+        elif status != "passed":
+            warning_codes.append(missing_code)
+        for code in marker.get("reason_codes", []):
+            if isinstance(code, str) and code and code not in warning_codes:
+                warning_codes.append(code)
+
+    return {
+        "entrypoint": entrypoint,
+        "contract_version": contract_version,
+        "needs_reindex": needs_reindex,
+        "reindex_reason": reindex_reason,
+        "resume_reason_codes": list(resume_contract["resume_reason_codes"]),
+        "warning_codes": warning_codes,
+        "semantic_search_allowed": semantic_search_allowed,
+        "expected_index_profile": expected_profile,
+        "cached_index_profile": cached_profile,
+        "search_integrity": search_integrity,
+        "resume_contract": resume_contract,
+    }
+
+
 def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManager) -> None:
     """Persist last-success resume fingerprint/timestamp when index state is reusable."""
     metadata = cache.get_index_metadata()
@@ -1374,52 +1533,29 @@ def _build_status_payload(
     allow_tool_version_drift: bool = False,
 ) -> dict[str, object]:
     """Build status payload from cache metadata/profile state."""
-    expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     metadata = cache.get_index_metadata()
-    schema_version = cache.get_schema_version()
-    cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
-    last_success_tool_version = cache.get_last_success_tool_version()
-    metadata_reason = _metadata_reindex_reason(metadata is not None)
-    profile_reason = _profile_reindex_reason(
-        metadata_present=metadata is not None,
-        cached_profile=cached_profile,
-        expected_profile=expected_profile,
-    )
-    tool_version_reason = _tool_version_reindex_reason(
-        last_success_tool_version=last_success_tool_version,
-        current_tool_version=GLOGGUR_VERSION,
-    )
-    effective_tool_version_reason = tool_version_reason
-    if allow_tool_version_drift and tool_version_reason is not None:
-        effective_tool_version_reason = None
-    reindex_reason = metadata_reason or profile_reason or effective_tool_version_reason
-    if cache.last_reset_reason:
-        reset_label = "cache schema rebuilt"
-        if "cache corruption detected" in cache.last_reset_reason:
-            reset_label = "cache corruption recovered"
-        reindex_reason = f"{reset_label} ({cache.last_reset_reason})"
-    needs_reindex = metadata is None or reindex_reason is not None
-    resume_contract = _build_resume_contract(
-        metadata=metadata,
-        schema_version=schema_version,
-        expected_profile=expected_profile,
-        cached_profile=cached_profile,
-        reset_reason=cache.last_reset_reason,
-        needs_reindex=needs_reindex,
-        last_success_resume_fingerprint=cache.get_last_success_resume_fingerprint(),
-        last_success_resume_at=cache.get_last_success_resume_at(),
-        tool_version=GLOGGUR_VERSION,
-        last_success_tool_version=last_success_tool_version,
+    health = _build_search_health_snapshot(
+        config,
+        cache,
+        entrypoint="status_cli",
+        contract_version="status_v1",
         allow_tool_version_drift=allow_tool_version_drift,
     )
+    resume_contract = health["resume_contract"]
+    assert isinstance(resume_contract, dict)
     return {
         "cache_dir": config.cache_dir,
         "metadata": metadata.model_dump(mode="json") if metadata else None,
-        "schema_version": schema_version,
-        "expected_index_profile": expected_profile,
-        "cached_index_profile": cached_profile,
-        "needs_reindex": needs_reindex,
-        "reindex_reason": reindex_reason,
+        "schema_version": cache.get_schema_version(),
+        "entrypoint": health["entrypoint"],
+        "contract_version": health["contract_version"],
+        "expected_index_profile": health["expected_index_profile"],
+        "cached_index_profile": health["cached_index_profile"],
+        "needs_reindex": health["needs_reindex"],
+        "reindex_reason": health["reindex_reason"],
+        "warning_codes": health["warning_codes"],
+        "semantic_search_allowed": health["semantic_search_allowed"],
+        "search_integrity": health["search_integrity"],
         "total_symbols": _cache_total_symbols(cache),
         **resume_contract,
     }
@@ -3093,35 +3229,17 @@ def search(
         )
 
     config, cache, vector_store = _create_runtime(config_path=config_path)
-    expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
-    metadata = cache.get_index_metadata()
-    metadata_present = metadata is not None
-    cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
-    last_success_tool_version = cache.get_last_success_tool_version()
-    metadata_reason = _metadata_reindex_reason(metadata_present)
-    profile_reason = _profile_reindex_reason(metadata_present, cached_profile, expected_profile)
-    tool_version_reason = _tool_version_reindex_reason(
-        last_success_tool_version=last_success_tool_version,
-        current_tool_version=GLOGGUR_VERSION,
-    )
-    effective_tool_version_reason = tool_version_reason
-    if allow_tool_version_drift and tool_version_reason is not None:
-        effective_tool_version_reason = None
-    reindex_reason = metadata_reason or profile_reason or effective_tool_version_reason
-    needs_reindex = reindex_reason is not None
-    resume_contract = _build_resume_contract(
-        metadata=metadata,
-        schema_version=cache.get_schema_version(),
-        expected_profile=expected_profile,
-        cached_profile=cached_profile,
-        reset_reason=cache.last_reset_reason,
-        needs_reindex=needs_reindex,
-        last_success_resume_fingerprint=cache.get_last_success_resume_fingerprint(),
-        last_success_resume_at=cache.get_last_success_resume_at(),
-        tool_version=GLOGGUR_VERSION,
-        last_success_tool_version=last_success_tool_version,
+    health = _build_search_health_snapshot(
+        config,
+        cache,
+        entrypoint="search_cli_v2",
+        contract_version="contextpack_v2",
         allow_tool_version_drift=allow_tool_version_drift,
     )
+    needs_reindex = bool(health["needs_reindex"])
+    reindex_reason = health["reindex_reason"]
+    resume_contract = health["resume_contract"]
+    assert isinstance(resume_contract, dict)
 
     resolved_path_prefix = path_prefix if path_prefix else file_path
     resolved_max_snippets = max_snippets if max_snippets is not None else top_k
@@ -3137,6 +3255,12 @@ def search(
                 "winner": None,
                 "hits": 0,
                 "search_mode": normalized_search_mode,
+                "entrypoint": health["entrypoint"],
+                "contract_version": health["contract_version"],
+                "warning_codes": health["warning_codes"],
+                "semantic_search_allowed": health["semantic_search_allowed"],
+                "search_integrity": health["search_integrity"],
+                "backend_thresholds": {},
             },
             hits=(),
             debug={
@@ -3163,10 +3287,10 @@ def search(
         if isinstance(summary_payload, dict):
             summary_payload.setdefault("query_mode", query_mode)
             summary_payload.setdefault("search_mode", normalized_search_mode)
-            summary_payload.setdefault("needs_reindex", True)
+            summary_payload.setdefault("needs_reindex", health["needs_reindex"])
             summary_payload.setdefault("reindex_reason", reindex_reason)
-            summary_payload.setdefault("expected_index_profile", expected_profile)
-            summary_payload.setdefault("cached_index_profile", cached_profile)
+            summary_payload.setdefault("expected_index_profile", health["expected_index_profile"])
+            summary_payload.setdefault("cached_index_profile", health["cached_index_profile"])
             summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
             summary_payload.setdefault("legacy_kind_filter", kind)
             summary_payload.setdefault("legacy_context_radius", context_radius)
@@ -3176,6 +3300,10 @@ def search(
             summary_payload.setdefault("legacy_retry_enabled", not disable_bounded_requery)
             summary_payload.setdefault("file_filter", resolved_path_prefix)
             summary_payload.setdefault("tool_version", GLOGGUR_VERSION)
+            for key, value in health.items():
+                if key == "resume_contract":
+                    continue
+                summary_payload.setdefault(str(key), value)
             for key, value in resume_contract.items():
                 summary_payload.setdefault(str(key), value)
 
@@ -3185,6 +3313,7 @@ def search(
                 debug_payload = {}
                 payload["debug"] = debug_payload
             debug_payload["resume_contract"] = resume_contract
+            debug_payload["search_health"] = health
             debug_payload["tool_version"] = GLOGGUR_VERSION
 
         if stream and as_json:
@@ -3204,7 +3333,18 @@ def search(
         embedding = None
         semantic_init_error = format_embedding_error_message(exc)
     if embedding is not None:
-        searcher = HybridSearch(embedding, vector_store, metadata_store)
+        searcher = HybridSearch(
+            embedding,
+            vector_store,
+            metadata_store,
+            health_evaluator=lambda: _build_search_health_snapshot(
+                config,
+                cache,
+                entrypoint="hybrid_search_legacy",
+                contract_version="legacy",
+                allow_tool_version_drift=allow_tool_version_drift,
+            ),
+        )
 
     router_repo_root = _resolve_router_repo_root(
         metadata_store=metadata_store,
@@ -3243,12 +3383,26 @@ def search(
     payload = pack.to_dict(include_debug=debug_router)
     summary_payload = payload.get("summary")
     if isinstance(summary_payload, dict):
+        existing_warning_codes = summary_payload.get("warning_codes")
+        merged_warning_codes: list[str] = []
+        if isinstance(existing_warning_codes, list):
+            for code in existing_warning_codes:
+                if isinstance(code, str) and code and code not in merged_warning_codes:
+                    merged_warning_codes.append(code)
+        for code in health["warning_codes"]:
+            if isinstance(code, str) and code and code not in merged_warning_codes:
+                merged_warning_codes.append(code)
         summary_payload.setdefault("query_mode", query_mode)
         summary_payload.setdefault("search_mode", normalized_search_mode)
-        summary_payload.setdefault("needs_reindex", reindex_reason is not None)
+        summary_payload.setdefault("needs_reindex", health["needs_reindex"])
         summary_payload.setdefault("reindex_reason", reindex_reason)
-        summary_payload.setdefault("expected_index_profile", expected_profile)
-        summary_payload.setdefault("cached_index_profile", cached_profile)
+        summary_payload.setdefault("expected_index_profile", health["expected_index_profile"])
+        summary_payload.setdefault("cached_index_profile", health["cached_index_profile"])
+        summary_payload.setdefault("entrypoint", health["entrypoint"])
+        summary_payload.setdefault("contract_version", health["contract_version"])
+        summary_payload["warning_codes"] = merged_warning_codes
+        summary_payload.setdefault("semantic_search_allowed", health["semantic_search_allowed"])
+        summary_payload.setdefault("search_integrity", health["search_integrity"])
         # Preserve legacy option observability as non-routing summary fields.
         summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
         summary_payload.setdefault("legacy_kind_filter", kind)
@@ -3268,6 +3422,7 @@ def search(
             debug_payload = {}
             payload["debug"] = debug_payload
         debug_payload["resume_contract"] = resume_contract
+        debug_payload["search_health"] = health
         debug_payload["tool_version"] = GLOGGUR_VERSION
         if semantic_init_error is not None:
             backend_errors = debug_payload.get("backend_errors")

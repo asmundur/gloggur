@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from gloggur.embeddings.base import EmbeddingProvider
@@ -63,6 +64,10 @@ _MAX_EXPANDED_CANDIDATES = 250
 _DEFAULT_CONTEXT_RADIUS = 12
 _FILE_FILTER_MATCH_MODE = "exact_or_prefix"
 _FILE_FILTER_NO_MATCH_WARNING = "file_filter_no_match"
+_LEGACY_DEPRECATION_NOTICE = (
+    "HybridSearch.search() is a legacy surface. Prefer `gloggur search --json` "
+    "or SearchRouter ContextPack v2 for fail-closed retrieval diagnostics."
+)
 _BALANCED_POLICY = RankingPolicy(
     exact_identifier_tail_bonus=0.22,
     source_path_bonus=0.06,
@@ -85,11 +90,14 @@ class HybridSearch:
         embedding_provider: EmbeddingProvider,
         vector_store: VectorStore,
         metadata_store: MetadataStore,
+        *,
+        health_evaluator: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         """Initialize search with embedding, vector, and metadata stores."""
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
         self.metadata_store = metadata_store
+        self._health_evaluator = health_evaluator
 
     def search(
         self,
@@ -104,6 +112,36 @@ class HybridSearch:
         ranking_context = self._build_ranking_context(query, filters)
         metadata_filters = self._metadata_filters(filters)
         search_mode = str(filters.get("mode") or "semantic").strip().lower()
+        health = self._search_health()
+        warning_codes = list(health.get("warning_codes", [])) if isinstance(health, dict) else []
+        if health.get("needs_reindex") is True:
+            duration_ms = int((time.time() - start) * 1000)
+            return self._blocked_payload(
+                query=query,
+                filters=filters,
+                ranking_context=ranking_context,
+                context_radius=context_radius,
+                search_mode=search_mode,
+                duration_ms=duration_ms,
+                health=health,
+            )
+        if search_mode == "semantic" and health.get("semantic_search_allowed") is False:
+            if "semantic_search_disabled" not in warning_codes:
+                warning_codes.append("semantic_search_disabled")
+            duration_ms = int((time.time() - start) * 1000)
+            payload = self._blocked_payload(
+                query=query,
+                filters=filters,
+                ranking_context=ranking_context,
+                context_radius=context_radius,
+                search_mode=search_mode,
+                duration_ms=duration_ms,
+                health={**health, "warning_codes": warning_codes},
+            )
+            metadata = payload["metadata"]
+            assert isinstance(metadata, dict)
+            metadata["deprecation_notice"] = _LEGACY_DEPRECATION_NOTICE
+            return payload
         if search_mode == "semantic":
             try:
                 query_vector = self.embedding_provider.embed_text(query)
@@ -138,6 +176,14 @@ class HybridSearch:
             "explicit_test_intent": ranking_context.explicit_test_intent,
             "test_penalty_applied": ranking_context.test_penalty_applied,
             "context_radius": context_radius,
+            "entrypoint": str(health.get("entrypoint", "hybrid_search_legacy")),
+            "contract_version": str(health.get("contract_version", "legacy")),
+            "needs_reindex": bool(health.get("needs_reindex", False)),
+            "resume_reason_codes": list(health.get("resume_reason_codes", [])),
+            "warning_codes": warning_codes,
+            "semantic_search_allowed": bool(health.get("semantic_search_allowed", True)),
+            "search_integrity": health.get("search_integrity"),
+            "deprecation_notice": _LEGACY_DEPRECATION_NOTICE,
         }
         metadata.update(self._file_filter_metadata(filters=filters, results=results))
         return {
@@ -238,6 +284,55 @@ class HybridSearch:
             "file_filter_match_mode": _FILE_FILTER_MATCH_MODE,
             "file_filter_warning_codes": [],
         }
+
+    def _search_health(self) -> dict[str, object]:
+        """Return normalized search-health payload for legacy HybridSearch callers."""
+        if callable(self._health_evaluator):
+            payload = self._health_evaluator()
+            if isinstance(payload, dict):
+                return payload
+        return {
+            "entrypoint": "hybrid_search_legacy",
+            "contract_version": "legacy",
+            "needs_reindex": False,
+            "resume_reason_codes": [],
+            "warning_codes": ["legacy_search_contract", "legacy_search_surface"],
+            "semantic_search_allowed": True,
+            "search_integrity": None,
+        }
+
+    def _blocked_payload(
+        self,
+        *,
+        query: str,
+        filters: dict[str, str],
+        ranking_context: RankingContext,
+        context_radius: int,
+        search_mode: str,
+        duration_ms: int,
+        health: dict[str, object],
+    ) -> dict[str, object]:
+        """Return an empty legacy payload with explicit diagnostics."""
+        metadata = {
+            "total_results": 0,
+            "search_time_ms": duration_ms,
+            "search_mode": search_mode,
+            "ranking_mode": ranking_context.ranking_mode,
+            "query_intent": self._query_intent_label(ranking_context.query_intent),
+            "explicit_test_intent": ranking_context.explicit_test_intent,
+            "test_penalty_applied": ranking_context.test_penalty_applied,
+            "context_radius": context_radius,
+            "entrypoint": str(health.get("entrypoint", "hybrid_search_legacy")),
+            "contract_version": str(health.get("contract_version", "legacy")),
+            "needs_reindex": bool(health.get("needs_reindex", False)),
+            "resume_reason_codes": list(health.get("resume_reason_codes", [])),
+            "warning_codes": list(health.get("warning_codes", [])),
+            "semantic_search_allowed": bool(health.get("semantic_search_allowed", False)),
+            "search_integrity": health.get("search_integrity"),
+            "deprecation_notice": _LEGACY_DEPRECATION_NOTICE,
+        }
+        metadata.update(self._file_filter_metadata(filters=filters, results=[]))
+        return {"query": query, "results": [], "metadata": metadata}
 
     def _search_unfiltered(
         self,

@@ -430,6 +430,33 @@ class WatchService:
                     self.vector_store.save()
                     consistency = self.indexer.validate_vector_metadata_consistency()
                     self._merge_failure_payload(result, consistency)
+                    vector_integrity = consistency.get("integrity")
+                    if not isinstance(vector_integrity, dict):
+                        vector_integrity = self.indexer._integrity_status(
+                            name="vector_cache",
+                            status="missing",
+                            reason_codes=["vector_integrity_missing"],
+                            detail="vector/cache integrity marker missing",
+                        )
+                    if "chunk_span_integrity_error" in result.failed_reasons:
+                        chunk_integrity = self.indexer._integrity_status(
+                            name="chunk_span",
+                            status="failed",
+                            reason_codes=["chunk_span_integrity_error"],
+                            detail="chunk/span integrity check failed during watch update",
+                        )
+                    else:
+                        chunk_integrity = self.indexer._integrity_status(
+                            name="chunk_span",
+                            status="passed",
+                            detail="chunk/span integrity checks passed",
+                        )
+                    self.cache.set_search_integrity(
+                        {
+                            "vector_cache": vector_integrity,
+                            "chunk_span": chunk_integrity,
+                        }
+                    )
                     if result.error_count == 0:
                         metadata = IndexMetadata(
                             version=self.config.index_version,

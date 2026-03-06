@@ -307,6 +307,11 @@ Fields:
   - Meaning: stale file or symbol cleanup failed during incremental maintenance.
   - Retryability: retry after fixing cache cleanup conditions.
   - Operator action: inspect stale cache rows and rebuild if needed.
+- `chunk_span_integrity_error`
+  - Command(s): `index`, watch incremental batches.
+  - Meaning: persisted chunk boundaries failed integrity validation against symbol spans.
+  - Retryability: retry after fixing parser output or chunk construction drift.
+  - Operator action: inspect symbol boundaries and rerun indexing.
 - `vector_metadata_mismatch`
   - Command(s): `index`, watch incremental batches, watch status rollups.
   - Meaning: cache symbol ids and vector symbol ids diverged.

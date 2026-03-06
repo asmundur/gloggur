@@ -10,6 +10,7 @@ from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.indexer import Indexer
+from gloggur.models import SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
 from scripts.verification.fixtures import TestFixtures
 
@@ -48,6 +49,43 @@ def test_indexer_indexes_repo_and_sets_metadata() -> None:
         assert metadata is not None
         assert metadata.indexed_files == 1
         assert metadata.total_symbols == len(cache.list_symbols())
+        search_integrity = cache.get_search_integrity()
+        assert isinstance(search_integrity, dict)
+        assert search_integrity["vector_cache"]["status"] == "missing"
+        assert search_integrity["chunk_span"]["status"] == "passed"
+
+
+def test_indexer_fails_closed_on_chunk_span_integrity_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed chunk spans should fail the index run with an explicit integrity code."""
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+
+        original_build_chunks = indexer._build_symbol_chunks
+
+        def _bad_chunks(*args: object, **kwargs: object) -> list[SymbolChunk]:
+            chunks = original_build_chunks(*args, **kwargs)
+            assert chunks
+            broken = chunks[0].model_copy(deep=True)
+            broken.end_line = broken.end_line + 100
+            return [broken, *chunks[1:]]
+
+        monkeypatch.setattr(indexer, "_build_symbol_chunks", _bad_chunks)
+
+        result = indexer.index_repository(str(repo))
+
+        assert result.failed == 1
+        assert result.failed_reasons == {"chunk_span_integrity_error": 1}
+        assert any("escapes symbol" in sample for sample in result.failed_samples)
+        search_integrity = cache.get_search_integrity()
+        assert isinstance(search_integrity, dict)
+        assert search_integrity["chunk_span"]["status"] == "failed"
 
 
 def test_indexer_skips_unchanged_files() -> None:
