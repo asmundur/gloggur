@@ -9,7 +9,11 @@ from pathlib import Path
 import yaml
 from click.testing import CliRunner
 
-from gloggur.cli.main import cli
+from gloggur.cli.main import (
+    _build_watch_failure_contract,
+    _collect_watch_failure_signals,
+    cli,
+)
 from gloggur.config import GloggurConfig
 from gloggur.io_failures import StorageIOError
 from gloggur.watch.service import is_process_running
@@ -1070,6 +1074,41 @@ def test_watch_status_json_synthesizes_inconsistent_failure_contract(
     assert guidance["watch_state_inconsistent"]
 
 
+def test_collect_watch_failure_signals_uses_last_batch_reason_counts_when_top_level_drift() -> None:
+    failed_count, reasons = _collect_watch_failure_signals(
+        {
+            "status": "running",
+            "running": True,
+            "failed": 0,
+            "failed_reasons": {},
+            "last_batch": {
+                "failed": 1,
+                "failed_reasons": {"vector_metadata_mismatch": 1},
+            },
+        }
+    )
+
+    assert failed_count == 1
+    assert reasons == {"vector_metadata_mismatch": 1}
+
+
+def test_collect_watch_failure_signals_uses_last_batch_failure_codes() -> None:
+    failed_count, reasons = _collect_watch_failure_signals(
+        {
+            "status": "running",
+            "running": True,
+            "failed": 0,
+            "failed_reasons": {},
+            "last_batch": {
+                "failure_codes": ["vector_metadata_mismatch"],
+            },
+        }
+    )
+
+    assert failed_count == 1
+    assert reasons == {"vector_metadata_mismatch": 1}
+
+
 def test_watch_status_json_uses_last_batch_failure_reasons_when_top_level_counters_drift(
     tmp_path: Path,
     monkeypatch,
@@ -1134,7 +1173,7 @@ def test_watch_status_json_synthesizes_last_batch_inconsistent_failure_contract(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """watch status should emit a deterministic code when last_batch failed count lacks reason codes."""
+    """watch status should emit a deterministic code when last_batch lacks reason codes."""
     runner = CliRunner()
     pid_file = tmp_path / "watch.pid"
     state_file = tmp_path / "watch_state.json"
@@ -1174,6 +1213,34 @@ def test_watch_status_json_synthesizes_last_batch_inconsistent_failure_contract(
     assert "watch_last_batch_inconsistent" in guidance
     assert isinstance(guidance["watch_last_batch_inconsistent"], list)
     assert guidance["watch_last_batch_inconsistent"]
+
+
+def test_build_watch_failure_contract_prefers_last_batch_failure_codes_over_inconsistency() -> None:
+    contract = _build_watch_failure_contract(
+        {
+            "status": "running_with_errors",
+            "running": True,
+            "failed": 0,
+            "failed_reasons": {},
+            "last_batch": {
+                "failure_codes": ["vector_metadata_mismatch"],
+            },
+        }
+    )
+
+    assert contract["failed_reasons"] == {"vector_metadata_mismatch": 1}
+    assert contract["failure_codes"] == ["vector_metadata_mismatch"]
+    guidance = contract["failure_guidance"]
+    assert isinstance(guidance, dict)
+    assert "vector_metadata_mismatch" in guidance
+    assert isinstance(guidance["vector_metadata_mismatch"], list)
+    assert guidance["vector_metadata_mismatch"]
+    last_batch = contract.get("last_batch")
+    assert isinstance(last_batch, dict)
+    assert last_batch["failed_reasons"] == {"vector_metadata_mismatch": 1}
+    assert last_batch["failure_codes"] == ["vector_metadata_mismatch"]
+    assert last_batch["failed"] == 1
+    assert last_batch["error_count"] == 1
 
 
 def test_watch_status_normalizes_stale_running_state_when_process_is_dead(

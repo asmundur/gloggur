@@ -1256,6 +1256,20 @@ def _normalize_reason_counts(payload: object) -> dict[str, int]:
     return normalized
 
 
+def _normalize_failure_codes(payload: object) -> list[str]:
+    """Normalize a failure-code payload into a stable de-duplicated list."""
+    if not isinstance(payload, list):
+        return []
+
+    normalized: list[str] = []
+    for raw_code in payload:
+        code = str(raw_code).strip()
+        if not code or code in normalized:
+            continue
+        normalized.append(code)
+    return normalized
+
+
 def _read_failed_count(payload: dict[str, object]) -> int:
     """Read failed/error_count from a watch payload with safe int coercion."""
     raw_failed = payload.get("failed", payload.get("error_count", 0))
@@ -1273,11 +1287,17 @@ def _collect_watch_failure_signals(state: dict[str, object]) -> tuple[int, dict[
     last_batch_payload = state.get("last_batch")
     if isinstance(last_batch_payload, dict):
         last_batch_reasons = _normalize_reason_counts(last_batch_payload.get("failed_reasons"))
+        if not last_batch_reasons:
+            last_batch_codes = _normalize_failure_codes(last_batch_payload.get("failure_codes"))
+            last_batch_reasons = {code: 1 for code in last_batch_codes}
         for reason, count in last_batch_reasons.items():
             normalized_reasons[reason] = normalized_reasons.get(reason, 0) + count
         last_batch_failed = _read_failed_count(last_batch_payload)
         if failed_count <= 0:
-            failed_count = last_batch_failed
+            if last_batch_failed > 0:
+                failed_count = last_batch_failed
+            elif last_batch_reasons:
+                failed_count = sum(last_batch_reasons.values())
         if failed_count > 0 and not normalized_reasons:
             normalized_reasons["watch_last_batch_inconsistent"] = failed_count
 
@@ -1335,12 +1355,23 @@ def _build_watch_failure_contract(state: dict[str, object]) -> dict[str, object]
     last_batch_payload = state.get("last_batch")
     if isinstance(last_batch_payload, dict):
         patched_batch = dict(last_batch_payload)
-        batch_failure_codes = patched_batch.get("failure_codes")
-        if not (isinstance(batch_failure_codes, list) and batch_failure_codes):
+        patched = False
+        batch_failure_codes = _normalize_failure_codes(patched_batch.get("failure_codes"))
+        if not batch_failure_codes:
             patched_batch["failure_codes"] = failure_codes
+            patched = True
+        batch_failure_guidance = patched_batch.get("failure_guidance")
+        if not (isinstance(batch_failure_guidance, dict) and batch_failure_guidance):
             patched_batch["failure_guidance"] = failure_guidance
-            if not _normalize_reason_counts(patched_batch.get("failed_reasons")):
-                patched_batch["failed_reasons"] = normalized_reasons
+            patched = True
+        if not _normalize_reason_counts(patched_batch.get("failed_reasons")):
+            patched_batch["failed_reasons"] = normalized_reasons
+            patched = True
+        if _read_failed_count(patched_batch) <= 0 and _failed_count > 0:
+            patched_batch["failed"] = _failed_count
+            patched_batch["error_count"] = _failed_count
+            patched = True
+        if patched:
             contract["last_batch"] = patched_batch
     else:
         contract["last_batch"] = {

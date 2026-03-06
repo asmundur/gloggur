@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import signal
 import tempfile
 from pathlib import Path
@@ -249,7 +250,49 @@ def test_watch_service_run_forever_keeps_last_failed_batch_on_noop_events(
         failure_codes = last_batch.get("failure_codes", [])
         assert isinstance(failure_codes, list)
         assert "vector_metadata_mismatch" in failure_codes
-        assert state_payload.get("last_error") == "vector/cache mismatch (missing_vectors=0, stale_vectors=1)"
+        assert (
+            state_payload.get("last_error")
+            == "vector/cache mismatch (missing_vectors=0, stale_vectors=1)"
+        )
+
+
+def test_noop_last_batch_contract_backfills_partial_existing_failure_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(VectorStore, "_check_faiss", staticmethod(lambda: False))
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        state_file = str(Path(cache_dir) / "watch_state.json")
+        service, _cache = _build_watch_service(repo, cache_dir, watch_state_file=state_file)
+
+        Path(state_file).write_text(
+            json.dumps(
+                {
+                    "last_batch": {
+                        "failure_codes": ["vector_metadata_mismatch"],
+                    }
+                }
+            ),
+            encoding="utf8",
+        )
+        service._total_failed_reasons = {"vector_metadata_mismatch": 1}
+        service._total_errors = 1
+
+        payload = service._noop_last_batch_contract()
+
+        assert isinstance(payload, dict)
+        assert payload["failure_codes"] == ["vector_metadata_mismatch"]
+        assert payload["failed_reasons"] == {"vector_metadata_mismatch": 1}
+        assert payload["failed"] == 1
+        assert payload["error_count"] == 1
+        guidance = payload["failure_guidance"]
+        assert isinstance(guidance, dict)
+        assert "vector_metadata_mismatch" in guidance
+        assert isinstance(guidance["vector_metadata_mismatch"], list)
+        assert guidance["vector_metadata_mismatch"]
 
 
 def test_watch_service_surfaces_stale_cleanup_failure_contract_and_keeps_metadata_invalid(

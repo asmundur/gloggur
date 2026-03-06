@@ -243,10 +243,7 @@ class WatchService:
         state = load_watch_state(self.config.watch_state_file)
         last_batch_payload = state.get("last_batch")
         if isinstance(last_batch_payload, dict):
-            existing = dict(last_batch_payload)
-            if isinstance(existing.get("failure_codes"), list) and existing["failure_codes"]:
-                return None
-            result = existing
+            result = dict(last_batch_payload)
         else:
             result = {}
 
@@ -254,13 +251,43 @@ class WatchService:
         if not failure_contract:
             return None
 
-        result["failure_codes"] = failure_contract.get("failure_codes", [])
-        if "failure_guidance" not in result:
+        patched = False
+
+        batch_failure_codes = result.get("failure_codes")
+        if not (isinstance(batch_failure_codes, list) and batch_failure_codes):
+            result["failure_codes"] = failure_contract.get("failure_codes", [])
+            patched = True
+        batch_failure_guidance = result.get("failure_guidance")
+        if not (isinstance(batch_failure_guidance, dict) and batch_failure_guidance):
             result["failure_guidance"] = failure_contract.get("failure_guidance", {})
-        if "failed_reasons" not in result:
+            patched = True
+
+        failed_reasons = result.get("failed_reasons")
+        has_failed_reasons = False
+        if isinstance(failed_reasons, dict):
+            for raw_count in failed_reasons.values():
+                try:
+                    if int(raw_count) > 0:
+                        has_failed_reasons = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+        if not has_failed_reasons:
             result["failed_reasons"] = dict(self._total_failed_reasons)
-        if "failed" not in result:
+            patched = True
+
+        raw_failed = result.get("failed", result.get("error_count", 0))
+        try:
+            failed_count = int(raw_failed)
+        except (TypeError, ValueError):
+            failed_count = 0
+        if failed_count <= 0 and self._total_errors > 0:
             result["failed"] = self._total_errors
+            result["error_count"] = self._total_errors
+            patched = True
+
+        if not patched:
+            return None
         return result
 
     def run_forever(self, path: str) -> dict[str, object]:
