@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
 
+from gloggur.byte_spans import to_repo_relative_path
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router.backends import (
     run_exact_backend,
@@ -316,6 +317,7 @@ def _merge_backend_hits(
 def _pack_hits(
     hits: list[BackendHit],
     *,
+    repo_root: Path,
     constraints: SearchConstraints,
     config: SearchRouterConfig,
 ) -> tuple[ContextHit, ...]:
@@ -376,16 +378,19 @@ def _pack_hits(
         if len(snippet) > config.max_snippet_chars:
             snippet = snippet[: config.max_snippet_chars].rstrip() + " ..."
 
-        projected = total_chars + len(hit.path) + len(snippet)
+        relative_path = to_repo_relative_path(repo_root, hit.path)
+        projected = total_chars + len(relative_path) + len(snippet)
         if context_hits and projected > config.max_chars:
             break
         total_chars = projected
         context_hits.append(
             ContextHit(
-                path=hit.path,
+                path=relative_path,
                 span=ContextSpan(start_line=hit.start_line, end_line=hit.end_line),
                 snippet=snippet,
                 score=max(0.0, min(1.0, float(hit.raw_score))),
+                start_byte=hit.start_byte,
+                end_byte=hit.end_byte,
                 tags=tuple(sorted(set(hit.tags))),
             )
         )
@@ -479,72 +484,59 @@ class SearchRouter:
             )
         backend_names = self._resolve_backends(normalized_mode)
 
-        backend_results: list[BackendResult] = []
-        timeout_seconds = max((resolved_constraints.time_budget_ms or 1) / 1000.0, 0.1)
-        with ThreadPoolExecutor(max_workers=max(1, len(backend_names))) as executor:
-            futures = {}
-            for name in backend_names:
-                if name == "exact":
-                    futures[
-                        executor.submit(
-                            run_exact_backend,
-                            query=effective_query,
-                            hints=hints,
-                            repo_root=self.repo_root,
-                            constraints=resolved_constraints,
-                            config=self.config,
-                        )
-                    ] = name
-                elif name == "semantic":
-                    if self.searcher is None:
-                        backend_results.append(
-                            BackendResult(
-                                name="semantic",
-                                hits=(),
-                                timing_ms=0,
-                                error="semantic backend unavailable",
-                            )
-                        )
-                        continue
-                    futures[
-                        executor.submit(
-                            run_semantic_backend,
-                            query=effective_query,
-                            searcher=self.searcher,
-                            repo_root=self.repo_root,
-                            constraints=resolved_constraints,
-                            config=self.config,
-                        )
-                    ] = name
-                elif name == "symbol":
-                    if self.symbol_store is None:
-                        backend_results.append(
-                            BackendResult(
-                                name="symbol",
-                                hits=(),
-                                timing_ms=0,
-                                error="symbol backend unavailable",
-                            )
-                        )
-                        continue
-                    futures[
-                        executor.submit(
-                            run_symbol_backend,
-                            symbol_store=self.symbol_store,
-                            hints=hints,
-                            query=effective_query,
-                            repo_root=self.repo_root,
-                            constraints=resolved_constraints,
-                            config=self.config,
-                        )
-                    ] = name
+        def _run_backend(name: str) -> BackendResult:
+            if name == "exact":
+                return run_exact_backend(
+                    query=effective_query,
+                    hints=hints,
+                    repo_root=self.repo_root,
+                    constraints=resolved_constraints,
+                    config=self.config,
+                )
+            if name == "semantic":
+                if self.searcher is None:
+                    return BackendResult(
+                        name="semantic",
+                        hits=(),
+                        timing_ms=0,
+                        error="semantic backend unavailable",
+                    )
+                return run_semantic_backend(
+                    query=effective_query,
+                    searcher=self.searcher,
+                    repo_root=self.repo_root,
+                    constraints=resolved_constraints,
+                    config=self.config,
+                )
+            if self.symbol_store is None:
+                return BackendResult(
+                    name="symbol",
+                    hits=(),
+                    timing_ms=0,
+                    error="symbol backend unavailable",
+                )
+            return run_symbol_backend(
+                symbol_store=self.symbol_store,
+                hints=hints,
+                query=effective_query,
+                repo_root=self.repo_root,
+                constraints=resolved_constraints,
+                config=self.config,
+            )
 
-            try:
-                for future in as_completed(futures, timeout=timeout_seconds):
-                    backend_results.append(future.result())
-            except TimeoutError:
-                for future in futures:
-                    future.cancel()
+        backend_results: list[BackendResult] = []
+        if len(backend_names) == 1:
+            backend_results.append(_run_backend(backend_names[0]))
+        else:
+            timeout_seconds = max((resolved_constraints.time_budget_ms or 1) / 1000.0, 0.1)
+            with ThreadPoolExecutor(max_workers=len(backend_names)) as executor:
+                futures = {executor.submit(_run_backend, name): name for name in backend_names}
+                try:
+                    for future in as_completed(futures, timeout=timeout_seconds):
+                        backend_results.append(future.result())
+                except TimeoutError:
+                    for future in futures:
+                        future.cancel()
 
         enriched_results: list[BackendResult] = []
         for result in backend_results:
@@ -592,6 +584,7 @@ class SearchRouter:
 
         packed_hits = _pack_hits(
             selected_hits,
+            repo_root=self.repo_root,
             constraints=resolved_constraints,
             config=self.config,
         )

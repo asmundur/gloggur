@@ -158,8 +158,22 @@ Pytest defaults for this repo:
   less surrounding implementation detail per hit.
 - Symbol-backed hits can include `symbol_def` and `symbol_ref` tags; if `.gloggur/index/symbols.db`
   is missing, search still runs but symbol-tagged hits are absent until reindex.
+- Search hits now expose repo-relative `path` plus additive `start_byte` / `end_byte`
+  fields so agents can round-trip exact source text with `gloggur extract`.
 - Missing/corrupt symbol index stays non-fatal: use `--debug-router` and inspect
   `debug.backend_errors.symbol` for deterministic diagnostics.
+
+Search -> extract reference flow:
+
+```bash
+scripts/gloggur search "where is Foo defined" --json
+scripts/gloggur extract sample.py 0 42 --json
+```
+
+- `hits[].path` is repo-relative and safe to feed directly into `extract`.
+- `start_byte` is inclusive and `end_byte` is exclusive everywhere.
+- `extract` rejects absolute or escaping paths and does not require a fresh index if you
+  already have a valid path/span.
 
 Grounded retrieve -> validate -> emit/repair flow (recommended for agent outputs):
 

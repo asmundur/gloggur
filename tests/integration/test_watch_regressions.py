@@ -74,6 +74,7 @@ def test_watch_delete_removes_stale_search_hits(monkeypatch: pytest.MonkeyPatch)
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"legacy.py": source})
         target = repo / "legacy.py"
+        expected_target = target.relative_to(repo).as_posix()
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
         env = {
@@ -97,7 +98,7 @@ def test_watch_delete_removes_stale_search_hits(monkeypatch: pytest.MonkeyPatch)
         _assert_search_ready(before)
         before_results = before.get("results", [])
         assert isinstance(before_results, list) and before_results
-        assert any(item.get("file") == str(target) for item in before_results)
+        assert any(item.get("file") == expected_target for item in before_results)
 
         service = _build_watch_service(repo, cache_dir)
         target.unlink()
@@ -118,7 +119,7 @@ def test_watch_delete_removes_stale_search_hits(monkeypatch: pytest.MonkeyPatch)
         _assert_search_ready(after)
         after_results = after.get("results", [])
         assert isinstance(after_results, list)
-        assert all(item.get("file") != str(target) for item in after_results)
+        assert all(item.get("file") != expected_target for item in after_results)
 
 
 def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,6 +139,8 @@ def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -
         repo = fixtures.create_temp_repo({"module.py": old_source})
         old_path = repo / "module.py"
         new_path = repo / "module_renamed.py"
+        expected_old_path = old_path.relative_to(repo).as_posix()
+        expected_new_path = new_path.relative_to(repo).as_posix()
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
         env = {
@@ -155,7 +158,7 @@ def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -
         _assert_search_ready(before)
         before_results = before.get("results", [])
         assert isinstance(before_results, list) and before_results
-        assert any(item.get("file") == str(old_path) for item in before_results)
+        assert any(item.get("file") == expected_old_path for item in before_results)
 
         old_path.unlink()
         new_path.write_text(new_source, encoding="utf8")
@@ -175,7 +178,7 @@ def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -
         _assert_search_ready(old_query)
         old_results = old_query.get("results", [])
         assert isinstance(old_results, list)
-        assert all(item.get("file") != str(old_path) for item in old_results)
+        assert all(item.get("file") != expected_old_path for item in old_results)
 
         new_query = _invoke_json(
             runner,
@@ -185,7 +188,7 @@ def test_watch_rename_replaces_search_results(monkeypatch: pytest.MonkeyPatch) -
         _assert_search_ready(new_query)
         new_results = new_query.get("results", [])
         assert isinstance(new_results, list) and new_results
-        assert any(item.get("file") == str(new_path) for item in new_results)
+        assert any(item.get("file") == expected_new_path for item in new_results)
 
 
 def test_watch_rename_change_only_batch_prunes_ghost_old_path(
@@ -208,6 +211,8 @@ def test_watch_rename_change_only_batch_prunes_ghost_old_path(
         repo = fixtures.create_temp_repo({"module.py": old_source})
         old_path = repo / "module.py"
         new_path = repo / "module_renamed.py"
+        expected_old_path = old_path.relative_to(repo).as_posix()
+        expected_new_path = new_path.relative_to(repo).as_posix()
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
         env = {
@@ -225,7 +230,7 @@ def test_watch_rename_change_only_batch_prunes_ghost_old_path(
         _assert_search_ready(before)
         before_results = before.get("results", [])
         assert isinstance(before_results, list) and before_results
-        assert any(item.get("file") == str(old_path) for item in before_results)
+        assert any(item.get("file") == expected_old_path for item in before_results)
 
         old_path.rename(new_path)
         new_path.write_text(new_source, encoding="utf8")
@@ -246,7 +251,7 @@ def test_watch_rename_change_only_batch_prunes_ghost_old_path(
         _assert_search_ready(old_query)
         old_results = old_query.get("results", [])
         assert isinstance(old_results, list)
-        assert all(item.get("file") != str(old_path) for item in old_results)
+        assert all(item.get("file") != expected_old_path for item in old_results)
 
         new_query = _invoke_json(
             runner,
@@ -256,4 +261,4 @@ def test_watch_rename_change_only_batch_prunes_ghost_old_path(
         _assert_search_ready(new_query)
         new_results = new_query.get("results", [])
         assert isinstance(new_results, list) and new_results
-        assert any(item.get("file") == str(new_path) for item in new_results)
+        assert any(item.get("file") == expected_new_path for item in new_results)

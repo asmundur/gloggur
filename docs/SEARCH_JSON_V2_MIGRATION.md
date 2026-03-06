@@ -13,6 +13,8 @@
     {
       "path": "src/example.py",
       "span": { "start_line": 10, "end_line": 14 },
+      "start_byte": 128,
+      "end_byte": 246,
       "snippet": "...",
       "score": 0.91,
       "tags": ["literal_match"]
@@ -40,10 +42,18 @@ These keys are no longer emitted by the CLI.
 - `results[i].file` -> `hits[i].path`
 - `results[i].line` -> `hits[i].span.start_line`
 - `results[i].line_end` -> `hits[i].span.end_line`
+- `results[i].start_byte` -> `hits[i].start_byte`
+- `results[i].end_byte` -> `hits[i].end_byte`
 - `results[i].context` -> `hits[i].snippet`
 - `results[i].similarity_score` -> `hits[i].score`
 - `results[i].tags` -> `hits[i].tags` (includes symbol tags like `symbol_def`/`symbol_ref`)
 - `metadata.search_time_ms` -> `debug.timings.total_ms` (when `--debug-router` is set)
+
+`hits[i].path` is now repo-relative by contract, so a search hit can feed directly into:
+
+```bash
+gloggur extract src/example.py 128 246 --json
+```
 
 ## Behavioral contracts preserved
 
@@ -52,6 +62,7 @@ These keys are no longer emitted by the CLI.
 - bounded numeric scores (`0.0` to `1.0`)
 - stable non-zero failure codes for invalid options/runtime errors
 - fail-closed behavior when reindex is required
+- additive hit-level fields do not require a schema-version bump
 
 ## v1 flags removed from search
 

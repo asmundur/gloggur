@@ -29,6 +29,13 @@ import yaml
 from gloggur import __version__ as GLOGGUR_VERSION
 from gloggur.adapters.registry import AdapterResolutionError
 from gloggur.audit.docstring_audit import DocstringAuditReport, audit_docstrings
+from gloggur.byte_spans import (
+    LineByteSpanIndex,
+    RepoPathResolutionError,
+    discover_repo_root,
+    is_path_absolute,
+    resolve_repo_relative_path,
+)
 from gloggur.config import GloggurConfig
 from gloggur.coverage_importers import (
     CoverageImportError,
@@ -213,6 +220,19 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     ],
     "artifact_path_not_file": [
         "Set --artifact to a regular file path (not a directory).",
+    ],
+    "extract_path_invalid": [
+        "Pass a repo-relative file path under the active workspace root.",
+        "Do not use absolute paths or paths that escape with `..`.",
+    ],
+    "extract_file_missing": [
+        "Pass a repo-relative path to an existing file under the active workspace root.",
+    ],
+    "extract_byte_range_invalid": [
+        "Set byte bounds to non-negative integers with end_byte >= start_byte.",
+    ],
+    "extract_range_out_of_bounds": [
+        "Choose byte bounds within the file size reported on disk.",
     ],
     "artifact_archive_invalid": [
         "Artifact is not a readable tar.gz archive; rebuild and republish the artifact.",
@@ -2191,6 +2211,96 @@ def _restore_artifact_archive(
     }
 
 
+def _parse_extract_byte_value(raw_value: str, *, field_name: str) -> int:
+    """Parse one extract byte boundary with stable contract errors."""
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise CLIContractError(
+            f"{field_name} must be an integer",
+            error_code="extract_byte_range_invalid",
+        ) from exc
+    if value < 0:
+        raise CLIContractError(
+            f"{field_name} must be >= 0",
+            error_code="extract_byte_range_invalid",
+        )
+    return value
+
+
+def _extract_payload(path: str, start_byte_raw: str, end_byte_raw: str) -> dict[str, object]:
+    """Build the extract success payload or raise a stable contract error."""
+    repo_root = discover_repo_root()
+    start_byte = _parse_extract_byte_value(start_byte_raw, field_name="start_byte")
+    end_byte = _parse_extract_byte_value(end_byte_raw, field_name="end_byte")
+    if end_byte < start_byte:
+        raise CLIContractError(
+            "end_byte must be >= start_byte",
+            error_code="extract_byte_range_invalid",
+        )
+    try:
+        absolute_path = resolve_repo_relative_path(repo_root, path)
+    except RepoPathResolutionError as exc:
+        raise CLIContractError(
+            f"Invalid extract path: {path!r}",
+            error_code="extract_path_invalid",
+        ) from exc
+    if not absolute_path.exists() or not absolute_path.is_file():
+        raise CLIContractError(
+            f"Extract file does not exist: {path!r}",
+            error_code="extract_file_missing",
+        )
+    try:
+        raw_bytes = absolute_path.read_bytes()
+    except OSError as exc:
+        raise wrap_io_error(
+            exc,
+            operation="read extract source file",
+            path=str(absolute_path),
+        ) from exc
+    span_index = LineByteSpanIndex.from_bytes(raw_bytes)
+    if end_byte > span_index.total_bytes:
+        raise CLIContractError(
+            f"Extract byte range exceeds file bounds: {end_byte} > {span_index.total_bytes}",
+            error_code="extract_range_out_of_bounds",
+        )
+    relative_path = os.path.relpath(str(absolute_path), str(repo_root)).replace(os.sep, "/")
+    return {
+        "path": relative_path,
+        "start_byte": start_byte,
+        "end_byte": end_byte,
+        "text": span_index.extract_text(start_byte, end_byte),
+    }
+
+
+@cli.command()
+@click.argument("path")
+@click.argument("start_byte")
+@click.argument("end_byte")
+@click.option("--json", "as_json", is_flag=True, default=False)
+def extract(path: str, start_byte: str, end_byte: str, as_json: bool) -> None:
+    """Extract an exact raw-byte text slice from a repo-relative file path."""
+    try:
+        payload = _extract_payload(path, start_byte, end_byte)
+    except CLIContractError as exc:
+        if as_json:
+            _emit_json_error(exc.to_payload())
+        else:
+            click.echo(f"ERROR: {exc.error_code}")
+        raise click.exceptions.Exit(exc.exit_code) from exc
+    except StorageIOError as exc:
+        if as_json:
+            _emit_json_error(exc.to_payload())
+        else:
+            click.echo(format_io_error_message(exc), err=True)
+        raise click.exceptions.Exit(1) from exc
+
+    if as_json:
+        _emit(payload, as_json=True)
+        return
+    click.echo(str(payload["text"]), nl=False)
+
+
 def _build_failure_contract(
     failed_reasons: dict[str, int],
     *,
@@ -2579,6 +2689,29 @@ def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) 
     if all(Path(item) == common for item in normalized_paths):
         common = common.parent
     return common if str(common).strip() else fallback
+
+
+def _resolve_search_path_filter_for_routing(*, repo_root: Path, raw_path: str | None) -> str | None:
+    """Resolve a search path filter against the indexed repo for backend matching."""
+    if not isinstance(raw_path, str):
+        return None
+    candidate = raw_path.strip()
+    if not candidate:
+        return None
+    if is_path_absolute(candidate):
+        return os.path.abspath(candidate)
+    normalized = os.path.normpath(candidate.replace("\\", os.sep))
+    if normalized in {"", ".", ".."} or normalized.startswith(f"..{os.sep}"):
+        return candidate
+    repo_root_str = os.path.abspath(str(repo_root))
+    resolved = os.path.abspath(os.path.join(repo_root_str, normalized))
+    try:
+        within_root = os.path.commonpath([repo_root_str, resolved]) == repo_root_str
+    except ValueError:
+        within_root = False
+    if within_root:
+        return resolved
+    return candidate
 
 
 def _resolve_symbol_index_root(index_target: str) -> Path:
@@ -3089,10 +3222,14 @@ def search(
         symbol_store=symbol_store,
         config=router_config,
     )
+    routing_path_prefix = _resolve_search_path_filter_for_routing(
+        repo_root=router_repo_root,
+        raw_path=resolved_path_prefix,
+    )
     constraints = SearchConstraints(
         search_mode=normalized_search_mode,
         language=language,
-        path_prefix=resolved_path_prefix,
+        path_prefix=routing_path_prefix,
         max_files=max_files,
         max_snippets=resolved_max_snippets,
         time_budget_ms=time_budget_ms,

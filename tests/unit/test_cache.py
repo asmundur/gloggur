@@ -9,7 +9,7 @@ import pytest
 
 import gloggur.indexer.cache as cache_module
 from gloggur.indexer.cache import CACHE_SCHEMA_VERSION, CacheConfig, CacheManager
-from gloggur.models import FileMetadata, IndexMetadata, Signal, Symbol
+from gloggur.models import FileMetadata, IndexMetadata, Signal, Symbol, SymbolChunk
 
 
 def _sample_symbol(symbol_id: str = "sample:1:add") -> Symbol:
@@ -130,6 +130,31 @@ def test_cache_replace_file_index_keeps_metadata_for_empty_symbol_files() -> Non
     assert cache.count_symbols() == 0
 
 
+def test_cache_chunk_round_trip_preserves_byte_spans() -> None:
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+
+    chunk = SymbolChunk(
+        chunk_id="chunk-1",
+        symbol_id="symbol-1",
+        chunk_part_index=1,
+        chunk_part_total=1,
+        text="def add(a, b):\n    return a + b\n",
+        file_path="sample.py",
+        start_line=1,
+        end_line=2,
+        start_byte=0,
+        end_byte=32,
+        language="python",
+    )
+    cache.upsert_chunks([chunk])
+
+    stored = cache.list_chunks()
+    assert len(stored) == 1
+    assert stored[0].start_byte == 0
+    assert stored[0].end_byte == 32
+
+
 def test_cache_round_trip_structured_audit_reports_and_legacy_warning_reads() -> None:
     """Structured audit payloads should preserve score metadata without breaking warning reads."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -193,6 +218,95 @@ def test_cache_auto_resets_legacy_tables() -> None:
     cache = CacheManager(CacheConfig(cache_dir))
     assert cache.last_reset_reason is not None
     assert "legacy tables present" in cache.last_reset_reason
+    assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
+
+
+def test_cache_auto_resets_when_chunks_table_missing_byte_columns() -> None:
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    db_path = os.path.join(cache_dir, "index.db")
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                language TEXT,
+                content_hash TEXT NOT NULL,
+                last_indexed TEXT NOT NULL
+            );
+            CREATE TABLE symbols (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                fqname TEXT,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                container_id TEXT,
+                container_fqname TEXT,
+                signature TEXT,
+                docstring TEXT,
+                body_hash TEXT NOT NULL,
+                embedding_vector TEXT,
+                language TEXT,
+                repo_id TEXT,
+                commit_hash TEXT,
+                visibility TEXT,
+                exported INTEGER,
+                tokens_estimate INTEGER,
+                invariants TEXT,
+                calls TEXT,
+                covered_by TEXT,
+                is_serialization_boundary INTEGER NOT NULL DEFAULT 0,
+                implicit_contract TEXT,
+                signals TEXT,
+                attributes TEXT
+            );
+            CREATE TABLE chunks (
+                chunk_id TEXT PRIMARY KEY,
+                symbol_id TEXT NOT NULL,
+                chunk_part_index INTEGER NOT NULL,
+                chunk_part_total INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                tokens_estimate INTEGER,
+                language TEXT,
+                repo_id TEXT,
+                commit_hash TEXT,
+                embedding_vector TEXT
+            );
+            CREATE TABLE edges (
+                edge_id TEXT PRIMARY KEY,
+                edge_type TEXT NOT NULL,
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                from_kind TEXT NOT NULL,
+                to_kind TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                line INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                repo_id TEXT,
+                commit_hash TEXT,
+                text TEXT,
+                embedding_vector TEXT
+            );
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE audits (symbol_id TEXT PRIMARY KEY, warnings TEXT NOT NULL, file_path TEXT);
+            CREATE TABLE audit_files (
+                path TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                last_audited TEXT NOT NULL
+            );
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '6');
+            """
+        )
+
+    cache = CacheManager(CacheConfig(cache_dir))
+
+    assert cache.last_reset_reason is not None
+    assert "missing columns" in cache.last_reset_reason
     assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
 
 

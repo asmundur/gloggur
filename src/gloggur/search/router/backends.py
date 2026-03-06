@@ -8,6 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.types import BackendHit, BackendResult, QueryHints, SearchConstraints
@@ -17,6 +18,13 @@ from gloggur.symbol_index.store import SymbolIndexStore
 
 def _normalize_path(path: str) -> str:
     return path.replace("\\", "/").rstrip("/")
+
+
+def _ripgrep_env() -> dict[str, str]:
+    """Return a deterministic subprocess environment for ripgrep."""
+    env = dict(os.environ)
+    env.pop("RIPGREP_CONFIG_PATH", None)
+    return env
 
 
 def _path_variants(path: str, repo_root: Path) -> tuple[str, ...]:
@@ -165,7 +173,7 @@ def _load_snippet(
     if not absolute_path.is_absolute():
         absolute_path = repo_root / path
     try:
-        with absolute_path.open(encoding="utf8") as handle:
+        with absolute_path.open(encoding="utf8", errors="replace") as handle:
             lines = handle.readlines()
     except OSError:
         return ""
@@ -176,6 +184,188 @@ def _load_snippet(
     view_end = min(len(lines), safe_end + radius)
     snippet = "".join(lines[view_start - 1 : view_end]).strip()
     return _clip_text(snippet, max_chars)
+
+
+def _line_byte_span(
+    cache: dict[str, LineByteSpanIndex],
+    path: str,
+    *,
+    start_line: int,
+    end_line: int,
+) -> tuple[int, int] | None:
+    """Return the raw-byte span for a line-aligned source range."""
+    index = cache.get(path)
+    if index is None:
+        try:
+            raw_bytes = Path(path).read_bytes()
+        except OSError:
+            return None
+        index = LineByteSpanIndex.from_bytes(raw_bytes)
+        cache[path] = index
+    try:
+        return index.span_for_lines(start_line, end_line)
+    except ValueError:
+        return None
+
+
+def _iter_fallback_search_files(
+    *,
+    repo_root: Path,
+    search_target: str,
+    max_files: int | None,
+) -> tuple[str, ...]:
+    """Return deterministic file candidates for exact backend fallback scans."""
+    target = Path(search_target)
+    if not target.is_absolute():
+        target = repo_root / target
+    target = target.resolve()
+    if target.is_file():
+        return (str(target),)
+    if not target.exists() or not target.is_dir():
+        return ()
+    files: list[str] = []
+    for root, dirs, names in os.walk(target):
+        # Match ripgrep defaults: ignore hidden directories/files unless explicitly requested.
+        dirs[:] = [name for name in dirs if not name.startswith(".")]
+        dirs.sort()
+        names.sort()
+        for name in names:
+            if name.startswith("."):
+                continue
+            files.append(str(Path(root) / name))
+            if max_files is not None and max_files > 0 and len(files) >= max_files:
+                return tuple(files)
+    return tuple(files)
+
+
+def _compile_exact_matcher(pattern: str, constraints: SearchConstraints) -> re.Pattern[str] | None:
+    """Compile a Python matcher that approximates ripgrep option semantics."""
+    case_mode = (constraints.case_mode or "sensitive").strip().lower()
+    flags = 0
+    if case_mode == "ignore":
+        flags |= re.IGNORECASE
+    elif case_mode == "smart" and not any(char.isupper() for char in pattern):
+        flags |= re.IGNORECASE
+
+    if constraints.fixed_string:
+        expression = re.escape(pattern)
+    else:
+        expression = pattern
+    if constraints.word_match:
+        expression = rf"\b{expression}\b"
+
+    try:
+        return re.compile(expression, flags)
+    except re.error:
+        if constraints.fixed_string:
+            return None
+        escaped = re.escape(pattern)
+        if constraints.word_match:
+            escaped = rf"\b{escaped}\b"
+        return re.compile(escaped, flags)
+
+
+def _is_probably_binary(path: str) -> bool:
+    """Best-effort binary detector for fallback scans."""
+    try:
+        with Path(path).open("rb") as handle:
+            sample = handle.read(2048)
+    except OSError:
+        return True
+    return b"\x00" in sample
+
+
+def _run_exact_backend_fallback_scan(
+    *,
+    deduped_patterns: tuple[tuple[str, tuple[str, ...], float], ...],
+    hints: QueryHints,
+    repo_root: Path,
+    constraints: SearchConstraints,
+    config: SearchRouterConfig,
+    search_target: str,
+    top_k: int,
+    deadline: float,
+) -> tuple[BackendHit, ...]:
+    """Fallback exact scan used when ripgrep invocation is unavailable."""
+    compiled_patterns: list[tuple[str, re.Pattern[str], tuple[str, ...], float]] = []
+    for pattern, tags, base_score in deduped_patterns:
+        matcher = _compile_exact_matcher(pattern, constraints)
+        if matcher is None:
+            continue
+        compiled_patterns.append((pattern, matcher, tags, base_score))
+    if not compiled_patterns:
+        return ()
+
+    file_candidates = _iter_fallback_search_files(
+        repo_root=repo_root,
+        search_target=search_target,
+        max_files=constraints.max_files,
+    )
+    hit_map: dict[tuple[str, int, int], BackendHit] = {}
+    byte_span_cache: dict[str, LineByteSpanIndex] = {}
+    for absolute_path in file_candidates:
+        if len(hit_map) >= top_k * 3:
+            break
+        if deadline - time.perf_counter() < 0.02:
+            break
+        if not _path_allowed(
+            absolute_path,
+            constraints=constraints,
+            config=config,
+            repo_root=repo_root,
+        ):
+            continue
+        if _is_probably_binary(absolute_path):
+            continue
+        try:
+            with Path(absolute_path).open(encoding="utf8", errors="replace") as handle:
+                lines = handle.readlines()
+        except OSError:
+            continue
+        for line_number, source_line in enumerate(lines, start=1):
+            if len(hit_map) >= top_k * 3:
+                break
+            for pattern, matcher, tags, base_score in compiled_patterns:
+                if not matcher.search(source_line):
+                    continue
+                key = (absolute_path, line_number, line_number)
+                snippet = _load_snippet(
+                    repo_root,
+                    absolute_path,
+                    start_line=line_number,
+                    end_line=line_number,
+                    radius=2,
+                    max_chars=config.max_snippet_chars,
+                )
+                bonus = 0.05 if pattern in hints.literals else 0.0
+                score = max(0.0, min(1.0, base_score + bonus))
+                existing = hit_map.get(key)
+                byte_span = _line_byte_span(
+                    byte_span_cache,
+                    absolute_path,
+                    start_line=line_number,
+                    end_line=line_number,
+                )
+                candidate = BackendHit(
+                    backend="exact",
+                    path=absolute_path,
+                    start_line=line_number,
+                    end_line=line_number,
+                    snippet=snippet,
+                    raw_score=score,
+                    start_byte=byte_span[0] if byte_span is not None else None,
+                    end_byte=byte_span[1] if byte_span is not None else None,
+                    tags=tags,
+                )
+                if existing is None or candidate.raw_score > existing.raw_score:
+                    hit_map[key] = candidate
+                break
+    return tuple(
+        sorted(
+            hit_map.values(),
+            key=lambda item: (-item.raw_score, item.path, item.start_line),
+        )[:top_k]
+    )
 
 
 def run_exact_backend(
@@ -209,10 +399,11 @@ def run_exact_backend(
     top_k = max(1, constraints.max_snippets or config.exact_top_k)
     cmd_fragments: list[str] = []
     hit_map: dict[tuple[str, int, int], BackendHit] = {}
+    byte_span_cache: dict[str, LineByteSpanIndex] = {}
 
     time_budget_ms = constraints.time_budget_ms or config.default_time_budget_ms
     time_budget_seconds = max(time_budget_ms / 1000.0, 0.1)
-    per_pattern_timeout = max(0.05, min(time_budget_seconds, 0.35))
+    deadline = started + time_budget_seconds
 
     search_target = "."
     if constraints.path_prefix and not constraints.path_filters:
@@ -223,8 +414,12 @@ def run_exact_backend(
             else:
                 search_target = str(Path(constraints.path_prefix))
 
+    ripgrep_unavailable = False
     for pattern, tags, base_score in deduped_patterns:
         if len(hit_map) >= top_k * 3:
+            break
+        remaining_time = deadline - time.perf_counter()
+        if remaining_time < 0.05:
             break
         cmd = [
             "rg",
@@ -261,10 +456,14 @@ def run_exact_backend(
                 capture_output=True,
                 text=True,
                 cwd=str(repo_root),
-                timeout=per_pattern_timeout,
+                timeout=remaining_time,
+                env=_ripgrep_env(),
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
             continue
+        except OSError:
+            ripgrep_unavailable = True
+            break
 
         if completed.returncode not in (0, 1):
             continue
@@ -310,6 +509,12 @@ def run_exact_backend(
             bonus = 0.05 if pattern in hints.literals else 0.0
             score = max(0.0, min(1.0, base_score + bonus))
             existing = hit_map.get(key)
+            byte_span = _line_byte_span(
+                byte_span_cache,
+                absolute_path,
+                start_line=line_number,
+                end_line=line_number,
+            )
             candidate = BackendHit(
                 backend="exact",
                 path=absolute_path,
@@ -317,10 +522,32 @@ def run_exact_backend(
                 end_line=line_number,
                 snippet=snippet,
                 raw_score=score,
+                start_byte=byte_span[0] if byte_span is not None else None,
+                end_byte=byte_span[1] if byte_span is not None else None,
                 tags=tags,
             )
             if existing is None or candidate.raw_score > existing.raw_score:
                 hit_map[key] = candidate
+
+    if ripgrep_unavailable and not hit_map:
+        cmd_fragments.append("python_fallback_exact_scan")
+        fallback_hits = _run_exact_backend_fallback_scan(
+            deduped_patterns=tuple(deduped_patterns),
+            hints=hints,
+            repo_root=repo_root,
+            constraints=constraints,
+            config=config,
+            search_target=search_target,
+            top_k=top_k,
+            deadline=deadline,
+        )
+        if fallback_hits:
+            return BackendResult(
+                name="exact",
+                hits=fallback_hits,
+                timing_ms=int((time.perf_counter() - started) * 1000),
+                commands=tuple(cmd_fragments),
+            )
 
     hits = tuple(
         sorted(
@@ -417,6 +644,12 @@ def run_semantic_backend(
                 end_line=end_line,
                 snippet=snippet,
                 raw_score=score,
+                start_byte=(
+                    int(item.get("start_byte")) if isinstance(item.get("start_byte"), int) else None
+                ),
+                end_byte=(
+                    int(item.get("end_byte")) if isinstance(item.get("end_byte"), int) else None
+                ),
                 tags=tags,
             )
         )
@@ -511,11 +744,12 @@ def run_symbol_backend(
 
     top_k = max(1, constraints.max_snippets or config.symbol_top_k)
     if not symbol_store.available:
+        reason = symbol_store.unavailability_reason or "missing or unreadable symbols.db"
         return BackendResult(
             name="symbol",
             hits=(),
             timing_ms=int((time.perf_counter() - started) * 1000),
-            error="symbol index unavailable: missing or unreadable symbols.db",
+            error=f"symbol index unavailable: {reason}",
             commands=("symbol index lookup",),
         )
     try:
@@ -605,8 +839,8 @@ def run_symbol_backend(
         snippet = _load_snippet(
             repo_root,
             path,
-            start_line=occurrence.line,
-            end_line=occurrence.line,
+            start_line=occurrence.start_line,
+            end_line=occurrence.end_line,
             radius=2,
             max_chars=config.max_snippet_chars,
         )
@@ -615,10 +849,12 @@ def run_symbol_backend(
             BackendHit(
                 backend="symbol",
                 path=path,
-                start_line=occurrence.line,
-                end_line=occurrence.line,
+                start_line=occurrence.start_line,
+                end_line=occurrence.end_line,
                 snippet=snippet,
                 raw_score=score,
+                start_byte=occurrence.start_byte,
+                end_byte=occurrence.end_byte,
                 tags=tags,
             )
         )

@@ -116,11 +116,21 @@ Commands emit JSON structures that are easy to consume programmatically.  Search
 * `summary` – optional summary of top matches.
 * `hits[]` – list of candidate chunks with fields:
 
-  * `chunk_id`, `symbol_id`, `symbol`, `fqname`, `kind`.
-  * `file`, `line`, `line_end`, `chunk_part_index`, `chunk_part_total`.
-  * `snippet` or `chunk_text` and surrounding `context`.
-  * `score` and `tags` (`symbol_def`/`symbol_ref`).
+  * `path` – repo-relative path suitable for `gloggur extract`.
+  * `span.start_line` / `span.end_line` – inclusive logical line span.
+  * `start_byte` / `end_byte` – raw file byte offsets (`end_byte` exclusive).
+  * `snippet`, `score`, and `tags` (`literal_match`, `semantic_match`, `symbol_def`, `symbol_ref`).
 * `debug` – when `--debug-router` is provided, includes routing decisions, candidate counts and backend errors.
+
+Byte-range extraction is available without a fresh index once you already have a hit path/span:
+
+```bash
+gloggur search "Foo" --json
+gloggur extract sample.py 0 42
+gloggur extract sample.py 0 42 --json
+```
+
+`extract` requires repo-relative paths under the active workspace root and reads exact raw bytes before decoding with UTF-8 replacement.
 
 Graph commands return `edge_id`, `edge_type`, `from_id`, `to_id`, `file_path`, `line` and `confidence`.  Inspect commands return audit findings per symbol with categories such as missing docstring, parameter mismatch and summary quality.
 

@@ -37,11 +37,13 @@ class ContextHit:
     span: ContextSpan
     snippet: str
     score: float
+    start_byte: int | None = None
+    end_byte: int | None = None
     tags: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         """Serialize hit to JSON-friendly payload."""
-        return {
+        payload: dict[str, object] = {
             "path": self.path,
             "span": {
                 "start_line": self.span.start_line,
@@ -51,6 +53,11 @@ class ContextHit:
             "score": self.score,
             "tags": list(self.tags),
         }
+        if self.start_byte is not None:
+            payload["start_byte"] = self.start_byte
+        if self.end_byte is not None:
+            payload["end_byte"] = self.end_byte
+        return payload
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,8 @@ class BackendHit:
     end_line: int
     snippet: str
     raw_score: float
+    start_byte: int | None = None
+    end_byte: int | None = None
     tags: tuple[str, ...] = ()
 
 

@@ -379,6 +379,8 @@ class MetadataStore:
             file_path=row["file_path"],
             start_line=int(row["start_line"]),
             end_line=int(row["end_line"]),
+            start_byte=int(row["start_byte"]) if row["start_byte"] is not None else None,
+            end_byte=int(row["end_byte"]) if row["end_byte"] is not None else None,
             tokens_estimate=(
                 int(row["tokens_estimate"]) if row["tokens_estimate"] is not None else None
             ),

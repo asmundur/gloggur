@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.search.router.backends import run_symbol_backend
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
@@ -19,6 +20,7 @@ def _build_symbol_store(tmp_path):
         "    return Foo() + Foo()\n",
         encoding="utf8",
     )
+    span_index = LineByteSpanIndex.from_bytes(file_path.read_bytes())
     store = SymbolIndexStore(SymbolIndexStoreConfig(repo_root=repo))
     store.replace_file_occurrences(
         indexed_file=IndexedFile(
@@ -32,7 +34,10 @@ def _build_symbol_store(tmp_path):
                 symbol="Foo",
                 kind="def",
                 path=str(file_path),
-                line=1,
+                start_line=1,
+                end_line=2,
+                start_byte=span_index.span_for_lines(1, 2)[0],
+                end_byte=span_index.span_for_lines(1, 2)[1],
                 language="python",
                 signature="def Foo() -> int:",
             ),
@@ -40,14 +45,20 @@ def _build_symbol_store(tmp_path):
                 symbol="Foo",
                 kind="ref",
                 path=str(file_path),
-                line=5,
+                start_line=5,
+                end_line=5,
+                start_byte=span_index.span_for_lines(5, 5)[0],
+                end_byte=span_index.span_for_lines(5, 5)[1],
                 language="python",
             ),
             SymbolOccurrence(
                 symbol="Foo",
                 kind="ref",
                 path=str(file_path),
-                line=5,
+                start_line=5,
+                end_line=5,
+                start_byte=span_index.span_for_lines(5, 5)[0],
+                end_byte=span_index.span_for_lines(5, 5)[1],
                 language="python",
             ),
         ],
@@ -102,6 +113,8 @@ def test_symbol_backend_emits_def_and_ref_tags(tmp_path) -> None:
     tag_set = {tag for hit in result.hits for tag in hit.tags}
     assert "symbol_def" in tag_set
     assert "symbol_ref" in tag_set
+    assert all(hit.start_byte is not None for hit in result.hits)
+    assert all(hit.end_byte is not None for hit in result.hits)
 
 
 def test_symbol_backend_reports_error_when_symbol_index_missing(tmp_path) -> None:

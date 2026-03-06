@@ -15,10 +15,18 @@ class SymbolOccurrence:
     symbol: str
     kind: str
     path: str
-    line: int
+    start_line: int
+    end_line: int
+    start_byte: int | None = None
+    end_byte: int | None = None
     language: str | None = None
     container: str | None = None
     signature: str | None = None
+
+    @property
+    def line(self) -> int:
+        """Backward-compatible alias for the occurrence start line."""
+        return self.start_line
 
 
 @dataclass(frozen=True)

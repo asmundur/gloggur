@@ -72,6 +72,8 @@ class SymbolChunk(BaseModel):
     file_path: str
     start_line: int
     end_line: int
+    start_byte: int | None = None
+    end_byte: int | None = None
     tokens_estimate: int | None = None
     language: str | None = None
     repo_id: str | None = None

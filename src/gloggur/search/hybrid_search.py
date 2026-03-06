@@ -743,6 +743,8 @@ class HybridSearch:
             "file": symbol.file_path,
             "line": effective_chunk.start_line,
             "line_end": effective_chunk.end_line,
+            "start_byte": effective_chunk.start_byte,
+            "end_byte": effective_chunk.end_byte,
             "signature": symbol.signature,
             "docstring": symbol.docstring,
             "similarity_score": similarity_score,

@@ -132,11 +132,13 @@ def test_smoke_search_filters() -> None:
             "snippet",
             "score",
             "tags",
+            "start_byte",
+            "end_byte",
         }
         for item in results:
             assert required.issubset(item)
 
-        expected_file = str(repo / "search_fixture.py")
+        expected_file = "search_fixture.py"
         filtered = _invoke_json(
             runner,
             [

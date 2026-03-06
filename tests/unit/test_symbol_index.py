@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+from contextlib import closing
 
+from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.config import GloggurConfig
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.symbol_index.indexer import SymbolIndexer
@@ -120,3 +123,81 @@ def test_symbol_index_defs_refs_shape_and_dedup(tmp_path) -> None:
     assert any(item.symbol == "alpha" for item in defs)
     tuples = {(item.symbol, item.path, item.line) for item in refs}
     assert len(tuples) == len(refs)
+
+    span_index = LineByteSpanIndex.from_bytes(path.read_bytes())
+    alpha_def = next(item for item in defs if item.symbol == "alpha")
+    assert (alpha_def.start_byte, alpha_def.end_byte) == span_index.span_for_lines(1, 2)
+    alpha_ref = next(item for item in refs if item.symbol == "alpha")
+    assert (alpha_ref.start_byte, alpha_ref.end_byte) == span_index.span_for_lines(4, 4)
+
+
+def test_symbol_index_store_rebuilds_old_schema_when_writable(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db_path = repo / ".gloggur" / "index" / "symbols.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE occurrences (
+                symbol TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                line INTEGER NOT NULL
+            );
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                language TEXT,
+                last_indexed TEXT NOT NULL
+            );
+            """
+        )
+
+    store = SymbolIndexStore(SymbolIndexStoreConfig(repo_root=repo))
+
+    assert store.available is True
+    assert store.last_reset_reason is not None
+    assert (
+        "required tables missing" in store.last_reset_reason
+        or "missing columns" in store.last_reset_reason
+    )
+    assert store.list_occurrences() == []
+
+
+def test_symbol_index_store_marks_old_schema_unavailable_without_rebuild(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db_path = repo / ".gloggur" / "index" / "symbols.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE occurrences (
+                symbol TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                line INTEGER NOT NULL
+            );
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                language TEXT,
+                last_indexed TEXT NOT NULL
+            );
+            """
+        )
+
+    store = SymbolIndexStore(
+        SymbolIndexStoreConfig(repo_root=repo),
+        create_if_missing=False,
+    )
+
+    assert store.available is False
+    assert store.unavailability_reason is not None
+    assert (
+        "required tables missing" in store.unavailability_reason
+        or "missing columns" in store.unavailability_reason
+    )

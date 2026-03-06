@@ -42,6 +42,7 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     target = repo / "sample.py"
+    expected_target = target.relative_to(repo).as_posix()
     target.write_text(
         "def watch_target() -> str:\n"
         '    """before watch lifecycle update phrase"""\n'
@@ -134,7 +135,7 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
             last_search_payload = search_payload
             results = search_payload.get("results", [])
             assert isinstance(results, list)
-            if any(item.get("file") == str(target) for item in results):
+            if any(item.get("file") == expected_target for item in results):
                 saw_updated_search_result = True
                 break
             time.sleep(0.1)
@@ -153,7 +154,7 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
         assert metadata.get("needs_reindex") is not True
         results = search_payload.get("results", [])
         assert isinstance(results, list)
-        assert any(item.get("file") == str(target) for item in results)
+        assert any(item.get("file") == expected_target for item in results)
     finally:
         stopped = _run_cli(
             ["watch", "stop", "--config", str(config_path), "--json"],

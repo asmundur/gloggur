@@ -527,8 +527,12 @@ class SmokeHarness:
                 detail="Search returned no results for smoke query.",
                 context={"payload": payload},
             )
-        expected_file = str(self.repo_dir / self._watch_target)
-        if not any(str(item.get("path", "")) == expected_file for item in results if isinstance(item, dict)):
+        expected_file = Path(self._watch_target).as_posix()
+        if not any(
+            str(item.get("path", "")).replace("\\", "/") == expected_file
+            for item in results
+            if isinstance(item, dict)
+        ):
             raise StageFailure(
                 code=spec.failure_code,
                 remediation=spec.remediation,

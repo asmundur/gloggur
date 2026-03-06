@@ -38,6 +38,8 @@ def attach_legacy_search_contract(payload: dict[str, object]) -> dict[str, objec
                 "file": item.get("path"),
                 "line": span_dict.get("start_line"),
                 "line_end": span_dict.get("end_line"),
+                "start_byte": item.get("start_byte"),
+                "end_byte": item.get("end_byte"),
                 "context": item.get("snippet"),
                 "similarity_score": item.get("score"),
                 "ranking_score": item.get("score"),

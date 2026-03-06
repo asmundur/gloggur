@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.config import GloggurConfig
 from gloggur.models import Symbol
 from gloggur.parsers.registry import ParserRegistry
@@ -125,9 +126,17 @@ class SymbolIndexer:
                 continue
 
             try:
-                with open(file_path, encoding="utf8") as handle:
-                    source = handle.read()
-            except (UnicodeDecodeError, OSError) as exc:
+                with open(file_path, "rb") as handle:
+                    raw_source = handle.read()
+            except OSError as exc:
+                result.add_failure(
+                    "symbol_index_read_error",
+                    f"{file_path}: {type(exc).__name__}: {exc}",
+                )
+                continue
+            try:
+                source = raw_source.decode("utf8")
+            except UnicodeDecodeError as exc:
                 result.add_failure(
                     "symbol_index_read_error",
                     f"{file_path}: {type(exc).__name__}: {exc}",
@@ -135,6 +144,7 @@ class SymbolIndexer:
                 continue
 
             content_hash = self._hash_content(source)
+            span_index = LineByteSpanIndex.from_bytes(raw_source)
             parser_entry = self.parser_registry.get_parser_for_path(file_path)
             language = parser_entry.language if parser_entry else None
             if previous is not None and previous.content_hash == content_hash:
@@ -162,12 +172,19 @@ class SymbolIndexer:
                     )
                     continue
                 for symbol in symbols:
+                    start_byte, end_byte = span_index.span_for_lines(
+                        symbol.start_line,
+                        symbol.end_line,
+                    )
                     definitions.append(
                         SymbolOccurrence(
                             symbol=symbol.name,
                             kind="def",
                             path=file_path,
-                            line=symbol.start_line,
+                            start_line=symbol.start_line,
+                            end_line=symbol.end_line,
+                            start_byte=start_byte,
+                            end_byte=end_byte,
                             language=symbol.language or language,
                             container=symbol.container_fqname,
                             signature=symbol.signature,
@@ -179,6 +196,7 @@ class SymbolIndexer:
                 path=file_path,
                 language=language,
                 definitions=symbols,
+                span_index=span_index,
             )
             occurrences = definitions + references
             try:
@@ -246,6 +264,7 @@ class SymbolIndexer:
         path: str,
         language: str | None,
         definitions: list[Symbol],
+        span_index: LineByteSpanIndex,
     ) -> list[SymbolOccurrence]:
         definition_lines: dict[int, set[str]] = {}
         for symbol in definitions:
@@ -267,12 +286,16 @@ class SymbolIndexer:
                 if key in seen:
                     continue
                 seen.add(key)
+                start_byte, end_byte = span_index.span_for_lines(line_number, line_number)
                 refs.append(
                     SymbolOccurrence(
                         symbol=token,
                         kind="ref",
                         path=path,
-                        line=line_number,
+                        start_line=line_number,
+                        end_line=line_number,
+                        start_byte=start_byte,
+                        end_byte=end_byte,
                         language=language,
                         container=None,
                         signature=None,

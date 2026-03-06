@@ -56,6 +56,26 @@ Fields:
   - Meaning: deprecated `GLOGGUR_LOCAL_FALLBACK` env is set to a non-empty value.
   - Retryability: retry after removing the legacy env var.
   - Operator action: unset `GLOGGUR_LOCAL_FALLBACK`; use `GLOGGUR_EMBEDDING_PROVIDER=test` for deterministic test-only embeddings.
+- `extract_path_invalid`
+  - Command(s): `extract`.
+  - Meaning: the requested path was absolute, empty, or escaped the active workspace root.
+  - Retryability: retry after passing a repo-relative path.
+  - Operator action: pass a repo-relative file path under the active workspace root.
+- `extract_file_missing`
+  - Command(s): `extract`.
+  - Meaning: the requested repo-relative file path does not exist or is not a file.
+  - Retryability: retry after fixing the path.
+  - Operator action: pass an existing repo-relative file path.
+- `extract_byte_range_invalid`
+  - Command(s): `extract`.
+  - Meaning: `start_byte`/`end_byte` were not valid non-negative integers or `end_byte < start_byte`.
+  - Retryability: retry after fixing the bounds.
+  - Operator action: use non-negative integer offsets with `end_byte >= start_byte`.
+- `extract_range_out_of_bounds`
+  - Command(s): `extract`.
+  - Meaning: the requested byte span exceeded the file length.
+  - Retryability: retry after choosing an in-bounds span.
+  - Operator action: choose offsets within the target file size.
 - `search_top_k_invalid`
   - Command(s): `search`.
   - Meaning: `--top-k` is less than 1.

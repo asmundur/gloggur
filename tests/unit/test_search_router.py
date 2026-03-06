@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,10 @@ def test_extract_query_hints_keeps_short_quoted_identifiers() -> None:
     assert "id" in hints.identifier_tokens
 
 
-def test_search_router_auto_prefers_exact_on_quality_tie(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_search_router_auto_prefers_exact_on_quality_tie(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     exact_result = BackendResult(
         name="exact",
         hits=(
@@ -59,12 +63,18 @@ def test_search_router_auto_prefers_exact_on_quality_tie(monkeypatch: pytest.Mon
         timing_ms=10,
     )
 
-    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", lambda **_kwargs: exact_result)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: exact_result,
+    )
     monkeypatch.setattr(
         "gloggur.search.router.engine.run_semantic_backend",
         lambda **_kwargs: semantic_result,
     )
-    monkeypatch.setattr("gloggur.search.router.engine._compute_quality", lambda *_args, **_kwargs: 0.9)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda *_args, **_kwargs: 0.9,
+    )
 
     router = SearchRouter(
         repo_root=tmp_path,
@@ -114,12 +124,18 @@ def test_search_router_hybrid_merges_when_threshold_not_met(
         timing_ms=13,
     )
 
-    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", lambda **_kwargs: exact_result)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: exact_result,
+    )
     monkeypatch.setattr(
         "gloggur.search.router.engine.run_semantic_backend",
         lambda **_kwargs: semantic_result,
     )
-    monkeypatch.setattr("gloggur.search.router.engine._compute_quality", lambda *_args, **_kwargs: 0.1)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda *_args, **_kwargs: 0.1,
+    )
 
     router = SearchRouter(
         repo_root=tmp_path,
@@ -163,8 +179,14 @@ def test_search_router_output_is_deterministic_for_same_input(
         ),
         timing_ms=10,
     )
-    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", lambda **_kwargs: exact_result)
-    monkeypatch.setattr("gloggur.search.router.engine._compute_quality", lambda *_args, **_kwargs: 0.95)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: exact_result,
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda *_args, **_kwargs: 0.95,
+    )
 
     router = SearchRouter(
         repo_root=tmp_path,
@@ -177,6 +199,45 @@ def test_search_router_output_is_deterministic_for_same_input(
     pack_b = router.search(query="stable ordering", constraints=constraints, mode="auto")
 
     assert [hit.to_dict() for hit in pack_a.hits] == [hit.to_dict() for hit in pack_b.hits]
+
+
+def test_search_router_forced_exact_bypasses_threadpool_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    exact_result = BackendResult(
+        name="exact",
+        hits=(
+            BackendHit(
+                backend="exact",
+                path="src/slow.py",
+                start_line=4,
+                end_line=4,
+                snippet="def caller(): pass",
+                raw_score=0.9,
+                tags=("literal_match",),
+            ),
+        ),
+        timing_ms=200,
+    )
+
+    def _slow_exact_backend(**_kwargs):
+        time.sleep(0.2)
+        return exact_result
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _slow_exact_backend)
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact",), default_time_budget_ms=50),
+    )
+    pack = router.search(query="caller", mode="exact")
+
+    assert pack.summary["strategy"] == "exact"
+    assert pack.hits
+    assert pack.hits[0].path == "src/slow.py"
 
 
 def test_search_router_keeps_quoted_short_grep_pattern_for_symbol_hints(

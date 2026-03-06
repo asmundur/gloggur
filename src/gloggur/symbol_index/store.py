@@ -14,6 +14,25 @@ SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 SQLITE_JOURNAL_MODE = "WAL"
 SQLITE_SYNCHRONOUS = "NORMAL"
+SCHEMA_VERSION_KEY = "schema_version"
+SYMBOL_INDEX_SCHEMA_VERSION = "2"
+REQUIRED_TABLES = {"occurrences", "files", "meta"}
+REQUIRED_COLUMNS = {
+    "occurrences": {
+        "symbol",
+        "kind",
+        "path",
+        "start_line",
+        "end_line",
+        "start_byte",
+        "end_byte",
+        "language",
+        "container",
+        "signature",
+    },
+    "files": {"path", "content_hash", "mtime_ns", "language", "last_indexed"},
+    "meta": {"key", "value"},
+}
 
 
 @dataclass(frozen=True)
@@ -32,12 +51,23 @@ class SymbolIndexStore:
         self.config = config
         self._create_if_missing = create_if_missing
         self._available = True
+        self._unavailability_reason: str | None = None
+        self.last_reset_reason: str | None = None
         db_path = self.config.db_path
         if not create_if_missing and not db_path.exists():
             self._available = False
+            self._unavailability_reason = "missing or unreadable symbols.db"
             return
-        if create_if_missing:
-            db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        schema_problem = self._schema_problem() if db_path.exists() else None
+        if schema_problem:
+            if create_if_missing:
+                self._reset_database(schema_problem)
+            else:
+                self._available = False
+                self._unavailability_reason = schema_problem
+                return
+        if create_if_missing or db_path.exists():
             self._init_db()
 
     @property
@@ -47,6 +77,10 @@ class SymbolIndexStore:
     @property
     def available(self) -> bool:
         return self._available and self.config.db_path.exists()
+
+    @property
+    def unavailability_reason(self) -> str | None:
+        return self._unavailability_reason
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -76,7 +110,10 @@ class SymbolIndexStore:
                     symbol TEXT NOT NULL,
                     kind TEXT NOT NULL,
                     path TEXT NOT NULL,
-                    line INTEGER NOT NULL,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    start_byte INTEGER NOT NULL,
+                    end_byte INTEGER NOT NULL,
                     language TEXT,
                     container TEXT,
                     signature TEXT
@@ -88,11 +125,55 @@ class SymbolIndexStore:
                     language TEXT,
                     last_indexed TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_occ_symbol_kind ON occurrences (symbol, kind);
                 CREATE INDEX IF NOT EXISTS idx_occ_path ON occurrences (path);
-                CREATE INDEX IF NOT EXISTS idx_occ_path_line ON occurrences (path, line);
+                CREATE INDEX IF NOT EXISTS idx_occ_path_line ON occurrences (path, start_line);
                 CREATE INDEX IF NOT EXISTS idx_occ_kind ON occurrences (kind);
                 """)
+            conn.execute(
+                """
+                INSERT INTO meta (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (SCHEMA_VERSION_KEY, SYMBOL_INDEX_SCHEMA_VERSION),
+            )
+
+    def _schema_problem(self) -> str | None:
+        try:
+            with self._connect() as conn:
+                existing_tables = self._list_tables(conn)
+                missing_tables = sorted(REQUIRED_TABLES - existing_tables)
+                if missing_tables:
+                    return f"required tables missing ({', '.join(missing_tables)})"
+                for table, expected_columns in REQUIRED_COLUMNS.items():
+                    existing_columns = self._list_columns(conn, table)
+                    missing_columns = sorted(expected_columns - existing_columns)
+                    if missing_columns:
+                        return f"table '{table}' missing columns ({', '.join(missing_columns)})"
+                version = self._read_meta_value(conn, SCHEMA_VERSION_KEY)
+                if version != SYMBOL_INDEX_SCHEMA_VERSION:
+                    found = version if version is not None else "none"
+                    return (
+                        "schema version mismatch "
+                        f"(found {found}, expected {SYMBOL_INDEX_SCHEMA_VERSION})"
+                    )
+        except sqlite3.DatabaseError as exc:
+            return f"sqlite open/integrity error: {exc}"
+        return None
+
+    def _reset_database(self, reason: str) -> None:
+        self.last_reset_reason = reason
+        self._delete_database_artifacts()
+
+    def _delete_database_artifacts(self) -> None:
+        db_path = self.config.db_path
+        for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+            if path.exists():
+                path.unlink()
 
     def get_file(self, path: str) -> IndexedFile | None:
         if not self.available:
@@ -159,7 +240,10 @@ class SymbolIndexStore:
                 item.symbol,
                 item.kind,
                 item.path,
-                item.line,
+                item.start_line,
+                item.end_line,
+                item.start_byte,
+                item.end_byte,
                 item.language,
                 item.container,
                 item.signature,
@@ -172,9 +256,10 @@ class SymbolIndexStore:
                 conn.executemany(
                     """
                     INSERT INTO occurrences (
-                        symbol, kind, path, line, language, container, signature
+                        symbol, kind, path, start_line, end_line, start_byte, end_byte,
+                        language, container, signature
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows,
                 )
@@ -230,7 +315,8 @@ class SymbolIndexStore:
         if not self.available:
             return []
         query = (
-            "SELECT symbol, kind, path, line, language, container, signature "
+            "SELECT symbol, kind, path, start_line, end_line, start_byte, end_byte, "
+            "language, container, signature "
             "FROM occurrences WHERE 1=1"
         )
         params: list[object] = []
@@ -256,7 +342,7 @@ class SymbolIndexStore:
             else:
                 query += " OR ".join(path_clauses)
             query += ")"
-        query += " ORDER BY path, line, symbol, kind"
+        query += " ORDER BY path, start_line, end_line, symbol, kind"
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [
@@ -264,7 +350,10 @@ class SymbolIndexStore:
                 symbol=str(row["symbol"]),
                 kind=str(row["kind"]),
                 path=str(row["path"]),
-                line=int(row["line"]),
+                start_line=int(row["start_line"]),
+                end_line=int(row["end_line"]),
+                start_byte=int(row["start_byte"]) if row["start_byte"] is not None else None,
+                end_byte=int(row["end_byte"]) if row["end_byte"] is not None else None,
                 language=str(row["language"]) if row["language"] is not None else None,
                 container=str(row["container"]) if row["container"] is not None else None,
                 signature=str(row["signature"]) if row["signature"] is not None else None,
@@ -275,3 +364,24 @@ class SymbolIndexStore:
     @staticmethod
     def _escape_like(value: str) -> str:
         return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    @staticmethod
+    def _list_tables(conn: sqlite3.Connection) -> set[str]:
+        rows = conn.execute("""
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """).fetchall()
+        return {str(row[0]) for row in rows}
+
+    @staticmethod
+    def _list_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+
+    @staticmethod
+    def _read_meta_value(conn: sqlite3.Connection, key: str) -> str | None:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return None
+        return str(row["value"])

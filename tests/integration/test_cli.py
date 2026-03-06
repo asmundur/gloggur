@@ -115,9 +115,13 @@ def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
         payload = json.loads(result.output[start:])
         assert payload["schema_version"] == 2
         assert isinstance(payload.get("summary"), dict)
-        assert isinstance(payload.get("hits"), list)
+        hits = payload.get("hits")
+        assert isinstance(hits, list)
+        assert hits
         assert "results" not in payload
         assert "metadata" not in payload
+        assert all(hit.get("path") == "sample.py" for hit in hits if isinstance(hit, dict))
+        assert all("start_byte" in hit and "end_byte" in hit for hit in hits if isinstance(hit, dict))
 
 
 def test_cli_index_builds_symbol_index_and_reports_incremental_counters() -> None:
@@ -235,6 +239,153 @@ def test_cli_symbol_queries_return_def_and_ref_tags() -> None:
             for hit in reference_hits
             if isinstance(hit, dict)
         )
+        assert all(hit.get("path") == "sample.py" for hit in reference_hits if isinstance(hit, dict))
+        assert all(
+            isinstance(hit.get("start_byte"), int) and isinstance(hit.get("end_byte"), int)
+            for hit in reference_hits
+            if isinstance(hit, dict)
+        )
+
+
+def test_cli_extract_success_in_plain_and_json_modes() -> None:
+    runner = CliRunner()
+    content = "alpha\nβeta\n"
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.txt": content})
+        sample = repo / "sample.txt"
+        raw_bytes = sample.read_bytes()
+        previous_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            plain = runner.invoke(cli, ["extract", "sample.txt", "0", str(len(raw_bytes))])
+            assert plain.exit_code == 0, plain.output
+            assert plain.output == content
+
+            beta_start = raw_bytes.index("β".encode("utf8"))
+            beta_end = len(raw_bytes)
+            result = runner.invoke(
+                cli,
+                ["extract", "sample.txt", str(beta_start), str(beta_end), "--json"],
+            )
+            assert result.exit_code == 0, result.output
+            payload = json.loads(result.output)
+            assert payload == {
+                "path": "sample.txt",
+                "start_byte": beta_start,
+                "end_byte": beta_end,
+                "text": "βeta\n",
+            }
+        finally:
+            os.chdir(previous_cwd)
+
+
+def test_cli_extract_failure_contracts_in_plain_and_json_modes() -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.txt": "alpha\n"})
+        previous_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            invalid_path = runner.invoke(cli, ["extract", "../sample.txt", "0", "1"])
+            assert invalid_path.exit_code != 0
+            assert invalid_path.output.strip() == "ERROR: extract_path_invalid"
+
+            missing = runner.invoke(cli, ["extract", "missing.txt", "0", "1"])
+            assert missing.exit_code != 0
+            assert missing.output.strip() == "ERROR: extract_file_missing"
+
+            invalid_range = runner.invoke(cli, ["extract", "sample.txt", "x", "1"])
+            assert invalid_range.exit_code != 0
+            assert invalid_range.output.strip() == "ERROR: extract_byte_range_invalid"
+
+            out_of_bounds = runner.invoke(
+                cli,
+                ["extract", "sample.txt", "0", "99", "--json"],
+            )
+            assert out_of_bounds.exit_code != 0
+            payload = json.loads(out_of_bounds.output)
+            error = payload.get("error")
+            assert isinstance(error, dict)
+            assert error.get("code") == "extract_range_out_of_bounds"
+        finally:
+            os.chdir(previous_cwd)
+
+
+def test_cli_search_extract_round_trip_for_exact_semantic_and_symbol_modes() -> None:
+    runner = CliRunner()
+    source = (
+        "def Foo(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def caller(value: int) -> int:\n"
+        "    return Foo(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        previous_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            index_result = runner.invoke(cli, ["index", ".", "--json"], env=env)
+            assert index_result.exit_code == 0, index_result.output
+
+            # Force the symbol-only case on the third pass without changing other searches.
+            router_config_dir = repo / ".gloggur"
+            router_config_dir.mkdir(exist_ok=True)
+
+            exact_result = runner.invoke(
+                cli,
+                ["search", "caller", "--json", "--mode", "exact", "--top-k", "1"],
+                env=env,
+            )
+            assert exact_result.exit_code == 0, exact_result.output
+            exact_payload = json.loads(exact_result.output)
+            exact_hit = exact_payload["hits"][0]
+
+            semantic_result = runner.invoke(
+                cli,
+                ["search", "Foo", "--json", "--mode", "semantic", "--top-k", "1"],
+                env=env,
+            )
+            assert semantic_result.exit_code == 0, semantic_result.output
+            semantic_payload = json.loads(semantic_result.output)
+            semantic_hit = semantic_payload["hits"][0]
+
+            (router_config_dir / "config.toml").write_text(
+                "[search_router]\n"
+                'enabled_backends = ["symbol"]\n',
+                encoding="utf8",
+            )
+            symbol_result = runner.invoke(
+                cli,
+                ["search", "where is Foo defined", "--json", "--debug-router", "--top-k", "1"],
+                env=env,
+            )
+            assert symbol_result.exit_code == 0, symbol_result.output
+            symbol_payload = json.loads(symbol_result.output)
+            symbol_hit = symbol_payload["hits"][0]
+
+            for hit in (exact_hit, semantic_hit, symbol_hit):
+                path = Path(str(hit["path"]))
+                raw_bytes = (repo / path).read_bytes()
+                start_byte = int(hit["start_byte"])
+                end_byte = int(hit["end_byte"])
+                extract_result = runner.invoke(
+                    cli,
+                    ["extract", str(path), str(start_byte), str(end_byte), "--json"],
+                    env=env,
+                )
+                assert extract_result.exit_code == 0, extract_result.output
+                extract_payload = json.loads(extract_result.output)
+                expected_text = raw_bytes[start_byte:end_byte].decode("utf8", errors="replace")
+                assert extract_payload["path"] == str(path).replace("\\", "/")
+                assert extract_payload["text"] == expected_text
+        finally:
+            os.chdir(previous_cwd)
 
 
 def test_cli_symbol_backend_reports_missing_or_corrupt_index_non_fatally() -> None:
@@ -466,8 +617,11 @@ def test_cli_search_file_filter_prefix_boundary_and_context_radius() -> None:
             src_payload = _parse_json_output(src_filter_result.output)
             src_results = src_payload["results"]
             assert isinstance(src_results, list) and src_results
-            assert all("/src/" in str(item["file"]).replace("\\", "/") for item in src_results)
-            assert all("/src2/" not in str(item["file"]).replace("\\", "/") for item in src_results)
+            assert all(str(item["file"]).replace("\\", "/").startswith("src/") for item in src_results)
+            assert all(
+                not str(item["file"]).replace("\\", "/").startswith("src2/")
+                for item in src_results
+            )
             src_metadata = src_payload["metadata"]
             assert src_metadata["file_filter"] == "src"
             assert src_metadata["file_filter_match_mode"] == "exact_or_prefix"

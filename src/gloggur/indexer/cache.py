@@ -24,7 +24,7 @@ INDEX_PROFILE_KEY = "index_profile"
 LAST_SUCCESS_RESUME_FINGERPRINT_KEY = "last_success_resume_fingerprint"
 LAST_SUCCESS_RESUME_AT_KEY = "last_success_resume_at"
 LAST_SUCCESS_TOOL_VERSION_KEY = "last_success_tool_version"
-CACHE_SCHEMA_VERSION = "6"
+CACHE_SCHEMA_VERSION = "7"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 SQLITE_JOURNAL_MODE = "WAL"
@@ -80,6 +80,8 @@ REQUIRED_COLUMNS = {
         "file_path",
         "start_line",
         "end_line",
+        "start_byte",
+        "end_byte",
         "tokens_estimate",
         "language",
         "repo_id",
@@ -253,6 +255,8 @@ class CacheManager:
                     file_path TEXT NOT NULL,
                     start_line INTEGER NOT NULL,
                     end_line INTEGER NOT NULL,
+                    start_byte INTEGER NOT NULL,
+                    end_byte INTEGER NOT NULL,
                     tokens_estimate INTEGER,
                     language TEXT,
                     repo_id TEXT,
@@ -1141,6 +1145,8 @@ class CacheManager:
             file_path=row["file_path"],
             start_line=int(row["start_line"]),
             end_line=int(row["end_line"]),
+            start_byte=int(row["start_byte"]) if row["start_byte"] is not None else None,
+            end_byte=int(row["end_byte"]) if row["end_byte"] is not None else None,
             tokens_estimate=(
                 int(row["tokens_estimate"]) if row["tokens_estimate"] is not None else None
             ),
@@ -1162,6 +1168,8 @@ class CacheManager:
             chunk.file_path,
             chunk.start_line,
             chunk.end_line,
+            chunk.start_byte,
+            chunk.end_byte,
             chunk.tokens_estimate,
             chunk.language,
             chunk.repo_id,
@@ -1179,9 +1187,9 @@ class CacheManager:
             """
             INSERT INTO chunks (
                 chunk_id, symbol_id, chunk_part_index, chunk_part_total, text,
-                file_path, start_line, end_line, tokens_estimate, language,
-                repo_id, commit_hash, embedding_vector
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                file_path, start_line, end_line, start_byte, end_byte, tokens_estimate,
+                language, repo_id, commit_hash, embedding_vector
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chunk_id) DO UPDATE SET
                 symbol_id = excluded.symbol_id,
                 chunk_part_index = excluded.chunk_part_index,
@@ -1190,6 +1198,8 @@ class CacheManager:
                 file_path = excluded.file_path,
                 start_line = excluded.start_line,
                 end_line = excluded.end_line,
+                start_byte = excluded.start_byte,
+                end_byte = excluded.end_byte,
                 tokens_estimate = excluded.tokens_estimate,
                 language = excluded.language,
                 repo_id = excluded.repo_id,

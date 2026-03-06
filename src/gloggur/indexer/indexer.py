@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
+from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError, wrap_embedding_error
@@ -389,20 +390,23 @@ class Indexer:
         """Read/parse a file and compute symbol diff metadata for later persistence."""
 
         try:
-            with open(path, encoding="utf8") as handle:
-                source = handle.read()
-        except UnicodeDecodeError as exc:
-            return None, FileIndexOutcome(
-                status="failed",
-                reason="decode_error",
-                detail=f"{type(exc).__name__}: {exc}",
-            )
+            with open(path, "rb") as handle:
+                raw_source = handle.read()
         except OSError as exc:
             return None, FileIndexOutcome(
                 status="failed",
                 reason="read_error",
                 detail=f"{type(exc).__name__}: {exc}",
             )
+        try:
+            source = raw_source.decode("utf8")
+        except UnicodeDecodeError as exc:
+            return None, FileIndexOutcome(
+                status="failed",
+                reason="decode_error",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        span_index = LineByteSpanIndex.from_bytes(raw_source)
 
         content_hash = self._hash_content(source)
         existing = self.cache.get_file_metadata(path)
@@ -442,7 +446,13 @@ class Indexer:
                 symbol.repo_id = repo_id
             symbol.commit = commit
 
-        chunks = self._build_symbol_chunks(path=path, source=source, symbols=symbols, commit=commit)
+        chunks = self._build_symbol_chunks(
+            path=path,
+            source=source,
+            symbols=symbols,
+            commit=commit,
+            span_index=span_index,
+        )
         candidate_symbols = self.cache.list_symbols()
         edges = self._build_graph_edges(
             path=path,
@@ -777,6 +787,7 @@ class Indexer:
         source: str,
         symbols: list[Symbol],
         commit: str,
+        span_index: LineByteSpanIndex,
     ) -> list[SymbolChunk]:
         """Build deterministic symbol-boundary embedding chunks with split support."""
         lines = source.splitlines()
@@ -825,6 +836,8 @@ class Indexer:
                         file_path=path,
                         start_line=part_start,
                         end_line=part_end,
+                        start_byte=span_index.span_for_lines(part_start, part_end)[0],
+                        end_byte=span_index.span_for_lines(part_start, part_end)[1],
                         tokens_estimate=self._estimate_tokens(text),
                         language=symbol.language,
                         repo_id=symbol.repo_id,
