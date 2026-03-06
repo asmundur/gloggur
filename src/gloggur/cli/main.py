@@ -1283,6 +1283,8 @@ def _collect_watch_failure_signals(state: dict[str, object]) -> tuple[int, dict[
     """Collect fail-closed failure counters/reasons from watch state + last_batch."""
     normalized_reasons = _normalize_reason_counts(state.get("failed_reasons"))
     failed_count = _read_failed_count(state)
+    raw_status = state.get("status")
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
 
     last_batch_payload = state.get("last_batch")
     if isinstance(last_batch_payload, dict):
@@ -1305,6 +1307,10 @@ def _collect_watch_failure_signals(state: dict[str, object]) -> tuple[int, dict[
         normalized_reasons["watch_state_inconsistent"] = failed_count
     elif failed_count <= 0 and normalized_reasons:
         failed_count = sum(normalized_reasons.values())
+    elif failed_count <= 0 and not normalized_reasons and status == "running_with_errors":
+        # Fail closed when status indicates unhealthy watch state but counters/codes drift away.
+        failed_count = 1
+        normalized_reasons["watch_state_inconsistent"] = failed_count
 
     return failed_count, normalized_reasons
 

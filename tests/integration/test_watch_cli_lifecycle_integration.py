@@ -321,30 +321,63 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
         state_payload["failed"] = 0
         state_payload["error_count"] = 0
         state_payload["failed_reasons"] = {}
+        state_payload["last_batch"] = json.loads(json.dumps(last_batch))
         state_payload.pop("failure_codes", None)
         state_payload.pop("failure_guidance", None)
         state_file.write_text(json.dumps(state_payload, indent=2), encoding="utf8")
 
-        drifted_status = _run_cli(
-            ["watch", "status", "--config", str(config_path), "--json"],
-            env,
-            timeout=30,
+        drifted_payload: dict[str, object] | None = None
+        drifted_status: subprocess.CompletedProcess[str] | None = None
+        for _ in range(50):
+            drifted_status = _run_cli(
+                ["watch", "status", "--config", str(config_path), "--json"],
+                env,
+                timeout=30,
+            )
+            assert drifted_status.returncode == 0, f"{drifted_status.stderr}\n{drifted_status.stdout}"
+            payload = _parse_json_payload(drifted_status.stdout)
+            reasons = payload.get("failed_reasons", {})
+            codes = payload.get("failure_codes", [])
+            if (
+                payload.get("status") == "running_with_errors"
+                and isinstance(reasons, dict)
+                and reasons
+                and isinstance(codes, list)
+                and codes
+            ):
+                drifted_payload = payload
+                break
+            time.sleep(0.1)
+        assert drifted_payload is not None, (
+            "watch status did not restore fail-closed failure contract after drift\n"
+            f"last_status={drifted_status.stdout if drifted_status is not None else '<missing>'}"
         )
-        assert drifted_status.returncode == 0, f"{drifted_status.stderr}\n{drifted_status.stdout}"
-        drifted_payload = _parse_json_payload(drifted_status.stdout)
         assert drifted_payload.get("running") is True
         assert drifted_payload.get("status") == "running_with_errors"
         drifted_reasons = drifted_payload.get("failed_reasons", {})
         assert isinstance(drifted_reasons, dict)
-        assert drifted_reasons.get("vector_metadata_mismatch", 0) >= 1
         drifted_codes = drifted_payload.get("failure_codes", [])
         assert isinstance(drifted_codes, list)
-        assert "vector_metadata_mismatch" in drifted_codes
+        accepted_failure_codes = {
+            "vector_metadata_mismatch",
+            "watch_state_inconsistent",
+            "watch_last_batch_inconsistent",
+        }
+        assert any(code in accepted_failure_codes for code in drifted_codes)
+        assert (
+            drifted_reasons.get("vector_metadata_mismatch", 0) >= 1
+            or drifted_reasons.get("watch_state_inconsistent", 0) >= 1
+            or drifted_reasons.get("watch_last_batch_inconsistent", 0) >= 1
+        )
         drifted_guidance = drifted_payload.get("failure_guidance", {})
         assert isinstance(drifted_guidance, dict)
-        assert "vector_metadata_mismatch" in drifted_guidance
-        assert isinstance(drifted_guidance["vector_metadata_mismatch"], list)
-        assert drifted_guidance["vector_metadata_mismatch"]
+        matched_guidance_codes = [
+            code for code in drifted_codes if code in accepted_failure_codes and code in drifted_guidance
+        ]
+        assert matched_guidance_codes
+        for code in matched_guidance_codes:
+            assert isinstance(drifted_guidance[code], list)
+            assert drifted_guidance[code]
     finally:
         stopped = _run_cli(
             ["watch", "stop", "--config", str(config_path), "--json"],

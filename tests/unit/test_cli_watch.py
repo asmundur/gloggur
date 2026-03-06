@@ -1109,6 +1109,69 @@ def test_collect_watch_failure_signals_uses_last_batch_failure_codes() -> None:
     assert reasons == {"vector_metadata_mismatch": 1}
 
 
+def test_collect_watch_failure_signals_synthesizes_running_with_errors_inconsistency() -> None:
+    failed_count, reasons = _collect_watch_failure_signals(
+        {
+            "status": "running_with_errors",
+            "running": True,
+            "failed": 0,
+            "error_count": 0,
+            "failed_reasons": {},
+            "last_batch": {},
+        }
+    )
+
+    assert failed_count == 1
+    assert reasons == {"watch_state_inconsistent": 1}
+
+
+def test_watch_status_json_synthesizes_running_with_errors_inconsistency_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    pid_file = tmp_path / "watch.pid"
+    state_file = tmp_path / "watch_state.json"
+    pid_file.write_text("4242\n", encoding="utf8")
+    state_file.write_text(
+        json.dumps(
+            {
+                "status": "running_with_errors",
+                "running": True,
+                "failed": 0,
+                "error_count": 0,
+                "failed_reasons": {},
+                "last_batch": {},
+            }
+        ),
+        encoding="utf8",
+    )
+    config = GloggurConfig(
+        watch_pid_file=str(pid_file),
+        watch_state_file=str(state_file),
+    )
+    monkeypatch.setattr("gloggur.cli.main._load_config", lambda _path: config)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: True)
+
+    result = runner.invoke(cli, ["watch", "status", "--json"])
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["running"] is True
+    assert payload["status"] == "running_with_errors"
+    reasons = payload["failed_reasons"]
+    assert isinstance(reasons, dict)
+    assert reasons == {"watch_state_inconsistent": 1}
+    failure_codes = payload["failure_codes"]
+    assert isinstance(failure_codes, list)
+    assert failure_codes == ["watch_state_inconsistent"]
+    guidance = payload["failure_guidance"]
+    assert isinstance(guidance, dict)
+    assert "watch_state_inconsistent" in guidance
+    assert isinstance(guidance["watch_state_inconsistent"], list)
+    assert guidance["watch_state_inconsistent"]
+
+
 def test_watch_status_json_uses_last_batch_failure_reasons_when_top_level_counters_drift(
     tmp_path: Path,
     monkeypatch,
