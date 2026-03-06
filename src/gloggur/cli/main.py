@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import gzip
 import hashlib
-import io
 import json
 import os
 import re
@@ -28,6 +26,16 @@ import yaml
 
 from gloggur import __version__ as GLOGGUR_VERSION
 from gloggur.adapters.registry import AdapterResolutionError
+from gloggur.archive_utils import (
+    ArchiveFileSource,
+    create_deterministic_tar_gz,
+)
+from gloggur.archive_utils import (
+    sha256_bytes as archive_sha256_bytes,
+)
+from gloggur.archive_utils import (
+    sha256_file as archive_sha256_file,
+)
 from gloggur.audit.docstring_audit import DocstringAuditReport, audit_docstrings
 from gloggur.byte_spans import (
     LineByteSpanIndex,
@@ -74,6 +82,16 @@ from gloggur.search.router import (
 from gloggur.storage.backends import create_storage_backend, list_storage_backends
 from gloggur.storage.metadata_store import MetadataStore, MetadataStoreConfig
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
+from gloggur.support import (
+    SupportCallbacks,
+    SupportContractError,
+)
+from gloggur.support import (
+    collect_support_bundle as collect_support_bundle_impl,
+)
+from gloggur.support import (
+    run_support_command as run_support_command_impl,
+)
 from gloggur.symbol_index.indexer import SymbolIndexer
 from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 from gloggur.watch.service import (
@@ -185,6 +203,22 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
         "Unset GLOGGUR_LOCAL_FALLBACK; deterministic local fallback embeddings "
         "are no longer supported.",
         "For deterministic test-only embeddings, set GLOGGUR_EMBEDDING_PROVIDER=test.",
+    ],
+    "support_command_invalid": [
+        "Pass a Gloggur subcommand after `--`, for example `gloggur support run -- status --json`.",
+        "Do not pass executable paths or recursive `support` child commands.",
+    ],
+    "support_session_missing": [
+        "List or inspect the existing session ids under `.gloggur/support/sessions`.",
+        "Retry with a valid `--session <id>` value or omit `--session` for a fresh snapshot.",
+    ],
+    "support_session_invalid": [
+        "Use a session id created by `gloggur support run` or `gloggur support collect`.",
+        "If the session metadata is corrupted, reproduce the failure and collect a fresh bundle.",
+    ],
+    "support_destination_exists": [
+        "Choose a new bundle destination path or pass `--overwrite` "
+        "to replace the existing archive.",
     ],
     "artifact_source_missing": [
         "Set --source to an existing cache directory or run "
@@ -1620,6 +1654,34 @@ def _create_status_payload(
     )
 
 
+def _create_watch_status_payload(config: GloggurConfig) -> dict[str, object]:
+    """Create watch status payload without emitting CLI output."""
+    pid = _read_pid_file(config.watch_pid_file)
+    running = is_process_running(pid)
+    state = _read_watch_state_for_status(config.watch_state_file)
+    payload: dict[str, object] = {
+        "watch_enabled": config.watch_enabled,
+        "watch_path": os.path.abspath(config.watch_path),
+        "mode": config.watch_mode,
+        "pid": pid,
+        "running": running,
+        "state_file": config.watch_state_file,
+        "log_file": config.watch_log_file,
+    }
+    payload.update(state)
+    payload.update(_build_watch_failure_contract(payload))
+    payload["running"] = running
+    payload["status"] = _normalize_watch_status(running=running, state=payload)
+    return payload
+
+
+def _load_support_config(config_path: str | None = None) -> tuple[GloggurConfig, str | None]:
+    """Load support-command config and normalize relative watch paths."""
+    resolved_config_path = _normalize_config_path(config_path)
+    config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
+    return config, resolved_config_path
+
+
 def _create_embedding_provider_for_command(
     config: GloggurConfig,
     *,
@@ -1659,26 +1721,19 @@ def _profile_matches_filter(cached_profile: str | None, profile_filter: str) -> 
 
 def _sha256_file(path: str) -> str:
     """Return SHA256 digest for a file using chunked reads."""
-    digest = hashlib.sha256()
     try:
-        with open(path, "rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
+        return archive_sha256_file(path)
     except OSError as exc:
         raise wrap_io_error(
             exc,
             operation="read artifact source file",
             path=path,
         ) from exc
-    return digest.hexdigest()
 
 
 def _sha256_bytes(payload: bytes) -> str:
     """Return SHA256 digest for bytes payloads."""
-    return hashlib.sha256(payload).hexdigest()
+    return archive_sha256_bytes(payload)
 
 
 def _artifact_rel_path(source_dir: str, file_path: str) -> str:
@@ -1970,33 +2025,18 @@ def _create_artifact_archive(
 ) -> None:
     """Create a deterministic tar.gz artifact containing cache files and manifest."""
     try:
-        with open(artifact_path, "wb") as raw_handle:
-            with gzip.GzipFile(fileobj=raw_handle, mode="wb", mtime=0) as gzip_handle:
-                with tarfile.open(fileobj=gzip_handle, mode="w", format=tarfile.PAX_FORMAT) as tar:
-                    for entry in file_entries:
-                        rel_path = str(entry["path"])
-                        source_path = os.path.join(source_dir, rel_path.replace("/", os.sep))
-                        tar_info = tar.gettarinfo(
-                            source_path,
-                            arcname=f"cache/{rel_path}",
-                        )
-                        tar_info.uid = 0
-                        tar_info.gid = 0
-                        tar_info.uname = ""
-                        tar_info.gname = ""
-                        tar_info.mtime = 0
-                        with open(source_path, "rb") as source_handle:
-                            tar.addfile(tar_info, source_handle)
-
-                    manifest_info = tarfile.TarInfo(name="manifest.json")
-                    manifest_info.size = len(manifest_bytes)
-                    manifest_info.mode = 0o644
-                    manifest_info.uid = 0
-                    manifest_info.gid = 0
-                    manifest_info.uname = ""
-                    manifest_info.gname = ""
-                    manifest_info.mtime = 0
-                    tar.addfile(manifest_info, io.BytesIO(manifest_bytes))
+        file_sources = [
+            ArchiveFileSource(
+                source_path=Path(source_dir) / str(entry["path"]).replace("/", os.sep),
+                archive_path=f"cache/{entry['path']}",
+            )
+            for entry in file_entries
+        ]
+        create_deterministic_tar_gz(
+            artifact_path,
+            file_sources=file_sources,
+            extra_files=(("manifest.json", manifest_bytes),),
+        )
     except OSError as exc:
         raise wrap_io_error(
             exc,
@@ -4268,6 +4308,108 @@ def artifact_restore(
     _emit(payload, as_json)
 
 
+def _support_callbacks() -> SupportCallbacks:
+    """Build support-command callbacks from existing CLI helpers."""
+    return SupportCallbacks(
+        load_config=_load_support_config,
+        build_status_payload=lambda config: _create_status_payload(config),
+        build_watch_status_payload=_create_watch_status_payload,
+    )
+
+
+@cli.group()
+def support() -> None:
+    """Capture traced support sessions and package field diagnostics."""
+
+
+@support.command("run", context_settings={"ignore_unknown_options": True})
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option("--note", type=str, default=None, help="Optional tester note saved into notes.txt.")
+@click.option(
+    "--bundle-on-failure/--no-bundle-on-failure",
+    default=True,
+    show_default=True,
+    help="Automatically create a support bundle when the child command exits non-zero.",
+)
+@click.option(
+    "--destination",
+    type=click.Path(exists=False, file_okay=True, dir_okay=True),
+    default=None,
+    help="Optional bundle output path used only when a failure bundle is created.",
+)
+@click.argument("child_args", nargs=-1, type=click.UNPROCESSED)
+@_with_io_failure_handling
+def support_run(
+    as_json: bool,
+    note: str | None,
+    bundle_on_failure: bool,
+    destination: str | None,
+    child_args: tuple[str, ...],
+) -> None:
+    """Run a Gloggur subcommand inside a traced support session."""
+    try:
+        payload, exit_code = run_support_command_impl(
+            as_json=as_json,
+            child_args=child_args,
+            note=note,
+            bundle_on_failure=bundle_on_failure,
+            destination=destination,
+            callbacks=_support_callbacks(),
+        )
+    except SupportContractError as exc:
+        raise CLIContractError(str(exc), error_code=exc.code) from exc
+    _emit(payload, as_json)
+    if exit_code != 0:
+        raise click.exceptions.Exit(exit_code)
+
+
+@support.command("collect")
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--session",
+    "session_id",
+    type=str,
+    default=None,
+    help="Existing support session id.",
+)
+@click.option(
+    "--destination",
+    type=click.Path(exists=False, file_okay=True, dir_okay=True),
+    default=None,
+    help="Output path for the support bundle archive.",
+)
+@click.option(
+    "--include-cache",
+    is_flag=True,
+    default=False,
+    help="Include raw cache/index artifacts.",
+)
+@click.option("--note", type=str, default=None, help="Optional tester note saved into notes.txt.")
+@click.option("--overwrite", is_flag=True, default=False, help="Overwrite an existing bundle path.")
+@_with_io_failure_handling
+def support_collect(
+    as_json: bool,
+    session_id: str | None,
+    destination: str | None,
+    include_cache: bool,
+    note: str | None,
+    overwrite: bool,
+) -> None:
+    """Collect diagnostics and create a deterministic support bundle."""
+    try:
+        payload = collect_support_bundle_impl(
+            session_id=session_id,
+            note=note,
+            destination=destination,
+            include_cache=include_cache,
+            overwrite=overwrite,
+            callbacks=_support_callbacks(),
+        )
+    except SupportContractError as exc:
+        raise CLIContractError(str(exc), error_code=exc.code) from exc
+    _emit(payload, as_json)
+
+
 @cli.group()
 def watch() -> None:
     """Manage save-triggered incremental indexing."""
@@ -4592,22 +4734,7 @@ def watch_status(config_path: str | None, as_json: bool) -> None:
 
     resolved_config_path = _normalize_config_path(config_path)
     config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
-    pid = _read_pid_file(config.watch_pid_file)
-    running = is_process_running(pid)
-    state = _read_watch_state_for_status(config.watch_state_file)
-    payload: dict[str, object] = {
-        "watch_enabled": config.watch_enabled,
-        "watch_path": os.path.abspath(config.watch_path),
-        "mode": config.watch_mode,
-        "pid": pid,
-        "running": running,
-        "state_file": config.watch_state_file,
-        "log_file": config.watch_log_file,
-    }
-    payload.update(state)
-    payload.update(_build_watch_failure_contract(payload))
-    payload["running"] = running
-    payload["status"] = _normalize_watch_status(running=running, state=payload)
+    payload = _create_watch_status_payload(config)
     _emit(payload, as_json)
 
 

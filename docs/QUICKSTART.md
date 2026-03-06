@@ -91,6 +91,40 @@ scripts/gloggur watch stop --json
 
 `search --json` emits ContextPack v2 fields (`schema_version`, `query`, `summary`, `hits[]`). Legacy `results` + `metadata` top-level keys are not emitted.
 
+## If Something Goes Wrong
+
+Use the support tool when a field tester needs to send you enough trace data to reproduce a Glöggur failure.
+
+1. Rerun the failing Glöggur command through the support wrapper.
+
+```bash
+scripts/gloggur support run -- search "add numbers token" --json
+```
+
+Everything after `--` is the normal Glöggur command. Replace `search "add numbers token" --json` with the command that failed for you.
+
+2. If you want to add a short human note, include `--note`.
+
+```bash
+scripts/gloggur support run --note "search failed right after indexing" -- search "add numbers token" --json
+```
+
+3. If the failure already happened and you just want a snapshot of the current Glöggur state, collect a support bundle directly.
+
+```bash
+scripts/gloggur support collect --json --note "manual snapshot after search failure"
+```
+
+4. Send the generated `.tar.gz` file from `.gloggur/support/bundles/`.
+
+What the tool does for you:
+- creates a support session under `.gloggur/support/sessions/`
+- copies Glöggur logs, watch state, bootstrap state, and config summaries
+- redacts obvious secrets and local absolute paths by default
+- creates a compressed support bundle you can attach to a bug report
+
+Use `--include-cache` only when the smaller sanitized bundle is not enough and you explicitly want to include the runtime cache and index databases.
+
 ## Troubleshooting by Failure Code
 
 | Failure code | Meaning | Action |

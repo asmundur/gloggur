@@ -56,6 +56,26 @@ Fields:
   - Meaning: deprecated `GLOGGUR_LOCAL_FALLBACK` env is set to a non-empty value.
   - Retryability: retry after removing the legacy env var.
   - Operator action: unset `GLOGGUR_LOCAL_FALLBACK`; use `GLOGGUR_EMBEDDING_PROVIDER=test` for deterministic test-only embeddings.
+- `support_command_invalid`
+  - Command(s): `support run`.
+  - Meaning: the wrapped command was empty, recursive (`support ...`), or not a Glöggur subcommand.
+  - Retryability: retry after passing a normal Glöggur command after `--`.
+  - Operator action: run `gloggur support run -- <gloggur-subcommand...>`, for example `gloggur support run -- status --json`.
+- `support_session_missing`
+  - Command(s): `support collect`.
+  - Meaning: the requested support session id does not exist on disk.
+  - Retryability: retry after using an existing session id or omitting `--session`.
+  - Operator action: use a session id created by `gloggur support run`/`gloggur support collect`, or rerun `gloggur support collect` without `--session` to create a fresh snapshot.
+- `support_session_invalid`
+  - Command(s): `support collect`.
+  - Meaning: the provided support session id or session directory is malformed, incomplete, or outside the support root.
+  - Retryability: retry after fixing the session id or recreating the snapshot.
+  - Operator action: use a valid session id from `.gloggur/support/sessions/` or create a new bundle with `gloggur support collect`.
+- `support_destination_exists`
+  - Command(s): `support collect`, `support run`.
+  - Meaning: the destination bundle path already exists and overwrite was not allowed.
+  - Retryability: retry after choosing a new path or enabling overwrite.
+  - Operator action: pass a different `--destination` path or rerun `support collect --overwrite`.
 - `extract_path_invalid`
   - Command(s): `extract`.
   - Meaning: the requested path was absolute, empty, or escaped the active workspace root.

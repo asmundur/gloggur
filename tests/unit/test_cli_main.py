@@ -422,6 +422,20 @@ def test_cli_failure_catalog_includes_watch_preflight_codes() -> None:
         assert guidance
 
 
+def test_cli_failure_catalog_includes_support_codes() -> None:
+    """Support bundle failure codes should stay documented in the CLI failure catalog."""
+    for code in (
+        "support_command_invalid",
+        "support_session_missing",
+        "support_session_invalid",
+        "support_destination_exists",
+    ):
+        assert code in CLI_FAILURE_REMEDIATION
+        guidance = CLI_FAILURE_REMEDIATION[code]
+        assert isinstance(guidance, list)
+        assert guidance
+
+
 def test_cli_failure_catalog_includes_artifact_publish_codes() -> None:
     """Artifact publish failure codes should stay documented in the CLI failure catalog."""
     for code in (

@@ -133,6 +133,35 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```
    Inspection skips unchanged files by default; add `--force` to reinspect everything.
 
+## Support Bundles
+
+Use the support CLI when a field tester needs a sendable diagnostics bundle after Glöggur fails.
+
+Capture a traced run around the failing command:
+
+```bash
+scripts/gloggur support run -- search "add numbers token" --json
+```
+
+- Everything after `--` must be a normal Glöggur subcommand.
+- Non-zero child exits automatically create a support bundle unless `--no-bundle-on-failure` is set.
+- Add `--note "what went wrong"` when the tester can explain the failure in plain language.
+
+Create a manual snapshot without rerunning the failing command:
+
+```bash
+scripts/gloggur support collect --json --note "manual support snapshot"
+```
+
+Support bundle paths:
+- sessions: `.gloggur/support/sessions/<session-id>/`
+- bundles: `.gloggur/support/bundles/gloggur-support-<session-id>.tar.gz`
+
+Bundle policy:
+- sanitized by default: secrets and local absolute paths are redacted
+- runtime logs/status/config snapshots are included automatically
+- cache/index databases stay out of the bundle unless `--include-cache` is passed
+
 Subject repo coverage note:
 - For subject repo analysis, test/coverage collection should run in the subject repo's own environment/toolchain (its own venv/runner), not in this Gloggur repo environment.
 - After coverage is produced there, run `gloggur coverage import ...` from the subject repo cwd (or pass explicit coverage artifact paths).
