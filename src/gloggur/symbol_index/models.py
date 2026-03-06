@@ -45,6 +45,7 @@ class SymbolIndexResult:
     """Result counters emitted by symbol-index indexing runs."""
 
     db_path: str
+    duration_ms: int = 0
     files_considered: int = 0
     files_changed: int = 0
     files_unchanged: int = 0
@@ -65,6 +66,7 @@ class SymbolIndexResult:
     def as_payload(self) -> dict[str, object]:
         return {
             "db_path": self.db_path,
+            "duration_ms": self.duration_ms,
             "files_considered": self.files_considered,
             "files_changed": self.files_changed,
             "files_unchanged": self.files_unchanged,

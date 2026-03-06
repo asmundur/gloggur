@@ -66,6 +66,7 @@ from gloggur.indexer.cache import (
 )
 from gloggur.indexer.concurrency import cache_write_lock
 from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
+from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
 from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.coverage import CoverageIngester
@@ -2598,6 +2599,12 @@ def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str,
     default=False,
     help="Exit zero even when some files fail to index.",
 )
+@click.option(
+    "--debug-timings",
+    is_flag=True,
+    default=False,
+    help="Include per-file timing breakdowns in index --json output.",
+)
 @_with_io_failure_handling
 def index(
     path: str,
@@ -2605,8 +2612,10 @@ def index(
     as_json: bool,
     embedding_provider: str | None,
     allow_partial: bool,
+    debug_timings: bool,
 ) -> None:
     """Load config/runtime, index path, and emit summary counts."""
+    command_started = time.perf_counter()
     resolved_config_path = _normalize_config_path(config_path)
     lock_config = _load_config(resolved_config_path)
     with cache_write_lock(lock_config.cache_dir):
@@ -2659,13 +2668,26 @@ def index(
                 index_target=path,
                 config=config,
                 parser_registry=parser_registry,
+                prefetched_files=result.parsed_files,
+                file_paths=result.source_files,
             )
+            command_duration_ms = int((time.perf_counter() - command_started) * 1000)
             if not as_json:
                 click.echo("", err=True)  # newline after final progress line
             if result.failed == 0:
                 _persist_last_success_resume_state(config, cache)
             payload = result.as_payload()
             payload["symbol_index"] = symbol_payload
+            payload["timings_ms"] = {
+                "total": command_duration_ms,
+                "legacy_index": result.duration_ms,
+                "symbol_index": int(symbol_payload.get("duration_ms", 0) or 0),
+                "cleanup": int(result.phase_timings_ms.get("cleanup", 0)),
+                "consistency_checks": int(result.phase_timings_ms.get("consistency_checks", 0)),
+            }
+            payload["duration_ms"] = command_duration_ms
+            if as_json and debug_timings:
+                payload["slow_files"] = _build_slow_files_payload(result.file_timings)
             if as_json and result.failed > 0 and not allow_partial:
                 _attach_primary_error_from_failure_contract(
                     payload,
@@ -2691,7 +2713,10 @@ def index(
             files_considered = 0
         if files_considered:
             cache.delete_index_metadata()
-        outcome = indexer.index_file_with_outcome(path) if files_considered else None
+        single_index_started = time.perf_counter()
+        execution = indexer.index_file_with_details(path) if files_considered else None
+        legacy_index_ms = int((time.perf_counter() - single_index_started) * 1000)
+        cleanup_started = time.perf_counter()
         stale_cleanup = (
             indexer.prune_missing_file_entries()
             if files_considered
@@ -2705,17 +2730,21 @@ def index(
         )
         if vector_store and files_considered:
             vector_store.save()
+        cleanup_ms = int((time.perf_counter() - cleanup_started) * 1000)
+        consistency_started = time.perf_counter()
         consistency = (
             indexer.validate_vector_metadata_consistency()
             if files_considered
             else {"failed": 0, "failed_reasons": {}, "failed_samples": []}
         )
+        consistency_ms = int((time.perf_counter() - consistency_started) * 1000)
         failed_reasons: dict[str, int] = {}
         failed_samples: list[str] = []
         indexed = 0
         unchanged = 0
         failed = 0
         indexed_symbols = 0
+        outcome = execution.outcome if execution else None
         if outcome:
             if outcome.status == "indexed":
                 indexed = 1
@@ -2783,11 +2812,27 @@ def index(
             "indexed_symbols": indexed_symbols,
             "duration_ms": 0,
         }
-        result["symbol_index"] = _run_symbol_index(
+        symbol_payload = _run_symbol_index(
             index_target=path,
             config=config,
             parser_registry=parser_registry,
+            prefetched_files=(
+                [execution.prepared.snapshot] if execution and execution.prepared else None
+            ),
+            file_paths=[path] if files_considered else None,
         )
+        command_duration_ms = int((time.perf_counter() - command_started) * 1000)
+        result["symbol_index"] = symbol_payload
+        result["timings_ms"] = {
+            "total": command_duration_ms,
+            "legacy_index": legacy_index_ms,
+            "symbol_index": int(symbol_payload.get("duration_ms", 0) or 0),
+            "cleanup": cleanup_ms,
+            "consistency_checks": consistency_ms,
+        }
+        result["duration_ms"] = command_duration_ms
+        if as_json and debug_timings and execution and execution.timing is not None:
+            result["slow_files"] = [execution.timing.as_payload()]
         result.update(_build_index_failure_contract(failed_reasons))
         if as_json and failed > 0 and not allow_partial:
             _attach_primary_error_from_failure_contract(
@@ -2944,6 +2989,8 @@ def _run_symbol_index(
     index_target: str,
     config: GloggurConfig,
     parser_registry: ParserRegistry,
+    prefetched_files: Sequence[ParsedFileSnapshot] | None = None,
+    file_paths: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Build/update local symbol occurrence index and return additive payload fields."""
     repo_root = _resolve_symbol_index_root(index_target)
@@ -2952,8 +2999,26 @@ def _run_symbol_index(
         config=config,
         parser_registry=parser_registry,
     )
-    result = indexer.index_path(index_target)
+    result = indexer.index_path_with_prefetched(
+        index_target,
+        prefetched_files=list(prefetched_files or []),
+        file_paths=list(file_paths) if file_paths is not None else None,
+    )
     return result.as_payload()
+
+
+def _build_slow_files_payload(
+    file_timings: Sequence[FileTimingTrace],
+    *,
+    limit: int = 10,
+) -> list[dict[str, object]]:
+    """Return top slow files for debug timing payloads."""
+    ranked = sorted(
+        (timing for timing in file_timings if timing.total_ms > 0),
+        key=lambda timing: (timing.total_ms, timing.path),
+        reverse=True,
+    )
+    return [timing.as_payload() for timing in ranked[:limit]]
 
 
 def _resolve_search_ranking_metadata(

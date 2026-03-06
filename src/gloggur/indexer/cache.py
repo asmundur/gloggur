@@ -413,6 +413,12 @@ class CacheManager:
             rows = conn.execute("SELECT path FROM files ORDER BY path").fetchall()
             return [str(row["path"]) for row in rows]
 
+    def list_file_hashes(self) -> dict[str, str]:
+        """Return cached file content hashes keyed by absolute path."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT path, content_hash FROM files ORDER BY path").fetchall()
+            return {str(row["path"]): str(row["content_hash"]) for row in rows}
+
     def list_symbols_for_file(self, path: str) -> list[Symbol]:
         """Return cached symbols for a file path."""
         with self._connect() as conn:

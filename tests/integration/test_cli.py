@@ -17,6 +17,7 @@ from gloggur.cli import main as cli_main
 from gloggur.cli.main import cli
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.parsers.treesitter_parser import TreeSitterParser
 from gloggur.search import attach_legacy_search_contract
 from scripts.verification.fixtures import TestFixtures
 
@@ -159,6 +160,82 @@ def test_cli_index_builds_symbol_index_and_reports_incremental_counters() -> Non
         assert isinstance(second_symbol_index, dict)
         assert int(second_symbol_index.get("files_changed", 0)) == 0
         assert int(second_symbol_index.get("files_unchanged", 0)) >= 1
+
+
+def test_cli_index_json_reports_truthful_timings_and_debug_slow_files() -> None:
+    runner = CliRunner()
+    source = (
+        "def Foo(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def caller(value: int) -> int:\n"
+        "    return Foo(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"alpha.py": source, "beta.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["index", str(repo), "--json", "--debug-timings"], env=env)
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        timings = payload.get("timings_ms")
+        assert isinstance(timings, dict)
+        assert int(payload["duration_ms"]) == int(timings["total"])
+        assert int(timings["legacy_index"]) > 0
+        assert int(timings["symbol_index"]) == int(payload["symbol_index"]["duration_ms"])
+        assert int(timings["total"]) >= int(timings["legacy_index"])
+        assert int(timings["cleanup"]) >= 0
+        assert int(timings["consistency_checks"]) >= 0
+        slow_files = payload.get("slow_files")
+        assert isinstance(slow_files, list)
+        assert slow_files
+        first = slow_files[0]
+        assert isinstance(first, dict)
+        for key in (
+            "path",
+            "status",
+            "total_ms",
+            "parse_ms",
+            "edge_ms",
+            "embed_ms",
+            "persist_ms",
+            "symbol_count",
+            "chunk_count",
+        ):
+            assert key in first
+
+
+def test_cli_index_parses_changed_files_once_across_legacy_and_symbol_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    parse_calls = 0
+    original_extract = TreeSitterParser.extract_symbols
+
+    def _counted_extract(self: TreeSitterParser, path: str, source: str):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_extract(self, path, source)
+
+    monkeypatch.setattr(TreeSitterParser, "extract_symbols", _counted_extract)
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": "def alpha() -> int:\n    return 1\n"})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+
+        assert result.exit_code == 0, result.output
+        assert parse_calls == 1
 
 
 def test_cli_single_file_index_writes_symbol_db_at_repo_root() -> None:

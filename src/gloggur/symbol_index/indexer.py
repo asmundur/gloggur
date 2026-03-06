@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.config import GloggurConfig
+from gloggur.indexer.shared import ParsedFileSnapshot
 from gloggur.models import Symbol
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.symbol_index.models import IndexedFile, SymbolIndexResult, SymbolOccurrence
@@ -94,102 +96,141 @@ class SymbolIndexer:
         )
 
     def index_path(self, path: str) -> SymbolIndexResult:
+        return self.index_path_with_prefetched(path)
+
+    def index_path_with_prefetched(
+        self,
+        path: str,
+        *,
+        prefetched_files: list[ParsedFileSnapshot] | None = None,
+        file_paths: list[str] | None = None,
+    ) -> SymbolIndexResult:
         target = Path(os.path.abspath(path))
+        started = time.perf_counter()
         result = SymbolIndexResult(db_path=self.store.db_path)
+        prefetched_by_path = {
+            os.path.abspath(snapshot.path): snapshot for snapshot in prefetched_files or []
+        }
 
         files = (
-            list(self._iter_source_files(target))
-            if target.is_dir()
+            sorted(os.path.abspath(file_path) for file_path in file_paths)
+            if file_paths is not None
             else (
-                [str(target)]
-                if self._is_supported_file(str(target)) and not self._is_excluded(str(target))
-                else []
+                list(self._iter_source_files(target))
+                if target.is_dir()
+                else (
+                    [str(target)]
+                    if self._is_supported_file(str(target)) and not self._is_excluded(str(target))
+                    else []
+                )
             )
         )
         seen_paths: set[str] = set()
         for file_path in files:
             seen_paths.add(file_path)
             result.files_considered += 1
-            try:
-                stat = os.stat(file_path)
-                mtime_ns = int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)))
-            except OSError as exc:
-                result.add_failure(
-                    "symbol_index_stat_error",
-                    f"{file_path}: {type(exc).__name__}: {exc}",
-                )
-                continue
-
-            previous = self.store.get_file(file_path)
-            if previous is not None and previous.mtime_ns == mtime_ns:
-                result.files_unchanged += 1
-                continue
-
-            try:
-                with open(file_path, "rb") as handle:
-                    raw_source = handle.read()
-            except OSError as exc:
-                result.add_failure(
-                    "symbol_index_read_error",
-                    f"{file_path}: {type(exc).__name__}: {exc}",
-                )
-                continue
-            try:
-                source = raw_source.decode("utf8")
-            except UnicodeDecodeError as exc:
-                result.add_failure(
-                    "symbol_index_read_error",
-                    f"{file_path}: {type(exc).__name__}: {exc}",
-                )
-                continue
-
-            content_hash = self._hash_content(source)
-            span_index = LineByteSpanIndex.from_bytes(raw_source)
-            parser_entry = self.parser_registry.get_parser_for_path(file_path)
-            language = parser_entry.language if parser_entry else None
-            if previous is not None and previous.content_hash == content_hash:
-                self.store.upsert_file(
-                    IndexedFile(
-                        path=file_path,
-                        content_hash=content_hash,
-                        mtime_ns=mtime_ns,
-                        language=language,
-                        last_indexed=datetime.now(timezone.utc),
-                    )
-                )
-                result.files_unchanged += 1
-                continue
-
-            definitions: list[SymbolOccurrence] = []
-            symbols: list[Symbol] = []
-            if parser_entry is not None:
+            prefetched = prefetched_by_path.get(file_path)
+            mtime_ns = prefetched.mtime_ns if prefetched is not None else None
+            if mtime_ns is None:
                 try:
-                    symbols = parser_entry.parser.extract_symbols(file_path, source)
-                except Exception as exc:
+                    stat = os.stat(file_path)
+                    mtime_ns = int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)))
+                except OSError as exc:
                     result.add_failure(
-                        "symbol_index_parse_error",
+                        "symbol_index_stat_error",
                         f"{file_path}: {type(exc).__name__}: {exc}",
                     )
                     continue
-                for symbol in symbols:
-                    start_byte, end_byte = span_index.span_for_lines(
-                        symbol.start_line,
-                        symbol.end_line,
-                    )
-                    definitions.append(
-                        SymbolOccurrence(
-                            symbol=symbol.name,
-                            kind="def",
+            previous = self.store.get_file(file_path)
+            if prefetched is None and previous is not None and previous.mtime_ns == mtime_ns:
+                result.files_unchanged += 1
+                continue
+
+            if prefetched is not None:
+                source = prefetched.source
+                content_hash = prefetched.content_hash
+                span_index = prefetched.span_index
+                language = prefetched.language
+                symbols = prefetched.symbols
+                if previous is not None and previous.content_hash == content_hash:
+                    self.store.upsert_file(
+                        IndexedFile(
                             path=file_path,
-                            start_line=symbol.start_line,
-                            end_line=symbol.end_line,
-                            start_byte=start_byte,
-                            end_byte=end_byte,
-                            language=symbol.language or language,
-                            container=symbol.container_fqname,
-                            signature=symbol.signature,
+                            content_hash=content_hash,
+                            mtime_ns=mtime_ns,
+                            language=language,
+                            last_indexed=datetime.now(timezone.utc),
                         )
                     )
+                    result.files_unchanged += 1
+                    continue
+            else:
+                try:
+                    with open(file_path, "rb") as handle:
+                        raw_source = handle.read()
+                except OSError as exc:
+                    result.add_failure(
+                        "symbol_index_read_error",
+                        f"{file_path}: {type(exc).__name__}: {exc}",
+                    )
+                    continue
+                try:
+                    source = raw_source.decode("utf8")
+                except UnicodeDecodeError as exc:
+                    result.add_failure(
+                        "symbol_index_read_error",
+                        f"{file_path}: {type(exc).__name__}: {exc}",
+                    )
+                    continue
+
+                content_hash = self._hash_content(source)
+                span_index = LineByteSpanIndex.from_bytes(raw_source)
+                parser_entry = self.parser_registry.get_parser_for_path(file_path)
+                language = parser_entry.language if parser_entry else None
+                if previous is not None and previous.content_hash == content_hash:
+                    self.store.upsert_file(
+                        IndexedFile(
+                            path=file_path,
+                            content_hash=content_hash,
+                            mtime_ns=mtime_ns,
+                            language=language,
+                            last_indexed=datetime.now(timezone.utc),
+                        )
+                    )
+                    result.files_unchanged += 1
+                    continue
+
+                symbols = []
+                if parser_entry is not None:
+                    try:
+                        symbols = parser_entry.parser.extract_symbols(file_path, source)
+                    except Exception as exc:
+                        result.add_failure(
+                            "symbol_index_parse_error",
+                            f"{file_path}: {type(exc).__name__}: {exc}",
+                        )
+                        continue
+
+            definitions: list[SymbolOccurrence] = []
+            for symbol in symbols:
+                start_byte, end_byte = span_index.span_for_lines(
+                    symbol.start_line,
+                    symbol.end_line,
+                )
+                definitions.append(
+                    SymbolOccurrence(
+                        symbol=symbol.name,
+                        kind="def",
+                        path=file_path,
+                        start_line=symbol.start_line,
+                        end_line=symbol.end_line,
+                        start_byte=start_byte,
+                        end_byte=end_byte,
+                        language=symbol.language or language,
+                        container=symbol.container_fqname,
+                        signature=symbol.signature,
+                    )
+                )
 
             references = self._extract_references(
                 source=source,
@@ -232,6 +273,7 @@ class SymbolIndexer:
                     "symbol_index_prune_error",
                     f"{target}: {type(exc).__name__}: {exc}",
                 )
+        result.duration_ms = int((time.perf_counter() - started) * 1000)
         return result
 
     def _iter_source_files(self, root: Path) -> list[str]:

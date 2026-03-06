@@ -713,3 +713,35 @@ def test_index_file_with_outcome_classifies_embedding_provider_failures() -> Non
     assert outcome.reason == "embedding_provider_error"
     assert outcome.detail is not None
     assert "Embedding provider failure [openai]" in outcome.detail
+
+
+def test_indexer_builds_repo_symbol_catalog_once_per_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repository indexing should fetch the cached symbol catalog once per run."""
+    source = (
+        "def alpha(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def beta(value: int) -> int:\n"
+        "    return alpha(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"a.py": source, "b.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+        list_symbols_calls = 0
+        original_list_symbols = cache.list_symbols
+
+        def _counted_list_symbols() -> list:
+            nonlocal list_symbols_calls
+            list_symbols_calls += 1
+            return original_list_symbols()
+
+        monkeypatch.setattr(cache, "list_symbols", _counted_list_symbols)
+
+        result = indexer.index_repository(str(repo))
+
+        assert result.failed == 0
+        assert list_symbols_calls == 1

@@ -15,6 +15,7 @@ from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError, wrap_embedding_error
 from gloggur.graph.extractor import GraphEdgeExtractor
 from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.models import EdgeRecord, FileMetadata, IndexMetadata, Symbol, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.storage.vector_store import VectorStore
@@ -81,6 +82,10 @@ class IndexResult:
     symbols_removed: int = 0
     failed_reasons: dict[str, int] = field(default_factory=dict)
     failed_samples: list[str] = field(default_factory=list)
+    phase_timings_ms: dict[str, int] = field(default_factory=dict)
+    file_timings: list[FileTimingTrace] = field(default_factory=list)
+    parsed_files: list[ParsedFileSnapshot] = field(default_factory=list)
+    source_files: list[str] = field(default_factory=list)
 
     @property
     def indexed_files(self) -> int:
@@ -144,13 +149,25 @@ class FileIndexOutcome:
 
 
 @dataclass
+class FileIndexExecution:
+    """Detailed single-file execution state used by the CLI index command."""
+
+    outcome: FileIndexOutcome
+    prepared: PreparedFileIndex | None = None
+    timing: FileTimingTrace | None = None
+
+
+@dataclass
 class PreparedFileIndex:
     """Prepared file payload carried from parse phase into embedding/persist phase."""
 
     path: str
-    language: str
+    language: str | None
     content_hash: str
     source: str
+    repo_id: str
+    commit: str
+    snapshot: ParsedFileSnapshot
     symbols: list[Symbol]
     chunks: list[SymbolChunk]
     edges: list[EdgeRecord]
@@ -163,6 +180,7 @@ class PreparedFileIndex:
     symbols_added: int
     symbols_updated: int
     symbols_removed: int
+    timing: FileTimingTrace
 
 
 class Indexer:
@@ -210,12 +228,13 @@ class Indexer:
     def index_repository(self, path: str) -> IndexResult:
         """Index all supported files under a repository root."""
 
-        start = time.time()
+        start = time.perf_counter()
         self.cache.delete_index_metadata()
         # Test-only hook to make interruption windows deterministic.
         self._maybe_pause_after_metadata_delete()
 
         source_files = list(self._iter_source_files(path))
+        cached_file_hashes = self.cache.list_file_hashes()
         total_files = len(source_files)
         files_considered = 0
         indexed_files = 0
@@ -230,16 +249,22 @@ class Indexer:
         failed_samples: list[str] = []
         seen_paths: set[str] = set()
         prepared_files: list[PreparedFileIndex] = []
+        file_timings: list[FileTimingTrace] = []
         chunk_integrity = self._integrity_status(
             name="chunk_span",
             status="passed",
             detail="chunk/span integrity checks passed",
         )
 
+        parse_phase_started = time.perf_counter()
         for file_path in source_files:
             seen_paths.add(file_path)
             files_considered += 1
-            prepared, outcome = self._prepare_file_for_index(file_path)
+            prepared, outcome, timing = self._prepare_file_for_index(
+                file_path,
+                existing_content_hash=cached_file_hashes.get(file_path),
+            )
+            file_timings.append(timing)
             if prepared is not None:
                 prepared_files.append(prepared)
                 if self._scan_callback is not None:
@@ -266,9 +291,28 @@ class Indexer:
                     failed_samples.append(f"{file_path}: {outcome.detail}")
                 else:
                     failed_samples.append(file_path)
+        parse_phase_ms = int((time.perf_counter() - parse_phase_started) * 1000)
+
+        edge_phase_started = time.perf_counter()
+        if prepared_files:
+            repo_symbol_catalog = self._build_repo_symbol_catalog(prepared_files)
+            for prepared in prepared_files:
+                edge_started = time.perf_counter()
+                prepared.edges = self._build_graph_edges(
+                    path=prepared.path,
+                    source=prepared.source,
+                    symbols=prepared.symbols,
+                    candidate_symbols=repo_symbol_catalog,
+                    repo_id=prepared.repo_id,
+                    commit=prepared.commit,
+                    language=prepared.language or "unknown",
+                )
+                prepared.timing.edge_ms = int((time.perf_counter() - edge_started) * 1000)
+        edge_phase_ms = int((time.perf_counter() - edge_phase_started) * 1000)
 
         total_embedding_symbols = sum(len(prepared.chunks) for prepared in prepared_files)
         embedded_symbols_done = 0
+        embed_persist_started = time.perf_counter()
         for prepared in prepared_files:
             file_symbols_total = len(prepared.chunks)
             file_progress_done = 0
@@ -289,12 +333,16 @@ class Indexer:
                 progress_callback = _progress
 
             try:
+                embed_started = time.perf_counter()
                 prepared.chunks = self._apply_embeddings(
                     prepared.chunks,
                     progress_callback=progress_callback,
                 )
                 prepared.edges = self._apply_edge_embeddings(prepared.edges)
+                prepared.timing.embed_ms = int((time.perf_counter() - embed_started) * 1000)
+                persist_started = time.perf_counter()
                 self._persist_prepared_file(prepared)
+                prepared.timing.persist_ms = int((time.perf_counter() - persist_started) * 1000)
             except Exception as exc:
                 failed_files += 1
                 reason = (
@@ -302,6 +350,9 @@ class Indexer:
                     if isinstance(exc, EmbeddingProviderError)
                     else "storage_error"
                 )
+                prepared.timing.status = "failed"
+                prepared.timing.reason = reason
+                prepared.timing.detail = f"{type(exc).__name__}: {exc}"
                 failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
                 if len(failed_samples) < 5:
                     failed_samples.append(f"{prepared.path}: {type(exc).__name__}: {exc}")
@@ -309,12 +360,15 @@ class Indexer:
                 continue
 
             embedded_symbols_done += file_symbols_total
+            prepared.timing.status = "indexed"
             indexed_files += 1
             indexed_symbols += len(prepared.symbols)
             symbols_added += prepared.symbols_added
             symbols_updated += prepared.symbols_updated
             symbols_removed += prepared.symbols_removed
+        embed_persist_ms = int((time.perf_counter() - embed_persist_started) * 1000)
 
+        cleanup_started = time.perf_counter()
         stale_cleanup = self._prune_stale_files(seen_paths)
         files_removed += stale_cleanup["files_removed"]
         symbols_removed += stale_cleanup["symbols_removed"]
@@ -329,6 +383,8 @@ class Indexer:
 
         if self.vector_store:
             self.vector_store.save()
+        cleanup_ms = int((time.perf_counter() - cleanup_started) * 1000)
+        consistency_started = time.perf_counter()
         consistency = self._validate_vector_metadata_consistency()
         failed_files += consistency["failed"]
         for reason, count in consistency["failed_reasons"].items():
@@ -351,6 +407,7 @@ class Indexer:
                 "chunk_span": chunk_integrity,
             }
         )
+        consistency_ms = int((time.perf_counter() - consistency_started) * 1000)
 
         if failed_files == 0:
             metadata = IndexMetadata(
@@ -361,7 +418,7 @@ class Indexer:
             self.cache.set_index_metadata(metadata)
             self.cache.set_index_profile(self.config.embedding_profile())
 
-        duration_ms = int((time.time() - start) * 1000)
+        duration_ms = int((time.perf_counter() - start) * 1000)
         return IndexResult(
             files_considered=files_considered,
             indexed=indexed_files,
@@ -376,6 +433,16 @@ class Indexer:
             symbols_removed=symbols_removed,
             failed_reasons=failed_reasons,
             failed_samples=failed_samples,
+            phase_timings_ms={
+                "parse": parse_phase_ms,
+                "edge": edge_phase_ms,
+                "embed_persist": embed_persist_ms,
+                "cleanup": cleanup_ms,
+                "consistency_checks": consistency_ms,
+            },
+            file_timings=file_timings,
+            parsed_files=[prepared.snapshot for prepared in prepared_files],
+            source_files=source_files,
         )
 
     @staticmethod
@@ -400,92 +467,198 @@ class Indexer:
                 handle.write("1")
         time.sleep(pause_ms / 1000.0)
 
-    def index_file_with_outcome(self, path: str) -> FileIndexOutcome:
-        """Index a file and return an explicit terminal outcome."""
-        prepared, outcome = self._prepare_file_for_index(path)
+    def index_file_with_details(self, path: str) -> FileIndexExecution:
+        """Index a file and return outcome plus shared parse/timing state."""
+
+        existing = self.cache.get_file_metadata(path)
+        prepared, outcome, timing = self._prepare_file_for_index(
+            path,
+            existing_content_hash=existing.content_hash if existing else None,
+        )
         if prepared is None:
-            return outcome
+            return FileIndexExecution(outcome=outcome, timing=timing)
+
+        candidate_symbols = [
+            symbol for symbol in self.cache.list_symbols() if symbol.file_path != prepared.path
+        ]
+        candidate_symbols.extend(prepared.symbols)
+        edge_started = time.perf_counter()
+        prepared.edges = self._build_graph_edges(
+            path=prepared.path,
+            source=prepared.source,
+            symbols=prepared.symbols,
+            candidate_symbols=candidate_symbols,
+            repo_id=prepared.repo_id,
+            commit=prepared.commit,
+            language=prepared.language or "unknown",
+        )
+        timing.edge_ms = int((time.perf_counter() - edge_started) * 1000)
 
         try:
+            embed_started = time.perf_counter()
             prepared.chunks = self._apply_embeddings(
                 prepared.chunks,
                 progress_callback=self._progress_callback,
             )
             prepared.edges = self._apply_edge_embeddings(prepared.edges)
+            timing.embed_ms = int((time.perf_counter() - embed_started) * 1000)
+            persist_started = time.perf_counter()
             self._persist_prepared_file(prepared)
+            timing.persist_ms = int((time.perf_counter() - persist_started) * 1000)
         except Exception as exc:
-            return FileIndexOutcome(
-                status="failed",
-                reason=(
-                    "embedding_provider_error"
-                    if isinstance(exc, EmbeddingProviderError)
-                    else "storage_error"
+            reason = (
+                "embedding_provider_error"
+                if isinstance(exc, EmbeddingProviderError)
+                else "storage_error"
+            )
+            timing.status = "failed"
+            timing.reason = reason
+            timing.detail = f"{type(exc).__name__}: {exc}"
+            return FileIndexExecution(
+                outcome=FileIndexOutcome(
+                    status="failed",
+                    reason=reason,
+                    detail=f"{type(exc).__name__}: {exc}",
                 ),
-                detail=f"{type(exc).__name__}: {exc}",
+                prepared=prepared,
+                timing=timing,
             )
 
-        return FileIndexOutcome(
-            status="indexed",
-            symbols_indexed=len(prepared.symbols),
-            symbols_added=prepared.symbols_added,
-            symbols_updated=prepared.symbols_updated,
-            symbols_removed=prepared.symbols_removed,
+        timing.status = "indexed"
+        return FileIndexExecution(
+            outcome=FileIndexOutcome(
+                status="indexed",
+                symbols_indexed=len(prepared.symbols),
+                symbols_added=prepared.symbols_added,
+                symbols_updated=prepared.symbols_updated,
+                symbols_removed=prepared.symbols_removed,
+            ),
+            prepared=prepared,
+            timing=timing,
         )
 
+    def index_file_with_outcome(self, path: str) -> FileIndexOutcome:
+        """Index a file and return an explicit terminal outcome."""
+        return self.index_file_with_details(path).outcome
+
     def _prepare_file_for_index(
-        self, path: str
-    ) -> tuple[PreparedFileIndex | None, FileIndexOutcome]:
+        self,
+        path: str,
+        *,
+        existing_content_hash: str | None = None,
+    ) -> tuple[PreparedFileIndex | None, FileIndexOutcome, FileTimingTrace]:
         """Read/parse a file and compute symbol diff metadata for later persistence."""
 
+        started = time.perf_counter()
         try:
             with open(path, "rb") as handle:
                 raw_source = handle.read()
         except OSError as exc:
-            return None, FileIndexOutcome(
-                status="failed",
-                reason="read_error",
-                detail=f"{type(exc).__name__}: {exc}",
+            detail = f"{type(exc).__name__}: {exc}"
+            return (
+                None,
+                FileIndexOutcome(
+                    status="failed",
+                    reason="read_error",
+                    detail=detail,
+                ),
+                FileTimingTrace(
+                    path=path,
+                    status="failed",
+                    parse_ms=int((time.perf_counter() - started) * 1000),
+                    reason="read_error",
+                    detail=detail,
+                ),
             )
         try:
             source = raw_source.decode("utf8")
         except UnicodeDecodeError as exc:
-            return None, FileIndexOutcome(
-                status="failed",
-                reason="decode_error",
-                detail=f"{type(exc).__name__}: {exc}",
+            detail = f"{type(exc).__name__}: {exc}"
+            return (
+                None,
+                FileIndexOutcome(
+                    status="failed",
+                    reason="decode_error",
+                    detail=detail,
+                ),
+                FileTimingTrace(
+                    path=path,
+                    status="failed",
+                    parse_ms=int((time.perf_counter() - started) * 1000),
+                    reason="decode_error",
+                    detail=detail,
+                ),
             )
-        span_index = LineByteSpanIndex.from_bytes(raw_source)
 
         content_hash = self._hash_content(source)
-        existing = self.cache.get_file_metadata(path)
+        existing = self.cache.get_file_metadata(path) if existing_content_hash is None else None
+        cached_hash = (
+            existing_content_hash
+            if existing_content_hash is not None
+            else (existing.content_hash if existing else None)
+        )
+        if cached_hash == content_hash:
+            return (
+                None,
+                FileIndexOutcome(status="unchanged"),
+                FileTimingTrace(
+                    path=path,
+                    status="unchanged",
+                    parse_ms=int((time.perf_counter() - started) * 1000),
+                ),
+            )
+
+        span_index = LineByteSpanIndex.from_bytes(raw_source)
         previous_symbols: list[Symbol] = []
         previous_chunks: list[SymbolChunk] = []
         previous_edges: list[EdgeRecord] = []
         existing_symbols_by_id: dict[str, Symbol] = {}
-        if existing:
-            previous_symbols = self.cache.list_symbols_for_file(path)
-            previous_chunks = self.cache.list_chunks_for_file(path)
-            previous_edges = self.cache.list_edges_for_file(path)
-            existing_symbols_by_id = {symbol.id: symbol for symbol in previous_symbols}
-        if existing and existing.content_hash == content_hash:
-            return None, FileIndexOutcome(status="unchanged")
 
         parser_entry = self.parser_registry.get_parser_for_path(path)
         if not parser_entry:
-            return None, FileIndexOutcome(
-                status="failed",
-                reason="parser_unavailable",
-                detail="No parser registered for file extension.",
+            detail = "No parser registered for file extension."
+            return (
+                None,
+                FileIndexOutcome(
+                    status="failed",
+                    reason="parser_unavailable",
+                    detail=detail,
+                ),
+                FileTimingTrace(
+                    path=path,
+                    status="failed",
+                    parse_ms=int((time.perf_counter() - started) * 1000),
+                    reason="parser_unavailable",
+                    detail=detail,
+                ),
             )
 
         try:
             symbols = parser_entry.parser.extract_symbols(path, source)
         except Exception as exc:
-            return None, FileIndexOutcome(
-                status="failed",
-                reason="parse_error",
-                detail=f"{type(exc).__name__}: {exc}",
+            detail = f"{type(exc).__name__}: {exc}"
+            return (
+                None,
+                FileIndexOutcome(
+                    status="failed",
+                    reason="parse_error",
+                    detail=detail,
+                ),
+                FileTimingTrace(
+                    path=path,
+                    status="failed",
+                    parse_ms=int((time.perf_counter() - started) * 1000),
+                    reason="parse_error",
+                    detail=detail,
+                ),
             )
+
+        existing = existing or self.cache.get_file_metadata(path)
+        if existing:
+            previous_symbols = self.cache.list_symbols_for_file(path)
+            previous_chunks = self.cache.list_chunks_for_file(path)
+            previous_edges = self.cache.list_edges_for_file(path)
+            existing_symbols_by_id = {symbol.id: symbol for symbol in previous_symbols}
 
         repo_id = self._repo_id(path)
         commit = self._resolve_commit(path)
@@ -503,21 +676,23 @@ class Indexer:
         )
         chunk_integrity_error = self._validate_chunk_span_integrity(symbols=symbols, chunks=chunks)
         if chunk_integrity_error is not None:
-            return None, FileIndexOutcome(
-                status="failed",
-                reason="chunk_span_integrity_error",
-                detail=chunk_integrity_error,
+            return (
+                None,
+                FileIndexOutcome(
+                    status="failed",
+                    reason="chunk_span_integrity_error",
+                    detail=chunk_integrity_error,
+                ),
+                FileTimingTrace(
+                    path=path,
+                    status="failed",
+                    parse_ms=int((time.perf_counter() - started) * 1000),
+                    symbol_count=len(symbols),
+                    chunk_count=len(chunks),
+                    reason="chunk_span_integrity_error",
+                    detail=chunk_integrity_error,
+                ),
             )
-        candidate_symbols = self.cache.list_symbols()
-        edges = self._build_graph_edges(
-            path=path,
-            source=source,
-            symbols=symbols,
-            candidate_symbols=candidate_symbols,
-            repo_id=repo_id,
-            commit=commit,
-            language=parser_entry.language,
-        )
 
         previous_symbol_ids = existing.symbols if existing else []
         previous_chunk_ids = [chunk.chunk_id for chunk in previous_chunks]
@@ -535,14 +710,33 @@ class Indexer:
             if previous_symbol.body_hash != current_symbol.body_hash:
                 symbols_updated += 1
 
+        snapshot = ParsedFileSnapshot(
+            path=path,
+            source=source,
+            content_hash=content_hash,
+            mtime_ns=self._stat_mtime_ns(path),
+            language=parser_entry.language,
+            symbols=symbols,
+            span_index=span_index,
+        )
+        timing = FileTimingTrace(
+            path=path,
+            status="prepared",
+            parse_ms=int((time.perf_counter() - started) * 1000),
+            symbol_count=len(symbols),
+            chunk_count=len(chunks),
+        )
         prepared = PreparedFileIndex(
             path=path,
             language=parser_entry.language,
             content_hash=content_hash,
             source=source,
+            repo_id=repo_id,
+            commit=commit,
+            snapshot=snapshot,
             symbols=symbols,
             chunks=chunks,
-            edges=edges,
+            edges=[],
             previous_symbol_ids=previous_symbol_ids,
             previous_chunk_ids=previous_chunk_ids,
             previous_metadata=existing.model_copy(deep=True) if existing else None,
@@ -552,8 +746,9 @@ class Indexer:
             symbols_added=symbols_added,
             symbols_updated=symbols_updated,
             symbols_removed=symbols_removed,
+            timing=timing,
         )
-        return prepared, FileIndexOutcome(status="prepared", symbols_indexed=len(symbols))
+        return prepared, FileIndexOutcome(status="prepared", symbols_indexed=len(symbols)), timing
 
     @staticmethod
     def _validate_chunk_span_integrity(
@@ -677,6 +872,27 @@ class Indexer:
         if outcome.status == "indexed":
             return outcome.symbols_indexed
         return None
+
+    def _build_repo_symbol_catalog(self, prepared_files: list[PreparedFileIndex]) -> list[Symbol]:
+        """Return one per-run symbol catalog reused for edge extraction."""
+        if not prepared_files:
+            return []
+        changed_paths = {prepared.path for prepared in prepared_files}
+        catalog = [
+            symbol for symbol in self.cache.list_symbols() if symbol.file_path not in changed_paths
+        ]
+        for prepared in prepared_files:
+            catalog.extend(prepared.symbols)
+        return catalog
+
+    @staticmethod
+    def _stat_mtime_ns(path: str) -> int | None:
+        """Return mtime_ns when available without failing the index path."""
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            return None
+        return int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000)))
 
     def _iter_source_files(self, root: str) -> Iterable[str]:
         """Yield supported source files under a root directory."""
