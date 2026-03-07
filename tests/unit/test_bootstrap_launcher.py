@@ -382,3 +382,173 @@ def test_main_strict_mode_fails_on_degraded_optional_bootstrap_status(
     assert payload["ok"] is False
     assert payload["stage"] == "bootstrap"
     assert payload["error_code"] == "bootstrap_capability_degraded"
+
+
+def test_resolve_system_candidates_deduplicates_and_resolves_named_interpreters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "GLOGGUR_PREFLIGHT_SYSTEM_PYTHONS",
+        f"python3{os.pathsep}/opt/custom/python{os.pathsep}python3{os.pathsep}python",
+    )
+    monkeypatch.setattr(
+        bootstrap_launcher.shutil,
+        "which",
+        lambda name: {
+            "python3": "/usr/bin/python3",
+            "python": "/usr/local/bin/python",
+        }.get(name),
+    )
+
+    candidates = bootstrap_launcher._resolve_system_candidates(dict(os.environ))
+
+    assert candidates == [
+        "/usr/bin/python3",
+        "/opt/custom/python",
+        "/usr/local/bin/python",
+    ]
+
+
+def test_emit_ready_payload_plain_mode_reports_selected_runtime(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bootstrap_launcher._emit(
+        {
+            "ready": True,
+            "selected_candidate": "system",
+            "selected_interpreter": "/usr/bin/python3",
+        },
+        as_json=False,
+    )
+
+    assert "gloggur preflight OK: system -> /usr/bin/python3" in capsys.readouterr().err
+
+
+def test_emit_failure_payload_plain_mode_reports_remediation_steps(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bootstrap_launcher._emit(
+        {
+            "ok": False,
+            "error_code": "missing_package",
+            "error": "Dependencies missing.",
+            "compatibility": {
+                "remediation": [
+                    "Run bootstrap.",
+                    "Retry status.",
+                ]
+            },
+        },
+        as_json=False,
+    )
+
+    stderr = capsys.readouterr().err
+    assert "gloggur preflight failed (missing_package): Dependencies missing." in stderr
+    assert "1. Run bootstrap." in stderr
+    assert "2. Retry status." in stderr
+
+
+def test_main_dry_run_emits_ready_payload_without_exec(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = bootstrap_launcher.BootstrapStatus(
+        log_enabled=True,
+        state_enabled=True,
+        degraded_reason=[],
+        strict_mode=False,
+        log_path="/tmp/bootstrap.log",
+        state_path="/tmp/bootstrap.state.json",
+    )
+    plan = bootstrap_launcher.LaunchPlan(
+        ready=True,
+        args=["status", "--json"],
+        interpreter="/usr/bin/python3",
+        module="gloggur",
+        candidate_type="system",
+        env={"PYTHONPATH": "/tmp/repo"},
+        repo_root="/tmp/repo",
+        probes=[],
+    )
+    execute_calls: list[bootstrap_launcher.LaunchPlan] = []
+
+    monkeypatch.setenv("GLOGGUR_PREFLIGHT_DRY_RUN", "1")
+    monkeypatch.setattr(bootstrap_launcher, "resolve_bootstrap_status", lambda: status)
+    monkeypatch.setattr(bootstrap_launcher, "build_launch_plan", lambda args: plan)
+    monkeypatch.setattr(
+        bootstrap_launcher, "_execute", lambda current_plan: execute_calls.append(current_plan)
+    )
+
+    exit_code = bootstrap_launcher.main(["status", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert execute_calls == []
+    assert payload["ready"] is True
+    assert payload["selected_candidate"] == "system"
+    assert payload["bootstrap_status"]["log_enabled"] is True
+
+
+def test_main_executes_ready_plan_when_not_in_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = bootstrap_launcher.BootstrapStatus(
+        log_enabled=False,
+        state_enabled=False,
+        degraded_reason=[],
+        strict_mode=False,
+    )
+    plan = bootstrap_launcher.LaunchPlan(
+        ready=True,
+        args=["status"],
+        interpreter="/usr/bin/python3",
+        module="gloggur",
+        candidate_type="system",
+        env={"PYTHONPATH": "/tmp/repo"},
+        repo_root="/tmp/repo",
+        probes=[],
+    )
+    execute_calls: list[bootstrap_launcher.LaunchPlan] = []
+
+    monkeypatch.delenv("GLOGGUR_PREFLIGHT_DRY_RUN", raising=False)
+    monkeypatch.setattr(bootstrap_launcher, "resolve_bootstrap_status", lambda: status)
+    monkeypatch.setattr(bootstrap_launcher, "build_launch_plan", lambda args: plan)
+    monkeypatch.setattr(
+        bootstrap_launcher, "_execute", lambda current_plan: execute_calls.append(current_plan)
+    )
+
+    exit_code = bootstrap_launcher.main(["status"])
+
+    assert exit_code == 0
+    assert execute_calls == [plan]
+
+
+def test_main_maps_unexpected_preflight_exception_to_broken_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        bootstrap_launcher,
+        "resolve_bootstrap_status",
+        lambda: bootstrap_launcher.BootstrapStatus(
+            log_enabled=False,
+            state_enabled=False,
+            degraded_reason=[],
+            strict_mode=False,
+        ),
+    )
+    monkeypatch.setattr(bootstrap_launcher, "_repo_root", lambda: "/tmp/repo")
+    monkeypatch.setattr(
+        bootstrap_launcher,
+        "build_launch_plan",
+        lambda args: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    exit_code = bootstrap_launcher.main(["status", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == bootstrap_launcher.EXIT_CODES["broken_environment"]
+    assert payload["error_code"] == "broken_environment"
+    compatibility = payload["compatibility"]
+    assert compatibility["detected_environment"]["repo_root"] == "/tmp/repo"
+    assert "RuntimeError('boom')" in compatibility["detected_environment"]["exception"]

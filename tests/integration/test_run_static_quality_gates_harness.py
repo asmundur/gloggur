@@ -29,9 +29,11 @@ def test_run_static_quality_gates_harness_succeeds_for_verification_surface() ->
     assert payload["ok"] is True
     assert payload["target_scope"] == [
         "scripts/audit_verification_lanes.py",
+        "scripts/check_coverage_baseline.py",
         "scripts/check_error_catalog_contract.py",
         "scripts/run_static_quality_gates.py",
         "tests/unit/test_audit_verification_lanes.py",
+        "tests/unit/test_check_coverage_baseline.py",
         "tests/unit/test_verification_workflow.py",
         "tests/unit/test_run_static_quality_gates.py",
         "src/gloggur",

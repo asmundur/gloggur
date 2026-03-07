@@ -411,6 +411,7 @@ class HybridSearch:
                 )
         scored.sort(key=lambda item: (-item[0], -item[1], item[2], item[3], item[4]))
         results = []
+        seen_symbols: set[str] = set()
         for (
             ranking_score,
             similarity_score,
@@ -419,7 +420,10 @@ class HybridSearch:
             _chunk_id,
             symbol,
             chunk,
-        ) in scored[:top_k]:
+        ) in scored:
+            if symbol.id in seen_symbols:
+                continue
+            seen_symbols.add(symbol.id)
             results.append(
                 self._serialize_result(
                     symbol,
@@ -429,6 +433,8 @@ class HybridSearch:
                     context_radius=context_radius,
                 )
             )
+            if len(results) >= top_k:
+                break
         return results
 
     def _search_filtered(
@@ -484,16 +490,24 @@ class HybridSearch:
             for chunk in self._chunks_for_symbol(symbol):
                 rows.append((symbol.file_path, chunk.start_line, chunk.chunk_id, symbol, chunk))
         rows.sort(key=lambda item: (item[0], item[1], item[2]))
-        return [
-            self._serialize_result(
-                symbol,
-                chunk=chunk,
-                similarity_score=1.0,
-                ranking_score=1.0,
-                context_radius=context_radius,
+        results: list[dict[str, object]] = []
+        seen_symbols: set[str] = set()
+        for _file, _line, _chunk_id, symbol, chunk in rows:
+            if symbol.id in seen_symbols:
+                continue
+            seen_symbols.add(symbol.id)
+            results.append(
+                self._serialize_result(
+                    symbol,
+                    chunk=chunk,
+                    similarity_score=1.0,
+                    ranking_score=1.0,
+                    context_radius=context_radius,
+                )
             )
-            for _file, _line, _chunk_id, symbol, chunk in rows[:top_k]
-        ]
+            if len(results) >= top_k:
+                break
+        return results
 
     def _filter_symbols(self, filters: dict[str, str]):
         """Return symbols matching metadata filters with path normalization."""

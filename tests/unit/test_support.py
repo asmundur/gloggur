@@ -88,3 +88,51 @@ def test_resolve_existing_session_dir_rejects_invalid_session_id(tmp_path: Path)
         support_module._resolve_existing_session_dir(roots, "../escape")
 
     assert error.value.code == "support_session_invalid"
+
+
+@pytest.mark.parametrize(
+    "child_args",
+    [
+        (),
+        ("gloggur", "status"),
+        ("support", "collect"),
+        ("-h",),
+        ("./scripts/gloggur", "status"),
+    ],
+)
+def test_validate_child_args_rejects_invalid_forms(child_args: tuple[str, ...]) -> None:
+    with pytest.raises(support_module.SupportContractError) as error:
+        support_module._validate_child_args(child_args)
+
+    assert error.value.code == "support_command_invalid"
+
+
+def test_extract_config_path_supports_split_and_inline_forms() -> None:
+    assert support_module._extract_config_path(["status", "--config", "cfg.yaml"]) == "cfg.yaml"
+    assert support_module._extract_config_path(["status", "--config=cfg.json"]) == "cfg.json"
+    assert support_module._extract_config_path(["status", "--json"]) is None
+
+
+def test_parse_first_json_object_returns_none_for_non_json_prefix() -> None:
+    assert support_module._parse_first_json_object("plain text only") is None
+    assert support_module._parse_first_json_object("prefix {not-json") is None
+
+
+def test_read_session_payload_rejects_invalid_json(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session-1"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text("{not-json", encoding="utf8")
+
+    with pytest.raises(support_module.SupportContractError) as error:
+        support_module._read_session_payload(session_dir)
+
+    assert error.value.code == "support_session_invalid"
+
+
+def test_sanitize_optional_string_preserves_none_and_sanitizes_paths(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    assert support_module._sanitize_optional_string(None, repo_root) is None
+    sanitized = support_module._sanitize_optional_string(str(repo_root / "config.yaml"), repo_root)
+    assert sanitized == "<REPO_ROOT>/config.yaml"

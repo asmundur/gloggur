@@ -206,6 +206,26 @@ def test_verification_workflow_includes_static_quality_gate() -> None:
     assert "python scripts/run_static_quality_gates.py --format json" in run_script
 
 
+def test_verification_workflow_includes_coverage_baseline_gate_after_pytest() -> None:
+    """Verification workflow should validate coverage floors on the required 3.13 lane."""
+    tests_job = _verification_tests_job()
+    steps = tests_job.get("steps")
+    assert isinstance(steps, list)
+
+    pytest_index = next(
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, dict) and step.get("name") == "Run pytest"
+    )
+    coverage_step = steps[pytest_index + 1]
+    assert isinstance(coverage_step, dict)
+    assert coverage_step.get("name") == "Run coverage baseline contract"
+    assert coverage_step.get("if") == "${{ matrix.python-version == '3.13' }}"
+    run_script = coverage_step.get("run")
+    assert isinstance(run_script, str)
+    assert "python scripts/check_coverage_baseline.py --format json" in run_script
+
+
 def test_verification_workflow_includes_error_catalog_contract_check() -> None:
     """Verification workflow should run the published error-catalog contract.
 

@@ -13,9 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Verification control-plane files — all three gates (ruff, mypy, black) apply.
 CONTROL_PLANE_TARGETS = [
     "scripts/audit_verification_lanes.py",
+    "scripts/check_coverage_baseline.py",
     "scripts/check_error_catalog_contract.py",
     "scripts/run_static_quality_gates.py",
     "tests/unit/test_audit_verification_lanes.py",
+    "tests/unit/test_check_coverage_baseline.py",
     "tests/unit/test_verification_workflow.py",
     "tests/unit/test_run_static_quality_gates.py",
 ]
@@ -29,6 +31,7 @@ GATE_TARGETS = [*CONTROL_PLANE_TARGETS, RUNTIME_PACKAGE_DIR]
 # Mypy targets remain narrower until runtime mypy debt is cleared.
 MYPY_TARGETS = [
     "scripts/audit_verification_lanes.py",
+    "scripts/check_coverage_baseline.py",
     "scripts/check_error_catalog_contract.py",
     "scripts/run_static_quality_gates.py",
 ]

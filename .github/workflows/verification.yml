@@ -53,6 +53,10 @@ jobs:
       - name: Run pytest
         run: pytest -m "not performance"
 
+      - name: Run coverage baseline contract
+        if: ${{ matrix.python-version == '3.13' }}
+        run: python scripts/check_coverage_baseline.py --format json
+
       - name: Run verification static quality gates
         if: ${{ matrix.python-version == '3.13' }}
         run: python scripts/run_static_quality_gates.py --format json

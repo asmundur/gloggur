@@ -6,6 +6,7 @@ CI runs `pytest` as the primary required test gate.
 
 The verification workflow also includes non-pytest required gates on Python `3.13`:
 
+- `python scripts/check_coverage_baseline.py --format json`
 - `python scripts/run_static_quality_gates.py --format json`
 - `python scripts/check_error_catalog_contract.py --format json`
 - `python scripts/run_smoke.py --format json`
@@ -61,6 +62,9 @@ python scripts/run_smoke.py --format json
 
 # Run fail-closed static quality gates for the verification control plane
 python scripts/run_static_quality_gates.py --format json
+
+# Validate total and protected-module coverage against the checked-in baseline
+python scripts/check_coverage_baseline.py --format json
 
 # Run full packaging/distribution smoke (build -> install -> upgrade -> CLI checks)
 python scripts/run_packaging_smoke.py --format json

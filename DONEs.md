@@ -236,6 +236,58 @@ Copy this section for completed tasks:
 **Follow-ups**
 - None
 
+## bd-wkw - Coverage-guided hardening pass for orchestration and coverage guardrails
+
+**Completed On**: 2026-03-07
+**Completed By**: codex
+**Source**: Beads task `bd-wkw`
+
+**Delivered**
+- Added direct entrypoint and bootstrap hardening coverage for `gloggur.__main__`, dry-run/bootstrap emission branches, strict/degraded failure handling, runtime candidate normalization, and unexpected preflight failure mapping.
+- Hardened legacy hybrid search with duplicate-hit reconciliation and added FAISS-free unit coverage for semantic, structured, blocked, degraded, file-filter, and fallback retrieval paths.
+- Added minimal `MetadataStore` lifecycle helpers (`upsert_symbol`, `delete_symbol`) and covered lifecycle, chunk/edge, optional-field, and SQLite error-wrapping branches.
+- Expanded command-route coverage for support/artifact/watch/coverage/search wrapper paths and added focused regression tests for support helpers, adapter registry resolution, and coverage importer validation.
+- Added baseline-backed coverage verification via `scripts/check_coverage_baseline.py`, checked in `benchmarks/coverage_baseline.json`, and wired the required Python `3.13` workflow lane to fail on total or protected-module coverage regressions.
+
+**Behavioral Impact**
+- Legacy `HybridSearch` now returns one result per symbol instead of duplicate entries from multiple persisted chunks.
+- The verification workflow now enforces stable total coverage plus explicit floors for bootstrap, CLI dispatch, hybrid search, and metadata storage surfaces.
+- Metadata lifecycle branches can now be exercised through a minimal public API without changing existing read semantics.
+
+**Verification**
+- Commands run:
+  - `./.venv/bin/python -m pytest -n 0 tests/unit/test_bootstrap_launcher.py tests/unit/test_main_entrypoints.py tests/unit/test_hybrid_search.py tests/unit/test_metadata_store.py tests/unit/test_support.py tests/unit/test_adapter_registry.py tests/unit/test_coverage_importers.py tests/unit/test_cli_main_hardening.py tests/unit/test_check_coverage_baseline.py tests/unit/test_run_static_quality_gates.py tests/unit/test_verification_workflow.py tests/integration/test_check_coverage_baseline_harness.py tests/integration/test_run_static_quality_gates_harness.py -q`
+  - `./.venv/bin/python scripts/run_static_quality_gates.py --format json`
+  - `./.venv/bin/python -m pytest -n 0 -m 'not performance' -q`
+  - `./.venv/bin/python scripts/check_coverage_baseline.py --format json`
+- Results:
+  - Focused hardening/verification slice passed (`97 passed`).
+  - Required static-quality gate passed with the new coverage-baseline verifier included in Ruff, mypy, and Black control-plane scope.
+  - Full required pytest lane passed (`706 passed, 1 deselected`) with total coverage `85.61%`.
+  - Coverage baseline contract passed with protected-module results: `bootstrap_launcher.py 83.8%`, `cli/main.py 84.31%`, `search/hybrid_search.py 89.66%`, `storage/metadata_store.py 95.13%`.
+
+**Evidence**
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/search/hybrid_search.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/src/gloggur/storage/metadata_store.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/scripts/check_coverage_baseline.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/benchmarks/coverage_baseline.json`
+- Files: `/Users/auzi/vinnustofa/gloggur/.github/workflows/verification.yml`
+- Files: `/Users/auzi/vinnustofa/gloggur/docs/VERIFICATION.md`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_bootstrap_launcher.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_main_entrypoints.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_hybrid_search.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_metadata_store.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_support.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_adapter_registry.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_coverage_importers.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_cli_main_hardening.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/unit/test_check_coverage_baseline.py`
+- Files: `/Users/auzi/vinnustofa/gloggur/tests/integration/test_check_coverage_baseline_harness.py`
+- PR/commit/issues: `bd-wkw`, local working tree changes
+
+**Follow-ups**
+- None
+
 ## R1 - Harden OS-Level Failure Handling (Permissions, Read-only FS, Disk Full)
 
 **Completed On**: 2026-02-25

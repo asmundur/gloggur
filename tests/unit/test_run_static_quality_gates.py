@@ -73,6 +73,7 @@ def test_static_gate_target_scope_keeps_runtime_package_in_ruff_and_black_only()
     ]
     assert static_gates.MYPY_TARGETS == [
         "scripts/audit_verification_lanes.py",
+        "scripts/check_coverage_baseline.py",
         "scripts/check_error_catalog_contract.py",
         "scripts/run_static_quality_gates.py",
     ]
@@ -84,7 +85,7 @@ def test_static_gate_target_scope_keeps_runtime_package_in_ruff_and_black_only()
 
     assert mypy_stage.name == "mypy"
     assert static_gates.RUNTIME_PACKAGE_DIR not in mypy_stage.command
-    assert mypy_stage.command[-3:] == static_gates.MYPY_TARGETS
+    assert mypy_stage.command[-len(static_gates.MYPY_TARGETS) :] == static_gates.MYPY_TARGETS
 
     assert black_stage.name == "black"
     assert black_stage.command[-1] == static_gates.RUNTIME_PACKAGE_DIR

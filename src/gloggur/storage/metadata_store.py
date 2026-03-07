@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from collections.abc import Iterator
@@ -215,6 +216,58 @@ class MetadataStore:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_edge(row) for row in rows]
 
+    def upsert_symbol(self, symbol: Symbol) -> None:
+        """Insert or replace one symbol row without changing schema semantics."""
+        if not isinstance(symbol, Symbol):
+            raise TypeError("symbol must be a Symbol instance")
+        values = self._symbol_row_values(symbol)
+        columns = (
+            "id",
+            "name",
+            "kind",
+            "fqname",
+            "file_path",
+            "start_line",
+            "end_line",
+            "container_id",
+            "container_fqname",
+            "signature",
+            "docstring",
+            "body_hash",
+            "embedding_vector",
+            "language",
+            "repo_id",
+            "commit_hash",
+            "visibility",
+            "exported",
+            "tokens_estimate",
+            "invariants",
+            "calls",
+            "covered_by",
+            "is_serialization_boundary",
+            "implicit_contract",
+            "signals",
+            "attributes",
+        )
+        placeholders = ",".join("?" for _ in columns)
+        assignments = ", ".join(
+            f"{column}=excluded.{column}" for column in columns if column != "id"
+        )
+        with self._connect() as conn:
+            conn.execute(
+                (
+                    f"INSERT INTO symbols ({','.join(columns)}) VALUES ({placeholders}) "
+                    f"ON CONFLICT(id) DO UPDATE SET {assignments}"
+                ),
+                values,
+            )
+
+    def delete_symbol(self, symbol_id: str) -> bool:
+        """Delete one symbol row and report whether anything was removed."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM symbols WHERE id = ?", (symbol_id,))
+            return int(cursor.rowcount or 0) > 0
+
     def _filter_symbols_exact_or_prefix(
         self,
         file_path: str,
@@ -322,8 +375,6 @@ class MetadataStore:
     @staticmethod
     def _row_to_symbol(row: sqlite3.Row) -> Symbol:
         """Convert a symbols table row into a Symbol."""
-        import json
-
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
         invariants = json.loads(row["invariants"]) if row["invariants"] else []
         calls = json.loads(row["calls"]) if row["calls"] else []
@@ -367,8 +418,6 @@ class MetadataStore:
     @staticmethod
     def _row_to_chunk(row: sqlite3.Row) -> SymbolChunk:
         """Convert a chunks table row into a SymbolChunk."""
-        import json
-
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
         return SymbolChunk(
             chunk_id=row["chunk_id"],
@@ -393,8 +442,6 @@ class MetadataStore:
     @staticmethod
     def _row_to_edge(row: sqlite3.Row) -> EdgeRecord:
         """Convert an edges table row into an EdgeRecord."""
-        import json
-
         vector = json.loads(row["embedding_vector"]) if row["embedding_vector"] else None
         return EdgeRecord(
             edge_id=row["edge_id"],
@@ -410,4 +457,41 @@ class MetadataStore:
             commit=row["commit_hash"],
             text=row["text"],
             embedding_vector=vector,
+        )
+
+    @staticmethod
+    def _symbol_row_values(symbol: Symbol) -> tuple[object, ...]:
+        """Serialize one Symbol into the database row order used by upsert_symbol."""
+        return (
+            symbol.id,
+            symbol.name,
+            symbol.kind,
+            symbol.fqname,
+            symbol.file_path,
+            symbol.start_line,
+            symbol.end_line,
+            symbol.container_id,
+            symbol.container_fqname,
+            symbol.signature,
+            symbol.docstring,
+            symbol.body_hash,
+            json.dumps(symbol.embedding_vector) if symbol.embedding_vector is not None else None,
+            symbol.language,
+            symbol.repo_id,
+            symbol.commit,
+            symbol.visibility,
+            int(symbol.exported) if symbol.exported is not None else None,
+            symbol.tokens_estimate,
+            json.dumps(list(symbol.invariants)),
+            json.dumps(list(symbol.calls)),
+            json.dumps(list(symbol.covered_by)),
+            int(bool(symbol.is_serialization_boundary)),
+            symbol.implicit_contract,
+            json.dumps(
+                [
+                    entry.model_dump(mode="json") if hasattr(entry, "model_dump") else entry
+                    for entry in symbol.signals
+                ]
+            ),
+            json.dumps(dict(symbol.attributes)),
         )
