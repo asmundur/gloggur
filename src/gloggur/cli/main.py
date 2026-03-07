@@ -430,6 +430,10 @@ RESUME_REMEDIATION: dict[str, list[str]] = {
         "Run `gloggur index . --json` to rebuild missing metadata.",
         "Avoid reusing cache state until the rebuild completes successfully.",
     ],
+    "stale_build_state": [
+        "Recorded index build state is stale (the saved build PID is no longer running).",
+        "Run `gloggur index . --json` to clear stale build markers and rebuild cleanly.",
+    ],
     "build_in_progress": [
         "Wait for the active index build to finish before relying on this cache.",
         "If the build appears stuck, inspect the writer process "
@@ -803,15 +807,54 @@ def _normalize_build_state_payload(build_state: object) -> dict[str, object] | N
     return payload
 
 
+def _build_state_pid(build_state: dict[str, object] | None) -> int | None:
+    """Return normalized positive PID from build-state payload when present."""
+    if not isinstance(build_state, dict):
+        return None
+    raw_pid = build_state.get("pid")
+    try:
+        pid = int(raw_pid) if raw_pid is not None else None
+    except (TypeError, ValueError):
+        return None
+    if pid is None or pid <= 0:
+        return None
+    return pid
+
+
+def _classify_build_state_for_health(
+    build_state: object,
+) -> tuple[dict[str, object] | None, bool]:
+    """Return normalized build-state plus stale flag for dead-PID in-progress writers."""
+    normalized = _normalize_build_state_payload(build_state)
+    if normalized is None:
+        return None, False
+    if str(normalized.get("state")) != "building":
+        return normalized, False
+    pid = _build_state_pid(normalized)
+    if pid is None:
+        return normalized, False
+    if is_process_running(pid):
+        normalized["pid"] = pid
+        return normalized, False
+    stale_payload = dict(normalized)
+    stale_payload["state"] = "interrupted"
+    stale_payload["pid"] = pid
+    stale_payload["cleanup_pending"] = True
+    return stale_payload, True
+
+
 def _metadata_reindex_reason(
     metadata_present: bool,
     *,
     build_state: dict[str, object] | None = None,
+    stale_build_state: bool = False,
 ) -> str | None:
     """Return reason when index metadata is missing/incomplete."""
     if metadata_present:
         return None
     normalized_build_state = _normalize_build_state_payload(build_state)
+    if stale_build_state:
+        return "index build state is stale because recorded build pid is no longer running"
     if normalized_build_state is not None:
         state = normalized_build_state["state"]
         if state == "building":
@@ -826,12 +869,18 @@ def _metadata_reindex_signal(
     metadata_present: bool,
     has_last_success_marker: bool,
     build_state: dict[str, object] | None = None,
+    stale_build_state: bool = False,
 ) -> tuple[str, str] | None:
     """Return machine-readable metadata reindex signal with interruption disambiguation."""
     if metadata_present:
         return None
     normalized_build_state = _normalize_build_state_payload(build_state)
     if normalized_build_state is not None:
+        if stale_build_state:
+            return (
+                "stale_build_state",
+                "index build state is stale because the recorded build pid is no longer running",
+            )
         state = str(normalized_build_state["state"])
         if state == "building":
             return (
@@ -850,7 +899,11 @@ def _metadata_reindex_signal(
             "index (index run interrupted or failed "
             "before completion)",
         )
-    reason = _metadata_reindex_reason(metadata_present=False, build_state=normalized_build_state)
+    reason = _metadata_reindex_reason(
+        metadata_present=False,
+        build_state=normalized_build_state,
+        stale_build_state=stale_build_state,
+    )
     return ("missing_index_metadata", reason or "index metadata missing")
 
 
@@ -910,6 +963,7 @@ def _build_resume_contract(
     tool_version: str = GLOGGUR_VERSION,
     last_success_tool_version: str | None = None,
     allow_tool_version_drift: bool = False,
+    stale_build_state: bool = False,
 ) -> dict[str, object]:
     """Build deterministic resume/fingerprint metadata for status and search JSON payloads."""
     normalized_expected_profile = (
@@ -924,6 +978,7 @@ def _build_resume_contract(
             last_success_resume_fingerprint is not None or last_success_resume_at is not None
         ),
         build_state=normalized_build_state,
+        stale_build_state=stale_build_state,
     )
     profile_reason = _profile_reindex_reason(
         metadata_present,
@@ -948,6 +1003,7 @@ def _build_resume_contract(
             metadata_reason = _metadata_reindex_reason(
                 metadata_present=False,
                 build_state=normalized_build_state,
+                stale_build_state=stale_build_state,
             )
             reason_details.append(metadata_reason or "index metadata missing")
     if profile_reason is not None:
@@ -1108,10 +1164,14 @@ def _build_search_health_snapshot(
     metadata = cache.get_index_metadata()
     get_build_state = getattr(cache, "get_build_state", None)
     raw_build_state = get_build_state() if callable(get_build_state) else None
-    build_state = _normalize_build_state_payload(raw_build_state)
+    build_state, stale_build_state = _classify_build_state_for_health(raw_build_state)
     cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
     last_success_tool_version = cache.get_last_success_tool_version()
-    metadata_reason = _metadata_reindex_reason(metadata is not None, build_state=build_state)
+    metadata_reason = _metadata_reindex_reason(
+        metadata is not None,
+        build_state=build_state,
+        stale_build_state=stale_build_state,
+    )
     profile_reason = _profile_reindex_reason(
         metadata_present=metadata is not None,
         cached_profile=cached_profile,
@@ -1144,6 +1204,7 @@ def _build_search_health_snapshot(
         tool_version=GLOGGUR_VERSION,
         last_success_tool_version=last_success_tool_version,
         allow_tool_version_drift=allow_tool_version_drift,
+        stale_build_state=stale_build_state,
     )
     get_search_integrity = getattr(cache, "get_search_integrity", None)
     raw_integrity = get_search_integrity() if callable(get_search_integrity) else None
@@ -1157,9 +1218,11 @@ def _build_search_health_snapshot(
         warning_codes.append("reindex_required")
     if build_state is not None:
         state = str(build_state.get("state"))
-        if state == "building" and "build_in_progress" not in warning_codes:
+        if stale_build_state and "stale_build_state" not in warning_codes:
+            warning_codes.append("stale_build_state")
+        elif state == "building" and "build_in_progress" not in warning_codes:
             warning_codes.append("build_in_progress")
-        if state == "interrupted" and "index_interrupted" not in warning_codes:
+        elif state == "interrupted" and "index_interrupted" not in warning_codes:
             warning_codes.append("index_interrupted")
 
     semantic_search_allowed = not needs_reindex
@@ -3096,6 +3159,15 @@ def index(
     with cache_write_lock(config.cache_dir):
         click.echo("Indexing...", err=True)
         active_cache = _create_cache_manager(config.cache_dir)
+        get_prior_build_state = getattr(active_cache, "get_build_state", None)
+        raw_prior_build_state = get_prior_build_state() if callable(get_prior_build_state) else None
+        prior_build_state, stale_prior_build_state = _classify_build_state_for_health(
+            raw_prior_build_state
+        )
+        if stale_prior_build_state and prior_build_state is not None:
+            clear_prior_build_state = getattr(active_cache, "clear_build_state", None)
+            if callable(clear_prior_build_state):
+                clear_prior_build_state()
         active_cache.cleanup_staged_builds()
         stage_dir = active_cache.prepare_staged_build(build_id)
         stage_config = replace(config, cache_dir=stage_dir)

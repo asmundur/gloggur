@@ -157,8 +157,7 @@ def test_concurrent_index_runs_keep_cache_consistent() -> None:
     with TestFixtures() as fixtures:
         files = {
             f"module_{idx}.py": (
-                f"def handler_{idx}(value: int) -> int:\n"
-                f"    return value + {idx}\n"
+                f"def handler_{idx}(value: int) -> int:\n" f"    return value + {idx}\n"
             )
             for idx in range(300)
         }
@@ -232,12 +231,7 @@ def test_index_lock_contention_fails_fast_without_hanging() -> None:
     """When lock is held, index command should fail quickly with explicit lock timeout."""
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
-            {
-                "sample.py": (
-                    "def sample(value: int) -> int:\n"
-                    "    return value + 1\n"
-                )
-            }
+            {"sample.py": ("def sample(value: int) -> int:\n" "    return value + 1\n")}
         )
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
@@ -307,8 +301,7 @@ def test_clear_cache_during_index_run_fails_fast_and_index_completes_cleanly() -
         repo = fixtures.create_temp_repo(
             {
                 f"module_{idx}.py": (
-                    f"def handler_{idx}(value: int) -> int:\n"
-                    f"    return value + {idx}\n"
+                    f"def handler_{idx}(value: int) -> int:\n" f"    return value + {idx}\n"
                 )
                 for idx in range(40)
             }
@@ -364,8 +357,7 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
     with TestFixtures() as fixtures:
         files = {
             f"module_{idx}.py": (
-                f"def handler_{idx}(value: int) -> int:\n"
-                f"    return value + {idx}\n"
+                f"def handler_{idx}(value: int) -> int:\n" f"    return value + {idx}\n"
             )
             for idx in range(120)
         }
@@ -453,8 +445,7 @@ def test_first_time_interrupted_index_leaves_non_ready_cache_with_stable_search_
         repo = fixtures.create_temp_repo(
             {
                 f"module_{idx}.py": (
-                    f"def handler_{idx}(value: int) -> int:\n"
-                    f"    return value + {idx}\n"
+                    f"def handler_{idx}(value: int) -> int:\n" f"    return value + {idx}\n"
                 )
                 for idx in range(40)
             }
@@ -510,6 +501,77 @@ def test_first_time_interrupted_index_leaves_non_ready_cache_with_stable_search_
         metadata = search_payload["metadata"]
         assert isinstance(metadata, dict)
         assert metadata["build_state"]["state"] == "interrupted"
+
+        recovery = _run_cli(["index", str(repo), "--json"], base_env, timeout=240)
+        assert recovery.returncode == 0, recovery.stderr
+        recovered_status = _run_cli(["status", "--json"], base_env, timeout=60)
+        recovered_payload = _parse_json_payload(recovered_status.stdout)
+        assert recovered_payload["needs_reindex"] is False
+        assert recovered_payload["build_state"] is None
+
+
+def test_sigkill_interrupted_index_is_reported_as_stale_and_recovers() -> None:
+    """SIGKILL-interrupted builds should surface stale_build_state and recover on next index."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                f"module_{idx}.py": (
+                    f"def handler_{idx}(value: int) -> int:\n" f"    return value + {idx}\n"
+                )
+                for idx in range(40)
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        ready_path = Path(cache_dir) / ".metadata-delete-ready"
+        paused_env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_MODEL": "local",
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_MS": "3000",
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_READY_FILE": str(ready_path),
+        }
+        interrupted = subprocess.Popen(
+            [sys.executable, "-m", "gloggur.cli.main", "index", str(repo), "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=paused_env,
+        )
+        try:
+            _wait_for_path_or_process_exit(ready_path, interrupted, timeout=8.0)
+        finally:
+            interrupted.kill()
+            interrupted.wait(timeout=15)
+
+        base_env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_MODEL": "local",
+        }
+        status = _run_cli(["status", "--json"], base_env, timeout=60)
+        assert status.returncode == 0, status.stderr
+        status_payload = _parse_json_payload(status.stdout)
+        assert status_payload["metadata"] is None
+        assert status_payload["needs_reindex"] is True
+        assert status_payload["resume_reason_codes"] == [
+            "stale_build_state",
+            "missing_index_metadata",
+        ]
+        warning_codes = set(status_payload.get("warning_codes", []))
+        assert "stale_build_state" in warning_codes
+        assert "build_in_progress" not in warning_codes
+        build_state = status_payload["build_state"]
+        assert isinstance(build_state, dict)
+        assert build_state["state"] == "interrupted"
+        assert build_state["cleanup_pending"] is True
+
+        search = _run_cli(["search", "handler_10", "--json", "--top-k", "5"], base_env, timeout=60)
+        assert search.returncode == 1, search.stderr
+        search_payload = _parse_json_payload(search.stdout)
+        metadata = search_payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["resume_reason_codes"] == ["stale_build_state", "missing_index_metadata"]
 
         recovery = _run_cli(["index", str(repo), "--json"], base_env, timeout=240)
         assert recovery.returncode == 0, recovery.stderr

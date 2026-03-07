@@ -155,21 +155,26 @@ def test_build_status_payload_zeroes_total_symbols_for_non_ready_cache(tmp_path:
         local_embedding_model="model-a",
     )
     cache = CacheManager(CacheConfig(cache_dir))
-    cache.upsert_symbols([Symbol(
-        id="sample.py:1:add",
-        name="add",
-        kind="function",
-        file_path="sample.py",
-        start_line=1,
-        end_line=2,
-        signature="def add(a, b):",
-        body_hash="abc123",
-    )])
+    cache.upsert_symbols(
+        [
+            Symbol(
+                id="sample.py:1:add",
+                name="add",
+                kind="function",
+                file_path="sample.py",
+                start_line=1,
+                end_line=2,
+                signature="def add(a, b):",
+                body_hash="abc123",
+            )
+        ]
+    )
+    active_pid = os.getpid()
     cache.write_build_state(
         {
             "state": "building",
             "build_id": "build-1",
-            "pid": 123,
+            "pid": active_pid,
             "started_at": "2026-03-07T00:00:00+00:00",
             "updated_at": "2026-03-07T00:00:01+00:00",
             "stage": "embed_chunks",
@@ -186,11 +191,49 @@ def test_build_status_payload_zeroes_total_symbols_for_non_ready_cache(tmp_path:
     assert payload["build_state"] == {
         "state": "building",
         "build_id": "build-1",
-        "pid": 123,
+        "pid": active_pid,
         "started_at": "2026-03-07T00:00:00+00:00",
         "updated_at": "2026-03-07T00:00:01+00:00",
         "stage": "embed_chunks",
         "cleanup_pending": False,
+    }
+
+
+def test_build_status_payload_marks_dead_build_pid_as_stale(tmp_path: Path) -> None:
+    """Dead build PIDs should be treated as stale instead of active in-progress builds."""
+    cache_dir = str(tmp_path / "cache")
+    config = cli_main.GloggurConfig(
+        cache_dir=cache_dir,
+        embedding_provider="test",
+        local_embedding_model="model-a",
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.write_build_state(
+        {
+            "state": "building",
+            "build_id": "build-stale",
+            "pid": 424242,
+            "started_at": "2026-03-07T00:00:00+00:00",
+            "updated_at": "2026-03-07T00:00:01+00:00",
+            "stage": "embed_chunks",
+            "cleanup_pending": False,
+        }
+    )
+
+    payload = cli_main._build_status_payload(config, cache)
+
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["stale_build_state", "missing_index_metadata"]
+    assert "stale_build_state" in payload["warning_codes"]
+    assert "build_in_progress" not in payload["warning_codes"]
+    assert payload["build_state"] == {
+        "state": "interrupted",
+        "build_id": "build-stale",
+        "pid": 424242,
+        "started_at": "2026-03-07T00:00:00+00:00",
+        "updated_at": "2026-03-07T00:00:01+00:00",
+        "stage": "embed_chunks",
+        "cleanup_pending": True,
     }
 
 
@@ -901,6 +944,38 @@ def test_resume_contract_build_in_progress_has_dual_reason_codes() -> None:
 
     assert payload["resume_decision"] == "reindex_required"
     assert payload["resume_reason_codes"] == ["build_in_progress", "missing_index_metadata"]
+
+
+def test_resume_contract_stale_build_state_has_explicit_reason_codes() -> None:
+    """Stale build state should emit explicit stale code before legacy metadata fallback."""
+    payload = _build_resume_contract(
+        metadata=None,
+        build_state={
+            "state": "interrupted",
+            "build_id": "build-1",
+            "pid": 424242,
+            "started_at": "2026-03-07T00:00:00+00:00",
+            "updated_at": "2026-03-07T00:00:01+00:00",
+            "stage": "embed_chunks",
+            "cleanup_pending": True,
+        },
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile=None,
+        reset_reason=None,
+        needs_reindex=True,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+        stale_build_state=True,
+    )
+
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["stale_build_state", "missing_index_metadata"]
+    remediation = payload["resume_remediation"]
+    assert isinstance(remediation, dict)
+    assert "stale_build_state" in remediation
+    assert isinstance(remediation["stale_build_state"], list)
+    assert remediation["stale_build_state"]
 
 
 def test_resume_contract_interrupted_index_has_machine_reason_and_remediation() -> None:
@@ -2242,6 +2317,7 @@ def test_search_json_requires_reindex_while_build_is_in_progress(
         "_create_runtime",
         lambda **_kwargs: (config, FakeCache(), object()),
     )
+    monkeypatch.setattr(cli_main, "is_process_running", lambda _pid: True)
 
     result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
 
@@ -2261,6 +2337,83 @@ def test_search_json_requires_reindex_while_build_is_in_progress(
         "cleanup_pending": False,
     }
     assert metadata["resume_reason_codes"] == ["build_in_progress", "missing_index_metadata"]
+
+
+def test_search_json_reports_stale_build_state_for_dead_pid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """search --json should classify dead-PID build markers as stale, not in-progress."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> None:
+            return None
+
+        def get_build_state(self) -> dict[str, object]:
+            return {
+                "state": "building",
+                "build_id": "build-1",
+                "pid": 424242,
+                "started_at": "2026-03-07T00:00:00+00:00",
+                "updated_at": "2026-03-07T00:00:01+00:00",
+                "stage": "embed_chunks",
+                "cleanup_pending": False,
+            }
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> None:
+            return None
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> None:
+            return None
+
+        def get_search_integrity(self) -> None:
+            return None
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="test",
+        local_embedding_model="model-a",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+    monkeypatch.setattr(cli_main, "is_process_running", lambda _pid: False)
+
+    result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "search_cache_not_ready"
+    metadata = payload["metadata"]
+    assert metadata["build_state"] == {
+        "state": "interrupted",
+        "build_id": "build-1",
+        "pid": 424242,
+        "started_at": "2026-03-07T00:00:00+00:00",
+        "updated_at": "2026-03-07T00:00:01+00:00",
+        "stage": "embed_chunks",
+        "cleanup_pending": True,
+    }
+    assert metadata["resume_reason_codes"] == ["stale_build_state", "missing_index_metadata"]
+    warning_codes = set(metadata["warning_codes"])
+    assert "stale_build_state" in warning_codes
+    assert "build_in_progress" not in warning_codes
 
 
 def test_search_json_allows_explicit_tool_version_drift_override(
@@ -3136,7 +3289,15 @@ def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
 
     result = runner.invoke(
         cli_main.cli,
-        ["search", "needle query", "--json", "--mode", "semantic", "--ranking-mode", "source-first"],
+        [
+            "search",
+            "needle query",
+            "--json",
+            "--mode",
+            "semantic",
+            "--ranking-mode",
+            "source-first",
+        ],
     )
 
     assert result.exit_code == 0, result.output

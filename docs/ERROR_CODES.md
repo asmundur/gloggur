@@ -404,6 +404,11 @@ Fields:
   - Meaning: index metadata required for safe resume is missing.
   - Retryability: retry after a successful full index run.
   - Operator action: run `gloggur index . --json`.
+- `stale_build_state`
+  - Command(s): `status`, `search`.
+  - Meaning: cached build metadata says in-progress, but the recorded build PID is no longer running.
+  - Retryability: retry after stale marker cleanup and a successful full index run.
+  - Operator action: rerun `gloggur index . --json` to clear stale build markers and rebuild.
 - `build_in_progress`
   - Command(s): `status`, `search`.
   - Meaning: an index build is currently running and metadata has not been committed yet.

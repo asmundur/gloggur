@@ -94,6 +94,7 @@ def test_error_catalog_contract_passes_when_required_headings_and_codes_exist(
                 "`watch_last_batch_inconsistent`",
                 "## Resume Reason Codes",
                 "`missing_index_metadata`",
+                "`stale_build_state`",
                 "`build_in_progress`",
                 "`index_interrupted`",
                 "`missing_cached_profile`",

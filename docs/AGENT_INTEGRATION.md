@@ -282,6 +282,6 @@ Publication consistency:
 
 - index writes are staged under `.gloggur-cache/.builds/<build_id>/`
 - the last committed cache remains readable until the staged build publishes successfully
-- `status --json` exposes in-progress or interrupted writers through `build_state`
+- `status --json` exposes in-progress or interrupted writers through `build_state`; stale dead-PID in-progress markers are reclassified to interrupted semantics and surfaced via `stale_build_state`
 - if a first build is interrupted, `status` reports `resume_reason_codes` including `index_interrupted` / `missing_index_metadata`, and `search --json` fails non-zero with `search_cache_not_ready`
 - if a rebuild is interrupted after a healthy cache already exists, readers keep using the last committed cache while `build_state.state="interrupted"` signals the abandoned staged build
