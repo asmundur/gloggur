@@ -1,0 +1,65 @@
+name: Performance
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  performance:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python --version
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,openai,gemini]" -v
+
+      - name: Run performance regression benchmark
+        id: benchmark
+        continue-on-error: true
+        env:
+          GLOGGUR_EMBEDDING_PROVIDER: test
+        run: |
+          set -o pipefail
+          python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json | tee performance-benchmark.json
+
+      - name: Run performance pytest
+        id: performance_pytest
+        continue-on-error: true
+        run: |
+          pytest -m performance --no-cov --junitxml performance-pytest.junit.xml
+
+      - name: Upload performance artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-artifacts
+          path: |
+            performance-benchmark.json
+            performance-pytest.junit.xml
+          if-no-files-found: warn
+
+      - name: Publish performance summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Performance lane"
+            echo
+            echo "- benchmark outcome: ${{ steps.benchmark.outcome }}"
+            echo "- performance pytest outcome: ${{ steps.performance_pytest.outcome }}"
+            echo "- artifact: performance-artifacts"
+            echo "- required check: no"
+          } >> "$GITHUB_STEP_SUMMARY"

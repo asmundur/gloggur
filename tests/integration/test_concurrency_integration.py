@@ -8,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from gloggur.indexer.concurrency import LockRetryPolicy, build_backoff_schedule
 from gloggur.search import attach_legacy_search_contract
 from scripts.verification.fixtures import TestFixtures
 
@@ -84,6 +85,27 @@ def _run_cli(
         env=env,
         timeout=timeout,
     )
+
+
+def _assert_lock_timeout_contract(
+    payload: dict[str, object],
+    *,
+    lock_timeout_ms: int,
+    subprocess_timeout: float,
+    holder_pid: int,
+) -> None:
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["category"] == "cache_lock_held"
+    assert error["operation"] == "acquire cache write lock"
+    assert error["holder_pid"] == holder_pid
+    assert "timed out" in str(error["detail"])
+
+    waited_ms = int(error["waited_ms"])
+    expected_attempts = 1 + len(build_backoff_schedule(LockRetryPolicy(timeout_ms=lock_timeout_ms)))
+    assert waited_ms >= lock_timeout_ms
+    assert waited_ms < int(subprocess_timeout * 1000)
+    assert int(error["attempts"]) == expected_attempts
 
 
 def _start_lock_holder(
@@ -226,19 +248,25 @@ def test_index_lock_contention_fails_fast_without_hanging() -> None:
         }
         holder, release_path = _start_lock_holder(cache_dir=cache_dir, env=env)
         try:
-            blocked_env = {**env, "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": "100"}
+            lock_timeout_ms = 100
+            subprocess_timeout = 10.0
+            blocked_env = {**env, "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": str(lock_timeout_ms)}
             start = time.monotonic()
-            blocked = _run_cli(["index", str(repo), "--json"], blocked_env, timeout=10)
+            blocked = _run_cli(
+                ["index", str(repo), "--json"],
+                blocked_env,
+                timeout=subprocess_timeout,
+            )
             elapsed = time.monotonic() - start
             assert blocked.returncode == 1
-            assert elapsed < 2.0
+            assert elapsed < (subprocess_timeout / 2.0)
             payload = _parse_json_payload(blocked.stdout)
-            error = payload["error"]
-            assert isinstance(error, dict)
-            assert error["category"] == "cache_lock_held"
-            assert error["operation"] == "acquire cache write lock"
-            assert error["holder_pid"] == holder.pid
-            assert "timed out" in str(error["detail"])
+            _assert_lock_timeout_contract(
+                payload,
+                lock_timeout_ms=lock_timeout_ms,
+                subprocess_timeout=subprocess_timeout,
+                holder_pid=holder.pid,
+            )
         finally:
             _stop_lock_holder(holder, release_path)
 
@@ -254,19 +282,21 @@ def test_clear_cache_lock_contention_fails_fast_without_hanging() -> None:
     }
     holder, release_path = _start_lock_holder(cache_dir=cache_dir, env=env)
     try:
-        blocked_env = {**env, "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": "100"}
+        lock_timeout_ms = 100
+        subprocess_timeout = 10.0
+        blocked_env = {**env, "GLOGGUR_CACHE_LOCK_TIMEOUT_MS": str(lock_timeout_ms)}
         start = time.monotonic()
-        blocked = _run_cli(["clear-cache", "--json"], blocked_env, timeout=10)
+        blocked = _run_cli(["clear-cache", "--json"], blocked_env, timeout=subprocess_timeout)
         elapsed = time.monotonic() - start
         assert blocked.returncode == 1
-        assert elapsed < 2.0
+        assert elapsed < (subprocess_timeout / 2.0)
         payload = _parse_json_payload(blocked.stdout)
-        error = payload["error"]
-        assert isinstance(error, dict)
-        assert error["category"] == "cache_lock_held"
-        assert error["operation"] == "acquire cache write lock"
-        assert error["holder_pid"] == holder.pid
-        assert "timed out" in str(error["detail"])
+        _assert_lock_timeout_contract(
+            payload,
+            lock_timeout_ms=lock_timeout_ms,
+            subprocess_timeout=subprocess_timeout,
+            holder_pid=holder.pid,
+        )
     finally:
         _stop_lock_holder(holder, release_path)
 

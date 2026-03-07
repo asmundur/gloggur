@@ -2595,6 +2595,7 @@ def test_cli_inspect_calibrated_threshold_reduces_low_semantic_warning_count(
         assert calibrated_low <= int(legacy_low * 0.6)
 
 
+@pytest.mark.performance
 def test_cli_index_unchanged_run_skips_all_files_and_is_faster() -> None:
     """F6 performance regression: unchanged-workspace re-index must skip all files.
 

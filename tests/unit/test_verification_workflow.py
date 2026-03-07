@@ -136,6 +136,7 @@ def test_verification_workflow_pytest_lane_is_unconditional() -> None:
     run_script = pytest_step.get("run")
     assert isinstance(run_script, str)
     assert "pytest" in run_script
+    assert '-m "not performance"' in run_script
 
 
 def test_verification_workflow_includes_runtime_and_resolver_diagnostics() -> None:
@@ -250,8 +251,8 @@ def test_verification_workflow_includes_artifact_smoke_harness() -> None:
     assert "python scripts/run_artifact_smoke.py --format json" in run_script
 
 
-def test_verification_workflow_includes_performance_regression_benchmark() -> None:
-    """Verification workflow should run the baseline-backed benchmark on the required lane."""
+def test_verification_workflow_excludes_performance_regression_benchmark() -> None:
+    """Required verification workflow should not own non-blocking performance execution."""
     tests_job = _verification_tests_job()
     steps = tests_job.get("steps")
     assert isinstance(steps, list)
@@ -264,19 +265,7 @@ def test_verification_workflow_includes_performance_regression_benchmark() -> No
         ),
         None,
     )
-    assert isinstance(benchmark_step, dict)
-    assert benchmark_step.get("if") == "${{ matrix.python-version == '3.13' }}"
-    benchmark_env = benchmark_step.get("env")
-    assert isinstance(benchmark_env, dict)
-    assert benchmark_env.get("GLOGGUR_EMBEDDING_PROVIDER") == "test"
-    run_script = benchmark_step.get("run")
-    assert isinstance(run_script, str)
-    assert "set -o pipefail" in run_script
-    assert (
-        "python scripts/run_edge_bench.py --benchmark-only "
-        "--baseline-file benchmarks/performance_baseline.json --format json"
-    ) in run_script
-    assert "tee performance-benchmark-${{ matrix.python-version }}.json" in run_script
+    assert benchmark_step is None
 
     upload_step = next(
         (
@@ -287,13 +276,7 @@ def test_verification_workflow_includes_performance_regression_benchmark() -> No
         ),
         None,
     )
-    assert isinstance(upload_step, dict)
-    assert upload_step.get("if") == "${{ always() && matrix.python-version == '3.13' }}"
-    assert upload_step.get("uses") == "actions/upload-artifact@v4"
-    upload_with = upload_step.get("with")
-    assert isinstance(upload_with, dict)
-    assert upload_with.get("name") == "performance-benchmark-${{ matrix.python-version }}"
-    assert upload_with.get("if-no-files-found") == "warn"
+    assert upload_step is None
 
 
 def test_verification_workflow_emits_lane_reports_for_all_matrix_jobs() -> None:

@@ -71,6 +71,9 @@ def test_acquire_lock_with_retry_times_out(monkeypatch: pytest.MonkeyPatch) -> N
     assert error.category == "cache_lock_held"
     assert error.operation == "acquire cache write lock"
     assert "timed out" in error.detail
+    payload = error.to_payload()["error"]
+    assert payload["waited_ms"] == 51
+    assert payload["attempts"] == 3
 
 
 def test_lock_timeout_error_includes_holder_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,6 +93,8 @@ def test_lock_timeout_error_includes_holder_metadata(monkeypatch: pytest.MonkeyP
     payload = error.to_payload()["error"]
 
     assert payload["category"] == "cache_lock_held"
+    assert payload["waited_ms"] == 50
+    assert payload["attempts"] == 3
     assert payload["holder_pid"] == 4242
     assert payload["holder_started_at"] == "2026-03-07T00:00:00+00:00"
     assert payload["holder_age_ms"] == 1234

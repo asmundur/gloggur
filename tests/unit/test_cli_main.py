@@ -1462,10 +1462,14 @@ def test_core_commands_surface_cache_recovery_failure_non_zero(
             raise CacheRecoveryError("recovery failed")
 
     monkeypatch.setattr(cli_main, "CacheManager", BrokenCacheManager)
+    cache_dir = tmp_path / "cache"
     result = runner.invoke(
         cli_main.cli,
         build_args(repo),
-        env={"GLOGGUR_EMBEDDING_PROVIDER": "test"},
+        env={
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+            "GLOGGUR_CACHE_DIR": str(cache_dir),
+        },
     )
 
     assert result.exit_code != 0
@@ -1475,7 +1479,7 @@ def test_core_commands_surface_cache_recovery_failure_non_zero(
     assert error["type"] == "io_failure"
     assert error["category"] == "unknown_io_error"
     assert error["operation"] == "recover corrupted cache database"
-    assert str(error["path"]).endswith("index.db")
+    assert str(error["path"]) == str(cache_dir / "index.db")
     assert "recovery failed" in result.output
     assert "Traceback (most recent call last)" not in result.output
 

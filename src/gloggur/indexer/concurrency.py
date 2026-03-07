@@ -166,7 +166,10 @@ def _release_lock(handle: IO[bytes]) -> None:
 def _lock_timeout_error(lock_path: str, waited_ms: int, attempts: int) -> StorageIOError:
     """Build a stable lock-timeout error payload for CLI/CI consumers."""
     holder = _read_lock_metadata(lock_path)
-    context: dict[str, object] = {}
+    context: dict[str, object] = {
+        "waited_ms": waited_ms,
+        "attempts": attempts,
+    }
     if isinstance(holder, dict):
         holder_pid = holder.get("holder_pid")
         if isinstance(holder_pid, int) and holder_pid > 0:
