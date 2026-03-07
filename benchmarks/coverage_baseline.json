@@ -3,7 +3,7 @@
   "metric": "line_coverage_percent",
   "modules": {
     "bootstrap_launcher.py": 68.0,
-    "cli/main.py": 84.0,
+    "cli/main.py": 90.0,
     "search/hybrid_search.py": 79.0,
     "storage/metadata_store.py": 73.0
   },
