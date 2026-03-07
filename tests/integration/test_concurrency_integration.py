@@ -377,9 +377,11 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
         baseline_payload = _parse_json_payload(baseline_status.stdout)
         assert baseline_payload["needs_reindex"] is False
 
+        ready_path = Path(cache_dir) / ".metadata-delete-ready"
         paused_env = {
             **base_env,
             "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_MS": "3000",
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_READY_FILE": str(ready_path),
         }
         interrupted = subprocess.Popen(
             [sys.executable, "-m", "gloggur.cli.main", "index", str(repo), "--json"],
@@ -389,10 +391,9 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
             env=paused_env,
         )
         try:
+            _wait_for_path_or_process_exit(ready_path, interrupted, timeout=20.0)
             saw_building_state = False
-            # Local-model bootstrap now happens before the build-state sidecar is written,
-            # so allow extra time to observe the in-progress rebuild state.
-            deadline = time.monotonic() + 8.0
+            deadline = time.monotonic() + 3.0
             while time.monotonic() < deadline:
                 status = _run_cli(["status", "--json"], base_env, timeout=60)
                 assert status.returncode == 0, status.stderr
@@ -403,7 +404,9 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
                     assert payload["needs_reindex"] is False
                     break
                 time.sleep(0.05)
-            assert saw_building_state, "Did not observe staged build state during rebuild"
+            assert saw_building_state, (
+                "Did not observe staged build state after metadata-delete pause sentinel"
+            )
         finally:
             interrupted.terminate()
             interrupted.wait(timeout=15)
