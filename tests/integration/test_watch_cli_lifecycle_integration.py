@@ -37,6 +37,24 @@ def _run_cli(
     )
 
 
+def _is_transient_search_cache_not_ready(payload: dict[str, object]) -> bool:
+    """Return True when search reports a transient cache-not-ready startup state."""
+    metadata = payload.get("metadata")
+    if not (isinstance(metadata, dict) and metadata.get("needs_reindex") is True):
+        return False
+
+    error = payload.get("error")
+    if isinstance(error, dict) and str(error.get("code", "")).strip() == "search_cache_not_ready":
+        return True
+
+    failure_codes = payload.get("failure_codes")
+    if isinstance(failure_codes, list):
+        for code in failure_codes:
+            if str(code).strip() == "search_cache_not_ready":
+                return True
+    return False
+
+
 def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
     """watch lifecycle should run with custom runtime file paths and process save events."""
     repo = tmp_path / "repo"
@@ -130,9 +148,13 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
             assert status_again_payload.get("running") is True
             assert int(status_again_payload.get("pid", 0)) == started_pid
             search = _run_cli(["search", updated_phrase, "--json", "--top-k", "5"], env, timeout=30)
-            assert search.returncode == 0, f"{search.stderr}\n{search.stdout}"
             search_payload = _parse_json_payload(search.stdout)
             last_search_payload = search_payload
+            if search.returncode != 0:
+                if _is_transient_search_cache_not_ready(search_payload):
+                    time.sleep(0.1)
+                    continue
+                assert search.returncode == 0, f"{search.stderr}\n{search.stdout}"
             results = search_payload.get("results", [])
             assert isinstance(results, list)
             if any(item.get("file") == expected_target for item in results):
