@@ -68,6 +68,29 @@ def test_acquire_lock_with_retry_times_out(monkeypatch: pytest.MonkeyPatch) -> N
         concurrency._acquire_lock_with_retry(io.BytesIO(), "/tmp/cache.lock", policy)
 
     error = exc_info.value
-    assert error.category == "unknown_io_error"
+    assert error.category == "cache_lock_held"
     assert error.operation == "acquire cache write lock"
     assert "timed out" in error.detail
+
+
+def test_lock_timeout_error_includes_holder_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lock timeout payload should surface lock-holder metadata when available."""
+    monkeypatch.setattr(
+        concurrency,
+        "_read_lock_metadata",
+        lambda _path: {
+            "holder_pid": 4242,
+            "holder_started_at": "2026-03-07T00:00:00+00:00",
+            "holder_command": "gloggur index . --json",
+        },
+    )
+    monkeypatch.setattr(concurrency, "_lock_holder_age_ms", lambda _value: 1234)
+
+    error = concurrency._lock_timeout_error("/tmp/cache.lock", waited_ms=50, attempts=3)
+    payload = error.to_payload()["error"]
+
+    assert payload["category"] == "cache_lock_held"
+    assert payload["holder_pid"] == 4242
+    assert payload["holder_started_at"] == "2026-03-07T00:00:00+00:00"
+    assert payload["holder_age_ms"] == 1234
+    assert payload["holder_command"] == "gloggur index . --json"

@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import io
+import sys
 from collections.abc import Iterable
+from contextlib import redirect_stderr
 
 from gloggur.embeddings.base import EmbeddingProvider
+
+_EXPECTED_WRAPPER_WARNING_TOKENS = (
+    "No sentence-transformers model found",
+    "Creating a new one with mean pooling.",
+)
 
 
 class LocalEmbeddingProvider(EmbeddingProvider):
@@ -33,13 +41,30 @@ class LocalEmbeddingProvider(EmbeddingProvider):
                 "install local extras (pip install -e '.[local]')."
             ) from exc
         try:
-            self._model = SentenceTransformer(self.model_name, cache_folder=self.cache_dir)
+            stderr_buffer = io.StringIO()
+            with redirect_stderr(stderr_buffer):
+                self._model = SentenceTransformer(self.model_name, cache_folder=self.cache_dir)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load local embedding model '{self.model_name}' "
                 f"({type(exc).__name__}: {exc})"
             ) from exc
+        filtered_stderr = self._filter_expected_wrapper_warning(stderr_buffer.getvalue())
+        if filtered_stderr:
+            sys.stderr.write(filtered_stderr)
         return self._model
+
+    @staticmethod
+    def _filter_expected_wrapper_warning(stderr_text: str) -> str:
+        """Suppress only the expected sentence-transformers wrapper bootstrap line."""
+        if not stderr_text:
+            return ""
+        kept_lines: list[str] = []
+        for line in stderr_text.splitlines(keepends=True):
+            if all(token in line for token in _EXPECTED_WRAPPER_WARNING_TOKENS):
+                continue
+            kept_lines.append(line)
+        return "".join(kept_lines)
 
     def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""

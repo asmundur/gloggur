@@ -57,6 +57,27 @@ def test_local_embedding_requires_sentence_transformers(
         provider.embed_text("hello world")
 
 
+def test_local_embedding_filters_expected_wrapper_warning() -> None:
+    """The known sentence-transformers wrapper bootstrap line should be suppressed."""
+    filtered = LocalEmbeddingProvider._filter_expected_wrapper_warning(
+        "No sentence-transformers model found with name foo. "
+        "Creating a new one with mean pooling.\n"
+    )
+
+    assert filtered == ""
+
+
+def test_local_embedding_preserves_unexpected_stderr_lines() -> None:
+    """Unexpected stderr must remain visible even when the wrapper line is filtered."""
+    filtered = LocalEmbeddingProvider._filter_expected_wrapper_warning(
+        "No sentence-transformers model found with name foo. "
+        "Creating a new one with mean pooling.\n"
+        "real warning\n"
+    )
+
+    assert filtered == "real warning\n"
+
+
 def test_openai_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenAI provider should require API key."""
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

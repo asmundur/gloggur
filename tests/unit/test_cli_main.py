@@ -31,6 +31,7 @@ from gloggur.cli.main import (
     _stable_fingerprint,
     _tool_version_reindex_reason,
 )
+from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.io_failures import StorageIOError
 from gloggur.models import IndexMetadata, Symbol
@@ -145,6 +146,92 @@ def test_build_status_payload_surfaces_missing_search_integrity_markers(tmp_path
     assert "chunk_span_integrity_missing" in payload["warning_codes"]
 
 
+def test_build_status_payload_zeroes_total_symbols_for_non_ready_cache(tmp_path: Path) -> None:
+    """Status should separate raw symbol rows from searchable rows on non-ready caches."""
+    cache_dir = str(tmp_path / "cache")
+    config = cli_main.GloggurConfig(
+        cache_dir=cache_dir,
+        embedding_provider="test",
+        local_embedding_model="model-a",
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.upsert_symbols([Symbol(
+        id="sample.py:1:add",
+        name="add",
+        kind="function",
+        file_path="sample.py",
+        start_line=1,
+        end_line=2,
+        signature="def add(a, b):",
+        body_hash="abc123",
+    )])
+    cache.write_build_state(
+        {
+            "state": "building",
+            "build_id": "build-1",
+            "pid": 123,
+            "started_at": "2026-03-07T00:00:00+00:00",
+            "updated_at": "2026-03-07T00:00:01+00:00",
+            "stage": "embed_chunks",
+            "cleanup_pending": False,
+        }
+    )
+
+    payload = cli_main._build_status_payload(config, cache)
+
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["build_in_progress", "missing_index_metadata"]
+    assert payload["raw_total_symbols"] == 1
+    assert payload["total_symbols"] == 0
+    assert payload["build_state"] == {
+        "state": "building",
+        "build_id": "build-1",
+        "pid": 123,
+        "started_at": "2026-03-07T00:00:00+00:00",
+        "updated_at": "2026-03-07T00:00:01+00:00",
+        "stage": "embed_chunks",
+        "cleanup_pending": False,
+    }
+
+
+def test_warm_embedding_provider_bootstraps_local_only() -> None:
+    """Pre-lock warmup should bootstrap local models but not remote providers."""
+
+    class _LocalProbe(EmbeddingProvider):
+        provider = "local"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed_text(self, text: str) -> list[float]:
+            raise AssertionError("not used in this test")
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            raise AssertionError("not used in this test")
+
+        def get_dimension(self) -> int:
+            self.calls += 1
+            return 768
+
+    class _RemoteProbe(EmbeddingProvider):
+        provider = "openai"
+
+        def embed_text(self, text: str) -> list[float]:
+            raise AssertionError("not used in this test")
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            raise AssertionError("not used in this test")
+
+        def get_dimension(self) -> int:
+            raise AssertionError("remote providers should not be probed pre-lock")
+
+    local = _LocalProbe()
+
+    assert cli_main._warm_embedding_provider(local) == {"embedding_dimension": 768}
+    assert local.calls == 1
+    assert cli_main._warm_embedding_provider(_RemoteProbe()) == {}
+
+
 def test_tool_version_reindex_reason_is_legacy_safe() -> None:
     """Missing legacy tool-version marker should not force a reindex."""
     reason = _tool_version_reindex_reason(
@@ -201,6 +288,66 @@ def test_next_retry_top_k_rejects_non_positive_inputs() -> None:
         _next_retry_top_k(0)
     with pytest.raises(ValueError, match="max_top_k must be >= 1"):
         _next_retry_top_k(1, max_top_k=0)
+
+
+def test_index_stage_recorder_preserves_order_and_not_run_entries() -> None:
+    """Stage recorder should keep deterministic order and default not-run status."""
+    recorder = cli_main.IndexStageRecorder()
+    recorder.record(
+        "bootstrap_model",
+        status="completed",
+        duration_ms=12,
+        counts={"embedding_dimension": 768},
+    )
+    recorder.record(
+        "update_symbol_index",
+        status="failed",
+        duration_ms=34,
+        counts={"failed": 1},
+    )
+
+    payload = recorder.as_payload()
+
+    assert [stage["name"] for stage in payload] == list(cli_main.INDEX_STAGE_ORDER)
+    assert payload[0]["status"] == "completed"
+    assert payload[0]["counts"] == {"embedding_dimension": 768}
+    commit_stage = next(stage for stage in payload if stage["name"] == "commit_metadata")
+    assert commit_stage["status"] == "not_run"
+    symbol_stage = next(stage for stage in payload if stage["name"] == "update_symbol_index")
+    assert symbol_stage["status"] == "failed"
+
+
+def test_terminate_index_children_reports_child_and_resource_tracker_pids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Interrupt cleanup should terminate active children and the stdlib resource tracker."""
+    terminated_pids: list[tuple[int, int]] = []
+
+    class FakeChild:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            self.exitcode = None
+
+        def terminate(self) -> None:
+            return None
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+    monkeypatch.setattr(cli_main.multiprocessing, "active_children", lambda: [FakeChild(111)])
+    monkeypatch.setattr(cli_main, "_current_resource_tracker_pid", lambda: 222)
+    monkeypatch.setattr(cli_main.os, "kill", lambda pid, sig: terminated_pids.append((pid, sig)))
+
+    payload = cli_main._terminate_index_children()
+
+    assert payload == {
+        "terminated_child_pids": [111],
+        "resource_tracker_pid": 222,
+    }
+    assert terminated_pids == [
+        (111, cli_main.signal.SIGKILL),
+        (222, cli_main.signal.SIGTERM),
+    ]
 
 
 def test_stable_fingerprint_is_order_independent() -> None:
@@ -728,6 +875,32 @@ def test_resume_contract_missing_metadata_has_machine_reason_code() -> None:
     assert "missing_index_metadata" in remediation
     assert isinstance(remediation["missing_index_metadata"], list)
     assert remediation["missing_index_metadata"]
+
+
+def test_resume_contract_build_in_progress_has_dual_reason_codes() -> None:
+    """An active build without metadata should expose build_in_progress plus legacy fallback code."""
+    payload = _build_resume_contract(
+        metadata=None,
+        build_state={
+            "state": "building",
+            "build_id": "build-1",
+            "pid": 123,
+            "started_at": "2026-03-07T00:00:00+00:00",
+            "updated_at": "2026-03-07T00:00:01+00:00",
+            "stage": "scan_source",
+            "cleanup_pending": False,
+        },
+        schema_version="2",
+        expected_profile="local:model-a",
+        cached_profile=None,
+        reset_reason=None,
+        needs_reindex=True,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+    )
+
+    assert payload["resume_decision"] == "reindex_required"
+    assert payload["resume_reason_codes"] == ["build_in_progress", "missing_index_metadata"]
 
 
 def test_resume_contract_interrupted_index_has_machine_reason_and_remediation() -> None:
@@ -1289,7 +1462,11 @@ def test_core_commands_surface_cache_recovery_failure_non_zero(
             raise CacheRecoveryError("recovery failed")
 
     monkeypatch.setattr(cli_main, "CacheManager", BrokenCacheManager)
-    result = runner.invoke(cli_main.cli, build_args(repo))
+    result = runner.invoke(
+        cli_main.cli,
+        build_args(repo),
+        env={"GLOGGUR_EMBEDDING_PROVIDER": "test"},
+    )
 
     assert result.exit_code != 0
     payload = _parse_json_output(result.output)
@@ -1993,15 +2170,93 @@ def test_search_json_requires_reindex_on_tool_version_drift(
 
     result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     payload = _parse_json_output(result.output)
     assert payload["results"] == []
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "search_unavailable"
+    assert error["code"] == "search_cache_not_ready"
+    assert error["category"] == "cache_not_ready"
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["needs_reindex"] is True
     assert "tool version changed" in str(metadata["reindex_reason"])
     assert metadata["resume_decision"] == "reindex_required"
     assert metadata["resume_reason_codes"] == ["tool_version_changed"]
+
+
+def test_search_json_requires_reindex_while_build_is_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """search --json should return the stable non-ready error contract for active builds."""
+    runner = CliRunner()
+
+    class FakeCache:
+        last_reset_reason = None
+
+        def get_index_metadata(self) -> None:
+            return None
+
+        def get_build_state(self) -> dict[str, object]:
+            return {
+                "state": "building",
+                "build_id": "build-1",
+                "pid": 123,
+                "started_at": "2026-03-07T00:00:00+00:00",
+                "updated_at": "2026-03-07T00:00:01+00:00",
+                "stage": "embed_chunks",
+                "cleanup_pending": False,
+            }
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> None:
+            return None
+
+        def get_last_success_resume_fingerprint(self) -> None:
+            return None
+
+        def get_last_success_resume_at(self) -> None:
+            return None
+
+        def get_last_success_tool_version(self) -> None:
+            return None
+
+        def get_search_integrity(self) -> None:
+            return None
+
+    config = cli_main.GloggurConfig(
+        embedding_provider="test",
+        local_embedding_model="model-a",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, FakeCache(), object()),
+    )
+
+    result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "search_cache_not_ready"
+    metadata = payload["metadata"]
+    assert metadata["build_state"] == {
+        "state": "building",
+        "build_id": "build-1",
+        "pid": 123,
+        "started_at": "2026-03-07T00:00:00+00:00",
+        "updated_at": "2026-03-07T00:00:01+00:00",
+        "stage": "embed_chunks",
+        "cleanup_pending": False,
+    }
+    assert metadata["resume_reason_codes"] == ["build_in_progress", "missing_index_metadata"]
 
 
 def test_search_json_allows_explicit_tool_version_drift_override(

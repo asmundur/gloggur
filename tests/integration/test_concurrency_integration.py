@@ -235,7 +235,9 @@ def test_index_lock_contention_fails_fast_without_hanging() -> None:
             payload = _parse_json_payload(blocked.stdout)
             error = payload["error"]
             assert isinstance(error, dict)
+            assert error["category"] == "cache_lock_held"
             assert error["operation"] == "acquire cache write lock"
+            assert error["holder_pid"] == holder.pid
             assert "timed out" in str(error["detail"])
         finally:
             _stop_lock_holder(holder, release_path)
@@ -261,7 +263,9 @@ def test_clear_cache_lock_contention_fails_fast_without_hanging() -> None:
         payload = _parse_json_payload(blocked.stdout)
         error = payload["error"]
         assert isinstance(error, dict)
+        assert error["category"] == "cache_lock_held"
         assert error["operation"] == "acquire cache write lock"
+        assert error["holder_pid"] == holder.pid
         assert "timed out" in str(error["detail"])
     finally:
         _stop_lock_holder(holder, release_path)
@@ -363,17 +367,21 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
             env=paused_env,
         )
         try:
-            saw_unhealthy = False
-            deadline = time.monotonic() + 3.0
+            saw_building_state = False
+            # Local-model bootstrap now happens before the build-state sidecar is written,
+            # so allow extra time to observe the in-progress rebuild state.
+            deadline = time.monotonic() + 8.0
             while time.monotonic() < deadline:
                 status = _run_cli(["status", "--json"], base_env, timeout=60)
                 assert status.returncode == 0, status.stderr
                 payload = _parse_json_payload(status.stdout)
-                if payload["needs_reindex"] is True:
-                    saw_unhealthy = True
+                build_state = payload.get("build_state")
+                if isinstance(build_state, dict) and build_state.get("state") == "building":
+                    saw_building_state = True
+                    assert payload["needs_reindex"] is False
                     break
                 time.sleep(0.05)
-            assert saw_unhealthy, "Did not observe metadata invalidation window"
+            assert saw_building_state, "Did not observe staged build state during rebuild"
         finally:
             interrupted.terminate()
             interrupted.wait(timeout=15)
@@ -381,15 +389,12 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
         after_interrupt_status = _run_cli(["status", "--json"], base_env, timeout=60)
         assert after_interrupt_status.returncode == 0, after_interrupt_status.stderr
         after_interrupt_payload = _parse_json_payload(after_interrupt_status.stdout)
-        assert after_interrupt_payload["needs_reindex"] is True
-        reason_codes = after_interrupt_payload["resume_reason_codes"]
-        assert isinstance(reason_codes, list)
-        assert "index_interrupted" in reason_codes
-        remediation = after_interrupt_payload["resume_remediation"]
-        assert isinstance(remediation, dict)
-        assert "index_interrupted" in remediation
-        assert isinstance(remediation["index_interrupted"], list)
-        assert remediation["index_interrupted"]
+        assert after_interrupt_payload["needs_reindex"] is False
+        build_state = after_interrupt_payload["build_state"]
+        assert isinstance(build_state, dict)
+        assert build_state["state"] == "interrupted"
+        assert build_state["cleanup_pending"] is True
+        assert after_interrupt_payload["resume_reason_codes"] == []
 
         search_after_interrupt = _run_cli(
             ["search", "handler_99", "--json", "--top-k", "5"],
@@ -400,15 +405,8 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
         search_payload = _parse_json_payload(search_after_interrupt.stdout)
         metadata = search_payload["metadata"]
         assert isinstance(metadata, dict)
-        assert metadata["needs_reindex"] is True
-        search_codes = metadata["resume_reason_codes"]
-        assert isinstance(search_codes, list)
-        assert "index_interrupted" in search_codes
-        search_remediation = metadata["resume_remediation"]
-        assert isinstance(search_remediation, dict)
-        assert "index_interrupted" in search_remediation
-        assert isinstance(search_remediation["index_interrupted"], list)
-        assert search_remediation["index_interrupted"]
+        assert metadata["needs_reindex"] is False
+        assert metadata["resume_reason_codes"] == []
 
         recovery = _run_cli(["index", str(repo), "--json"], base_env, timeout=240)
         assert recovery.returncode == 0, recovery.stderr
@@ -416,3 +414,76 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
         assert final_status.returncode == 0, final_status.stderr
         final_payload = _parse_json_payload(final_status.stdout)
         assert final_payload["needs_reindex"] is False
+        assert final_payload["build_state"] is None
+
+
+def test_first_time_interrupted_index_leaves_non_ready_cache_with_stable_search_error() -> None:
+    """Interrupting the first build should leave status/search on the stable non-ready contract."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                f"module_{idx}.py": (
+                    f"def handler_{idx}(value: int) -> int:\n"
+                    f"    return value + {idx}\n"
+                )
+                for idx in range(40)
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        ready_path = Path(cache_dir) / ".metadata-delete-ready"
+        paused_env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_MODEL": "local",
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_MS": "3000",
+            "GLOGGUR_TEST_PAUSE_AFTER_METADATA_DELETE_READY_FILE": str(ready_path),
+        }
+        interrupted = subprocess.Popen(
+            [sys.executable, "-m", "gloggur.cli.main", "index", str(repo), "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=paused_env,
+        )
+        try:
+            _wait_for_path_or_process_exit(ready_path, interrupted, timeout=8.0)
+        finally:
+            interrupted.terminate()
+            interrupted.wait(timeout=15)
+
+        base_env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_LOCAL_MODEL": "local",
+        }
+        status = _run_cli(["status", "--json"], base_env, timeout=60)
+        assert status.returncode == 0, status.stderr
+        status_payload = _parse_json_payload(status.stdout)
+        assert status_payload["metadata"] is None
+        assert status_payload["needs_reindex"] is True
+        assert status_payload["resume_reason_codes"] == [
+            "index_interrupted",
+            "missing_index_metadata",
+        ]
+        assert status_payload["total_symbols"] == 0
+        build_state = status_payload["build_state"]
+        assert isinstance(build_state, dict)
+        assert build_state["state"] == "interrupted"
+
+        search = _run_cli(["search", "handler_10", "--json", "--top-k", "5"], base_env, timeout=60)
+        assert search.returncode == 1, search.stderr
+        search_payload = _parse_json_payload(search.stdout)
+        error = search_payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "search_cache_not_ready"
+        metadata = search_payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["build_state"]["state"] == "interrupted"
+
+        recovery = _run_cli(["index", str(repo), "--json"], base_env, timeout=240)
+        assert recovery.returncode == 0, recovery.stderr
+        recovered_status = _run_cli(["status", "--json"], base_env, timeout=60)
+        recovered_payload = _parse_json_payload(recovered_status.stdout)
+        assert recovered_payload["needs_reindex"] is False
+        assert recovered_payload["build_state"] is None

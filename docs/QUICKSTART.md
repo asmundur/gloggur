@@ -15,6 +15,12 @@ If `status --json` returns `"resume_decision": "reindex_required"`, run:
 scripts/gloggur index . --json
 ```
 
+`status --json` now separates raw on-disk rows from reusable search state:
+
+- `build_state`: active/incomplete build metadata when a writer is building or was interrupted
+- `raw_total_symbols`: raw symbol rows observed on disk
+- `total_symbols`: searchable symbol count, forced to `0` whenever `resume_decision != "resume_ok"`
+
 Workspace note:
 - cache/state defaults to `.gloggur-cache` in the current workspace
 - when working from a different cwd/repo, run `gloggur index <that-workspace> --json` first
@@ -89,7 +95,13 @@ scripts/gloggur inspect . --json
 scripts/gloggur watch stop --json
 ```
 
-`search --json` emits ContextPack v2 fields (`schema_version`, `query`, `summary`, `hits[]`). Legacy `results` + `metadata` top-level keys are not emitted.
+`search --json` emits ContextPack v2 fields (`schema_version`, `query`, `summary`, `hits[]`) only when the cache is ready.
+When the cache is not reusable, `search --json` exits non-zero with:
+
+- `error.type: search_unavailable`
+- `error.code: search_cache_not_ready`
+- `error.category: cache_not_ready`
+- top-level `metadata` including resume fields, `build_state`, and `search_integrity`
 
 ## If Something Goes Wrong
 
@@ -130,6 +142,7 @@ Use `--include-cache` only when the smaller sanitized bundle is not enough and y
 | Failure code | Meaning | Action |
 | --- | --- | --- |
 | `embedding_provider_error` | Provider client could not initialize or authenticate. | Set `OPENROUTER_API_KEY` or `OPENAI_API_KEY` plus model/env settings, then retry. |
+| `search_cache_not_ready` | Search was attempted against a cache that is still building, interrupted, or otherwise not reusable. | Run `scripts/gloggur index . --json`, then inspect `status --json` for `build_state` and resume details. |
 | `watch_mode_conflict` | Both `--foreground` and `--daemon` were passed. | Use exactly one watch mode flag. |
 | `watch_path_missing` | Configured watch path does not exist. | Run `scripts/gloggur watch init <existing-path> --json`. |
 | `search_contract_v1_removed` | Deprecated v1-only flags or payload assumptions were used with search JSON v2. | Remove v1 flags and parse ContextPack v2 (`summary`, `hits[]`). |

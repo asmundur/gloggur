@@ -202,6 +202,72 @@ def test_cache_schema_version_persists_across_clear() -> None:
     assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
 
 
+def test_cache_build_state_round_trips_and_flags_stale_cleanup() -> None:
+    """Build-state sidecar should round-trip and expose pending cleanup when stale stages exist."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    os.makedirs(cache.build_cache_dir("stale-build"), exist_ok=True)
+
+    cache.write_build_state(
+        {
+            "state": "building",
+            "build_id": "active-build",
+            "pid": 123,
+            "started_at": "2026-03-07T00:00:00+00:00",
+            "updated_at": "2026-03-07T00:00:01+00:00",
+            "stage": "embed_chunks",
+            "cleanup_pending": False,
+        }
+    )
+
+    assert cache.get_build_state() == {
+        "state": "building",
+        "build_id": "active-build",
+        "pid": 123,
+        "started_at": "2026-03-07T00:00:00+00:00",
+        "updated_at": "2026-03-07T00:00:01+00:00",
+        "stage": "embed_chunks",
+        "cleanup_pending": True,
+    }
+
+
+def test_cache_get_build_state_infers_interrupted_from_staged_build_dir() -> None:
+    """A leftover staged build without sidecar metadata should be treated as interrupted."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    os.makedirs(cache.build_cache_dir("orphaned-build"), exist_ok=True)
+
+    assert cache.get_build_state() == {
+        "state": "interrupted",
+        "build_id": "orphaned-build",
+        "pid": None,
+        "started_at": None,
+        "updated_at": None,
+        "stage": None,
+        "cleanup_pending": True,
+    }
+
+
+def test_cache_prepare_and_publish_staged_build_replaces_active_metadata() -> None:
+    """Publishing a staged build should atomically swap the active cache artifacts."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.set_index_metadata(IndexMetadata(version="1", total_symbols=1, indexed_files=1))
+
+    stage_dir = cache.prepare_staged_build("build-1")
+    staged_cache = CacheManager(CacheConfig(stage_dir))
+    staged_cache.set_index_metadata(IndexMetadata(version="2", total_symbols=3, indexed_files=2))
+
+    cache.publish_staged_build("build-1")
+    reloaded = CacheManager(CacheConfig(cache_dir))
+    metadata = reloaded.get_index_metadata()
+
+    assert metadata is not None
+    assert metadata.version == "2"
+    assert metadata.total_symbols == 3
+    assert not os.path.exists(stage_dir)
+
+
 def test_cache_auto_resets_legacy_tables() -> None:
     """Legacy table layouts should trigger automatic cache recreation."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")

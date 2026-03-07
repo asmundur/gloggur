@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
+import shlex
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import IO
 
 from gloggur.io_failures import StorageIOError, wrap_io_error
@@ -107,9 +111,11 @@ def cache_write_lock(
     try:
         attempts = _acquire_lock_with_retry(handle, lock_path, active_policy)
         _ = attempts
+        _write_lock_metadata(handle)
         try:
             yield
         finally:
+            _clear_lock_metadata(handle)
             _release_lock(handle)
     finally:
         handle.close()
@@ -159,9 +165,23 @@ def _release_lock(handle: IO[bytes]) -> None:
 
 def _lock_timeout_error(lock_path: str, waited_ms: int, attempts: int) -> StorageIOError:
     """Build a stable lock-timeout error payload for CLI/CI consumers."""
-
+    holder = _read_lock_metadata(lock_path)
+    context: dict[str, object] = {}
+    if isinstance(holder, dict):
+        holder_pid = holder.get("holder_pid")
+        if isinstance(holder_pid, int) and holder_pid > 0:
+            context["holder_pid"] = holder_pid
+        holder_started_at = holder.get("holder_started_at")
+        if isinstance(holder_started_at, str) and holder_started_at:
+            context["holder_started_at"] = holder_started_at
+            holder_age_ms = _lock_holder_age_ms(holder_started_at)
+            if holder_age_ms is not None:
+                context["holder_age_ms"] = holder_age_ms
+        holder_command = holder.get("holder_command")
+        if isinstance(holder_command, str) and holder_command:
+            context["holder_command"] = holder_command
     return StorageIOError(
-        category="unknown_io_error",
+        category="cache_lock_held",
         operation="acquire cache write lock",
         path=lock_path,
         probable_cause="Another gloggur process is updating the cache.",
@@ -171,7 +191,65 @@ def _lock_timeout_error(lock_path: str, waited_ms: int, attempts: int) -> Storag
             "Increase GLOGGUR_CACHE_LOCK_TIMEOUT_MS for longer waits if contention is expected.",
         ],
         detail=("cache write lock timed out " f"after {waited_ms}ms ({attempts} attempts)"),
+        context=context or None,
     )
+
+
+def _write_lock_metadata(handle: IO[bytes]) -> None:
+    """Write current lock-holder metadata into the lock file."""
+    payload = {
+        "holder_pid": os.getpid(),
+        "holder_started_at": datetime.now(timezone.utc).isoformat(),
+        "holder_command": " ".join(shlex.quote(arg) for arg in sys.argv),
+    }
+    _rewrite_lock_file(handle, payload)
+
+
+def _clear_lock_metadata(handle: IO[bytes]) -> None:
+    """Best-effort removal of stale lock-holder metadata on release."""
+    try:
+        _rewrite_lock_file(handle, None)
+    except OSError:
+        return
+
+
+def _rewrite_lock_file(handle: IO[bytes], payload: dict[str, object] | None) -> None:
+    """Rewrite the lock file contents for holder metadata coordination."""
+    handle.seek(0)
+    handle.truncate(0)
+    if payload is not None:
+        handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf8"))
+    handle.flush()
+
+
+def _read_lock_metadata(lock_path: str) -> dict[str, object] | None:
+    """Read lock-holder metadata, returning None when absent or malformed."""
+    try:
+        with open(lock_path, "rb") as handle:
+            raw = handle.read().decode("utf8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _lock_holder_age_ms(holder_started_at: str) -> int | None:
+    """Return lock-holder age in milliseconds when the timestamp is parseable."""
+    try:
+        started = datetime.fromisoformat(holder_started_at)
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - started.astimezone(timezone.utc)
+    return max(0, int(age.total_seconds() * 1000))
 
 
 def _read_int_env(name: str, default: int) -> int:

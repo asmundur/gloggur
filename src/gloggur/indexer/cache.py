@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
@@ -30,6 +31,17 @@ SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 SQLITE_JOURNAL_MODE = "WAL"
 SQLITE_SYNCHRONOUS = "NORMAL"
+BUILD_STATE_FILE_NAME = ".build-state.json"
+BUILD_STAGING_DIR_NAME = ".builds"
+MANAGED_CACHE_ARTIFACT_NAMES = (
+    "index.db",
+    "index.db-wal",
+    "index.db-shm",
+    "vectors.index",
+    "vectors.json",
+    "vectors.npy",
+)
+BUILD_STATE_STATES = {"building", "interrupted"}
 
 REQUIRED_TABLES = {
     "files",
@@ -826,6 +838,202 @@ class CacheManager:
                 (LAST_SUCCESS_TOOL_VERSION_KEY,),
             )
             conn.execute("DELETE FROM meta WHERE key = ?", (SEARCH_INTEGRITY_KEY,))
+        self.clear_build_state()
+        self.cleanup_staged_builds()
+
+    @property
+    def build_state_path(self) -> str:
+        """Return the cache build-state sidecar path."""
+        return os.path.join(self.config.cache_dir, BUILD_STATE_FILE_NAME)
+
+    @property
+    def build_staging_dir(self) -> str:
+        """Return the root directory for staged build artifacts."""
+        return os.path.join(self.config.cache_dir, BUILD_STAGING_DIR_NAME)
+
+    def get_build_state(self) -> dict[str, object] | None:
+        """Return normalized build-state metadata, inferring stale staged builds when needed."""
+        payload = self._read_json_file(self.build_state_path)
+        normalized = self._normalize_build_state(payload)
+        staged_builds = self.list_staged_build_ids()
+        if normalized is None:
+            if not staged_builds:
+                return None
+            return {
+                "state": "interrupted",
+                "build_id": staged_builds[0],
+                "pid": None,
+                "started_at": None,
+                "updated_at": None,
+                "stage": None,
+                "cleanup_pending": True,
+            }
+
+        build_id = normalized.get("build_id")
+        active_build_id = build_id if isinstance(build_id, str) and build_id else None
+        stale_builds = [
+            staged_build_id
+            for staged_build_id in staged_builds
+            if active_build_id is None or staged_build_id != active_build_id
+        ]
+        if stale_builds:
+            normalized["cleanup_pending"] = True
+        elif normalized["state"] == "interrupted" and active_build_id in staged_builds:
+            normalized["cleanup_pending"] = True
+        return normalized
+
+    def write_build_state(self, payload: dict[str, object]) -> dict[str, object]:
+        """Persist normalized build-state metadata outside the active SQLite database."""
+        normalized = self._normalize_build_state(payload)
+        if normalized is None:
+            raise ValueError("invalid build-state payload")
+        self._atomic_write_json_file(self.build_state_path, normalized)
+        return normalized
+
+    def clear_build_state(self) -> None:
+        """Remove persisted build-state metadata if present."""
+        if not os.path.exists(self.build_state_path):
+            return
+        try:
+            os.remove(self.build_state_path)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="delete cache build-state sidecar",
+                path=self.build_state_path,
+            ) from exc
+
+    def build_cache_dir(self, build_id: str) -> str:
+        """Return the staged cache directory for one build id."""
+        return os.path.join(self.build_staging_dir, build_id)
+
+    def list_staged_build_ids(self) -> list[str]:
+        """Return staged build directory names in deterministic order."""
+        if not os.path.isdir(self.build_staging_dir):
+            return []
+        try:
+            names = [
+                entry
+                for entry in os.listdir(self.build_staging_dir)
+                if os.path.isdir(os.path.join(self.build_staging_dir, entry))
+            ]
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="list staged cache builds",
+                path=self.build_staging_dir,
+            ) from exc
+        return sorted(names)
+
+    def cleanup_staged_builds(self, *, keep_build_ids: Iterable[str] = ()) -> list[str]:
+        """Delete abandoned staged build directories except any explicitly retained ids."""
+        keep = {build_id for build_id in keep_build_ids if build_id}
+        removed: list[str] = []
+        for build_id in self.list_staged_build_ids():
+            if build_id in keep:
+                continue
+            path = self.build_cache_dir(build_id)
+            try:
+                shutil.rmtree(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="delete staged cache build directory",
+                    path=path,
+                ) from exc
+            removed.append(build_id)
+        return removed
+
+    def prepare_staged_build(self, build_id: str) -> str:
+        """Create a staged cache directory pre-populated with current active artifacts."""
+        try:
+            os.makedirs(self.build_staging_dir, exist_ok=True)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="create staged cache build root",
+                path=self.build_staging_dir,
+            ) from exc
+
+        stage_dir = self.build_cache_dir(build_id)
+        if os.path.exists(stage_dir):
+            try:
+                shutil.rmtree(stage_dir)
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="reset staged cache build directory",
+                    path=stage_dir,
+                ) from exc
+        try:
+            os.makedirs(stage_dir, exist_ok=True)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="create staged cache build directory",
+                path=stage_dir,
+            ) from exc
+
+        for artifact_name in MANAGED_CACHE_ARTIFACT_NAMES:
+            source = os.path.join(self.config.cache_dir, artifact_name)
+            target = os.path.join(stage_dir, artifact_name)
+            if not os.path.exists(source):
+                continue
+            try:
+                shutil.copy2(source, target)
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="copy cache artifact into staged build",
+                    path=source,
+                ) from exc
+        return stage_dir
+
+    def publish_staged_build(self, build_id: str) -> None:
+        """Replace active cache artifacts with a fully prepared staged build."""
+        stage_dir = self.build_cache_dir(build_id)
+        if not os.path.isdir(stage_dir):
+            raise wrap_io_error(
+                FileNotFoundError(stage_dir),
+                operation="publish staged cache build",
+                path=stage_dir,
+            )
+
+        for artifact_name in MANAGED_CACHE_ARTIFACT_NAMES:
+            source = os.path.join(stage_dir, artifact_name)
+            target = os.path.join(self.config.cache_dir, artifact_name)
+            if os.path.exists(source):
+                try:
+                    os.replace(source, target)
+                except OSError as exc:
+                    raise wrap_io_error(
+                        exc,
+                        operation="publish staged cache artifact",
+                        path=target,
+                    ) from exc
+                continue
+            if os.path.exists(target):
+                try:
+                    os.remove(target)
+                except OSError as exc:
+                    raise wrap_io_error(
+                        exc,
+                        operation="delete superseded cache artifact",
+                        path=target,
+                    ) from exc
+
+        try:
+            shutil.rmtree(stage_dir)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="delete staged cache build directory",
+                path=stage_dir,
+            ) from exc
 
     def _schema_reset_plan(self) -> _ResetPlan | None:
         """Return a reset plan if schema is incompatible or DB corruption is detected."""
@@ -972,6 +1180,94 @@ class CacheManager:
                     f"{path}: rename failed ({replace_error}); delete failed ({remove_error}). "
                     "Fix permissions and remove corrupted cache files manually."
                 ) from remove_error
+
+    def _read_json_file(self, path: str) -> object | None:
+        """Read JSON from disk, returning None when the file is missing or malformed."""
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf8") as handle:
+                return json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _atomic_write_json_file(self, path: str, payload: dict[str, object]) -> None:
+        """Write JSON atomically using a temp file in the same directory."""
+        directory = os.path.dirname(path)
+        if directory:
+            try:
+                os.makedirs(directory, exist_ok=True)
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="create cache build-state directory",
+                    path=directory,
+                ) from exc
+        temp_path = f"{path}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+                handle.write("\n")
+            os.replace(temp_path, path)
+        except OSError as exc:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise wrap_io_error(
+                exc,
+                operation="write cache build-state sidecar",
+                path=path,
+            ) from exc
+
+    def _normalize_build_state(self, payload: object) -> dict[str, object] | None:
+        """Normalize build-state payloads into a stable shape or return None."""
+        if not isinstance(payload, dict):
+            return None
+        raw_state = payload.get("state")
+        state = str(raw_state).strip() if raw_state is not None else ""
+        if state not in BUILD_STATE_STATES:
+            return None
+
+        build_id = payload.get("build_id")
+        normalized_build_id = str(build_id).strip() if build_id is not None else None
+        if not normalized_build_id:
+            normalized_build_id = None
+
+        raw_pid = payload.get("pid")
+        try:
+            normalized_pid = int(raw_pid) if raw_pid is not None else None
+        except (TypeError, ValueError):
+            normalized_pid = None
+        if normalized_pid is not None and normalized_pid <= 0:
+            normalized_pid = None
+
+        started_at = payload.get("started_at")
+        normalized_started_at = str(started_at).strip() if started_at is not None else None
+        if not normalized_started_at:
+            normalized_started_at = None
+
+        updated_at = payload.get("updated_at")
+        normalized_updated_at = str(updated_at).strip() if updated_at is not None else None
+        if not normalized_updated_at:
+            normalized_updated_at = None
+
+        stage = payload.get("stage")
+        normalized_stage = str(stage).strip() if stage is not None else None
+        if not normalized_stage:
+            normalized_stage = None
+
+        cleanup_pending = bool(payload.get("cleanup_pending"))
+        return {
+            "state": state,
+            "build_id": normalized_build_id,
+            "pid": normalized_pid,
+            "started_at": normalized_started_at,
+            "updated_at": normalized_updated_at,
+            "stage": normalized_stage,
+            "cleanup_pending": cleanup_pending,
+        }
 
     def _list_tables(self, conn: sqlite3.Connection) -> set[str]:
         """Return all non-internal table names in the SQLite database."""

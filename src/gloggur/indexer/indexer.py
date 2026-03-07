@@ -206,6 +206,7 @@ class Indexer:
         self.vector_store = vector_store
         self._progress_callback: Callable[[int, int], None] | None = None
         self._scan_callback: Callable[[int, int, str], None] | None = None
+        self._stage_callback: Callable[[str], None] | None = None
         self._commit_cache: dict[str, str] = {}
 
     @staticmethod
@@ -233,7 +234,11 @@ class Indexer:
         # Test-only hook to make interruption windows deterministic.
         self._maybe_pause_after_metadata_delete()
 
+        if self._stage_callback is not None:
+            self._stage_callback("scan_source")
+        scan_source_started = time.perf_counter()
         source_files = list(self._iter_source_files(path))
+        scan_source_ms = int((time.perf_counter() - scan_source_started) * 1000)
         cached_file_hashes = self.cache.list_file_hashes()
         total_files = len(source_files)
         files_considered = 0
@@ -256,6 +261,8 @@ class Indexer:
             detail="chunk/span integrity checks passed",
         )
 
+        if self._stage_callback is not None:
+            self._stage_callback("extract_symbols")
         parse_phase_started = time.perf_counter()
         for file_path in source_files:
             seen_paths.add(file_path)
@@ -309,9 +316,12 @@ class Indexer:
                 )
                 prepared.timing.edge_ms = int((time.perf_counter() - edge_started) * 1000)
         edge_phase_ms = int((time.perf_counter() - edge_phase_started) * 1000)
+        extract_symbols_ms = parse_phase_ms + edge_phase_ms
 
         total_embedding_symbols = sum(len(prepared.chunks) for prepared in prepared_files)
         embedded_symbols_done = 0
+        if self._stage_callback is not None:
+            self._stage_callback("embed_chunks")
         embed_persist_started = time.perf_counter()
         for prepared in prepared_files:
             file_symbols_total = len(prepared.chunks)
@@ -367,7 +377,10 @@ class Indexer:
             symbols_updated += prepared.symbols_updated
             symbols_removed += prepared.symbols_removed
         embed_persist_ms = int((time.perf_counter() - embed_persist_started) * 1000)
+        embed_chunks_ms = sum(timing.embed_ms for timing in file_timings)
 
+        if self._stage_callback is not None:
+            self._stage_callback("persist_cache")
         cleanup_started = time.perf_counter()
         stale_cleanup = self._prune_stale_files(seen_paths)
         files_removed += stale_cleanup["files_removed"]
@@ -384,6 +397,9 @@ class Indexer:
         if self.vector_store:
             self.vector_store.save()
         cleanup_ms = int((time.perf_counter() - cleanup_started) * 1000)
+        persist_cache_ms = sum(timing.persist_ms for timing in file_timings) + cleanup_ms
+        if self._stage_callback is not None:
+            self._stage_callback("validate_integrity")
         consistency_started = time.perf_counter()
         consistency = self._validate_vector_metadata_consistency()
         failed_files += consistency["failed"]
@@ -434,6 +450,11 @@ class Indexer:
             failed_reasons=failed_reasons,
             failed_samples=failed_samples,
             phase_timings_ms={
+                "scan_source": scan_source_ms,
+                "extract_symbols": extract_symbols_ms,
+                "embed_chunks": embed_chunks_ms,
+                "persist_cache": persist_cache_ms,
+                "validate_integrity": consistency_ms,
                 "parse": parse_phase_ms,
                 "edge": edge_phase_ms,
                 "embed_persist": embed_persist_ms,

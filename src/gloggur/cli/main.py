@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import shlex
@@ -12,7 +13,9 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -20,6 +23,7 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 import click
 import yaml
@@ -75,7 +79,6 @@ from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
 from gloggur.search import hybrid_search as hybrid_search_module
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router import (
-    ContextPack,
     SearchConstraints,
     SearchRouter,
     load_search_router_config,
@@ -340,6 +343,11 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
         "Remove deprecated v1-only flags and parse `hits[]` + `summary` "
         "instead of `results` + `metadata`.",
     ],
+    "search_cache_not_ready": [
+        "Run `gloggur index . --json` and wait for the build to finish before searching.",
+        "Inspect `status --json` for resume/build-state details "
+        "when the cache remains unavailable.",
+    ],
     "search_router_backends_failed": [
         "All retrieval backends failed or returned no usable evidence "
         "within the configured budget.",
@@ -422,6 +430,11 @@ RESUME_REMEDIATION: dict[str, list[str]] = {
         "Run `gloggur index . --json` to rebuild missing metadata.",
         "Avoid reusing cache state until the rebuild completes successfully.",
     ],
+    "build_in_progress": [
+        "Wait for the active index build to finish before relying on this cache.",
+        "If the build appears stuck, inspect the writer process "
+        "and rerun `gloggur index . --json`.",
+    ],
     "index_interrupted": [
         "A previous index run appears interrupted; rerun `gloggur index . --json` to completion.",
         "If interruption repeats, inspect process termination signals and cache write-lock timing.",
@@ -448,6 +461,72 @@ RESUME_REMEDIATION: dict[str, list[str]] = {
         "Run a full `gloggur index . --json` after schema rebuild before search operations.",
     ],
 }
+
+INDEX_STAGE_ORDER = (
+    "bootstrap_model",
+    "scan_source",
+    "extract_symbols",
+    "embed_chunks",
+    "persist_cache",
+    "validate_integrity",
+    "update_symbol_index",
+    "commit_metadata",
+)
+
+INDEX_STAGE_REASON_CODES: dict[str, tuple[str, ...]] = {
+    "extract_symbols": (
+        "decode_error",
+        "read_error",
+        "parser_unavailable",
+        "parse_error",
+        "chunk_span_integrity_error",
+    ),
+    "embed_chunks": ("embedding_provider_error",),
+    "persist_cache": ("storage_error", "stale_cleanup_error"),
+    "validate_integrity": ("vector_metadata_mismatch", "vector_consistency_unverifiable"),
+}
+
+
+@dataclass
+class IndexStageRecorder:
+    """Deterministic recorder for top-level index stages."""
+
+    order: tuple[str, ...] = INDEX_STAGE_ORDER
+    _entries: dict[str, dict[str, object]] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Pre-seed every known stage as not-run so output order stays stable."""
+        self._entries = {
+            name: {
+                "name": name,
+                "status": "not_run",
+                "duration_ms": 0,
+                "counts": {},
+            }
+            for name in self.order
+        }
+
+    def record(
+        self,
+        name: str,
+        *,
+        status: str,
+        duration_ms: int,
+        counts: dict[str, object] | None = None,
+    ) -> None:
+        """Update one stage entry while preserving deterministic field layout."""
+        if name not in self._entries:
+            raise ValueError(f"unknown index stage: {name}")
+        self._entries[name] = {
+            "name": name,
+            "status": status,
+            "duration_ms": max(0, int(duration_ms)),
+            "counts": dict(counts or {}),
+        }
+
+    def as_payload(self) -> list[dict[str, object]]:
+        """Return stage entries in stable order for JSON output."""
+        return [dict(self._entries[name]) for name in self.order]
 
 
 class CLIContractError(click.ClickException):
@@ -704,10 +783,41 @@ def _profile_reindex_reason(
     return None
 
 
-def _metadata_reindex_reason(metadata_present: bool) -> str | None:
+def _normalize_build_state_payload(build_state: object) -> dict[str, object] | None:
+    """Normalize build-state payloads from cache/test doubles into a stable shape."""
+    if not isinstance(build_state, dict):
+        return None
+    state_raw = build_state.get("state")
+    state = str(state_raw).strip() if state_raw is not None else ""
+    if state not in {"building", "interrupted"}:
+        return None
+    payload: dict[str, object] = {
+        "state": state,
+        "build_id": build_state.get("build_id"),
+        "pid": build_state.get("pid"),
+        "started_at": build_state.get("started_at"),
+        "updated_at": build_state.get("updated_at"),
+        "stage": build_state.get("stage"),
+        "cleanup_pending": bool(build_state.get("cleanup_pending")),
+    }
+    return payload
+
+
+def _metadata_reindex_reason(
+    metadata_present: bool,
+    *,
+    build_state: dict[str, object] | None = None,
+) -> str | None:
     """Return reason when index metadata is missing/incomplete."""
     if metadata_present:
         return None
+    normalized_build_state = _normalize_build_state_payload(build_state)
+    if normalized_build_state is not None:
+        state = normalized_build_state["state"]
+        if state == "building":
+            return "index build in progress and metadata has not been committed yet"
+        if state == "interrupted":
+            return "index build was interrupted before metadata commit"
     return "index metadata missing (index build in progress, interrupted, or never completed)"
 
 
@@ -715,10 +825,24 @@ def _metadata_reindex_signal(
     *,
     metadata_present: bool,
     has_last_success_marker: bool,
+    build_state: dict[str, object] | None = None,
 ) -> tuple[str, str] | None:
     """Return machine-readable metadata reindex signal with interruption disambiguation."""
     if metadata_present:
         return None
+    normalized_build_state = _normalize_build_state_payload(build_state)
+    if normalized_build_state is not None:
+        state = str(normalized_build_state["state"])
+        if state == "building":
+            return (
+                "build_in_progress",
+                "index metadata is not committed yet because an index build is still running",
+            )
+        if state == "interrupted":
+            return (
+                "index_interrupted",
+                "index build was interrupted before metadata commit",
+            )
     if has_last_success_marker:
         return (
             "index_interrupted",
@@ -726,7 +850,7 @@ def _metadata_reindex_signal(
             "index (index run interrupted or failed "
             "before completion)",
         )
-    reason = _metadata_reindex_reason(metadata_present=False)
+    reason = _metadata_reindex_reason(metadata_present=False, build_state=normalized_build_state)
     return ("missing_index_metadata", reason or "index metadata missing")
 
 
@@ -775,6 +899,7 @@ def _reset_reindex_signal(reset_reason: str | None) -> tuple[str, str] | None:
 def _build_resume_contract(
     *,
     metadata: IndexMetadata | None,
+    build_state: dict[str, object] | None = None,
     schema_version: str | None,
     expected_profile: str,
     cached_profile: str | None,
@@ -791,12 +916,14 @@ def _build_resume_contract(
         _canonicalize_embedding_profile(expected_profile) or expected_profile
     )
     normalized_cached_profile = _canonicalize_embedding_profile(cached_profile)
+    normalized_build_state = _normalize_build_state_payload(build_state)
     metadata_present = metadata is not None
     metadata_signal = _metadata_reindex_signal(
         metadata_present=metadata_present,
         has_last_success_marker=(
             last_success_resume_fingerprint is not None or last_success_resume_at is not None
         ),
+        build_state=normalized_build_state,
     )
     profile_reason = _profile_reindex_reason(
         metadata_present,
@@ -818,7 +945,10 @@ def _build_resume_contract(
         reason_details.append(metadata_signal[1])
         if metadata_signal[0] != "missing_index_metadata":
             reason_codes.append("missing_index_metadata")
-            metadata_reason = _metadata_reindex_reason(metadata_present=False)
+            metadata_reason = _metadata_reindex_reason(
+                metadata_present=False,
+                build_state=normalized_build_state,
+            )
             reason_details.append(metadata_reason or "index metadata missing")
     if profile_reason is not None:
         code = "missing_cached_profile" if cached_profile is None else "embedding_profile_changed"
@@ -976,9 +1106,12 @@ def _build_search_health_snapshot(
     """Build shared search-health payload for status, CLI search, and legacy searcher calls."""
     expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     metadata = cache.get_index_metadata()
+    get_build_state = getattr(cache, "get_build_state", None)
+    raw_build_state = get_build_state() if callable(get_build_state) else None
+    build_state = _normalize_build_state_payload(raw_build_state)
     cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
     last_success_tool_version = cache.get_last_success_tool_version()
-    metadata_reason = _metadata_reindex_reason(metadata is not None)
+    metadata_reason = _metadata_reindex_reason(metadata is not None, build_state=build_state)
     profile_reason = _profile_reindex_reason(
         metadata_present=metadata is not None,
         cached_profile=cached_profile,
@@ -1000,6 +1133,7 @@ def _build_search_health_snapshot(
     needs_reindex = metadata is None or reindex_reason is not None
     resume_contract = _build_resume_contract(
         metadata=metadata,
+        build_state=build_state,
         schema_version=cache.get_schema_version(),
         expected_profile=expected_profile,
         cached_profile=cached_profile,
@@ -1021,6 +1155,12 @@ def _build_search_health_snapshot(
         warning_codes.append("legacy_search_surface")
     if needs_reindex:
         warning_codes.append("reindex_required")
+    if build_state is not None:
+        state = str(build_state.get("state"))
+        if state == "building" and "build_in_progress" not in warning_codes:
+            warning_codes.append("build_in_progress")
+        if state == "interrupted" and "index_interrupted" not in warning_codes:
+            warning_codes.append("index_interrupted")
 
     semantic_search_allowed = not needs_reindex
     for key, missing_code, failed_code in (
@@ -1050,6 +1190,7 @@ def _build_search_health_snapshot(
         "expected_index_profile": expected_profile,
         "cached_index_profile": cached_profile,
         "search_integrity": search_integrity,
+        "build_state": build_state,
         "resume_contract": resume_contract,
     }
 
@@ -1061,6 +1202,7 @@ def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManage
         return
     resume_contract = _build_resume_contract(
         metadata=metadata,
+        build_state=None,
         schema_version=cache.get_schema_version(),
         expected_profile=config.embedding_profile(),
         cached_profile=cache.get_index_profile(),
@@ -1084,6 +1226,262 @@ def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManage
     cache.set_last_success_resume_fingerprint(fingerprint)
     cache.set_last_success_resume_at(metadata.last_updated.isoformat())
     cache.set_last_success_tool_version(GLOGGUR_VERSION)
+
+
+def _new_build_id() -> str:
+    """Return a short deterministic-enough build id for staged cache lifecycles."""
+    return f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+
+
+def _write_cache_build_state(
+    cache: CacheManager,
+    *,
+    state: str,
+    build_id: str,
+    started_at: str,
+    stage: str | None,
+    cleanup_pending: bool = False,
+) -> dict[str, object]:
+    """Persist cache build-state sidecar updates with stable timestamps."""
+    updated_at = datetime.now(timezone.utc).isoformat()
+    return cache.write_build_state(
+        {
+            "state": state,
+            "build_id": build_id,
+            "pid": os.getpid(),
+            "started_at": started_at,
+            "updated_at": updated_at,
+            "stage": stage,
+            "cleanup_pending": cleanup_pending,
+        }
+    )
+
+
+def _warm_embedding_provider(embedding: EmbeddingProvider | None) -> dict[str, object]:
+    """Force local-model bootstrap before taking the cache write lock."""
+    if embedding is None:
+        return {}
+    if getattr(embedding, "provider", None) != "local":
+        return {}
+    return {"embedding_dimension": int(embedding.get_dimension())}
+
+
+def _current_resource_tracker_pid() -> int | None:
+    """Return the stdlib multiprocessing resource_tracker PID when available."""
+    try:
+        from multiprocessing import resource_tracker
+    except ImportError:
+        return None
+    tracker = getattr(resource_tracker, "_resource_tracker", None)
+    pid = getattr(tracker, "_pid", None)
+    return pid if isinstance(pid, int) and pid > 0 else None
+
+
+def _terminate_pid(pid: int, *, sig: int) -> None:
+    """Best-effort process termination helper that ignores already-exited targets."""
+    try:
+        os.kill(pid, sig)
+    except OSError:
+        return
+
+
+def _terminate_index_children() -> dict[str, object]:
+    """Terminate multiprocessing children and the resource tracker during interrupt cleanup."""
+    terminated_children: list[int] = []
+    for child in multiprocessing.active_children():
+        pid = getattr(child, "pid", None)
+        if isinstance(pid, int) and pid > 0:
+            terminated_children.append(pid)
+        try:
+            child.terminate()
+        except Exception:
+            continue
+        join = getattr(child, "join", None)
+        if callable(join):
+            try:
+                join(timeout=0.2)
+            except Exception:
+                pass
+        exitcode = getattr(child, "exitcode", None)
+        if exitcode is None and isinstance(pid, int) and pid > 0:
+            _terminate_pid(pid, sig=signal.SIGKILL)
+
+    resource_tracker_pid = _current_resource_tracker_pid()
+    if isinstance(resource_tracker_pid, int) and resource_tracker_pid > 0:
+        _terminate_pid(resource_tracker_pid, sig=signal.SIGTERM)
+
+    return {
+        "terminated_child_pids": terminated_children,
+        "resource_tracker_pid": resource_tracker_pid,
+    }
+
+
+@contextmanager
+def _index_signal_guard(on_interrupt: Callable[[str], None]) -> Iterator[None]:
+    """Install temporary SIGINT/SIGTERM handlers that mark interrupted builds and clean up."""
+    previous_handlers: dict[int, Any] = {}
+    interrupted = False
+
+    def _handler(signum: int, _frame: object) -> None:
+        """Handle one termination signal by marking the build interrupted exactly once."""
+        nonlocal interrupted
+        signal_name = signal.Signals(signum).name
+        if not interrupted:
+            interrupted = True
+            on_interrupt(signal_name)
+        raise KeyboardInterrupt(signal_name)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, _handler)
+    try:
+        yield
+    finally:
+        for signum, previous in previous_handlers.items():
+            signal.signal(signum, previous)
+
+
+def _stage_status_from_reasons(
+    reason_counts: dict[str, int],
+    stage_name: str,
+) -> str:
+    """Return failed/completed for one stage based on categorized failure reasons."""
+    relevant_reasons = INDEX_STAGE_REASON_CODES.get(stage_name, ())
+    if any(int(reason_counts.get(reason, 0)) > 0 for reason in relevant_reasons):
+        return "failed"
+    return "completed"
+
+
+def _record_repository_index_stages(
+    recorder: IndexStageRecorder,
+    result: object,
+) -> None:
+    """Record repository indexing stages from IndexResult timings and counters."""
+    phase_timings = result.phase_timings_ms
+    recorder.record(
+        "scan_source",
+        status="completed",
+        duration_ms=int(phase_timings.get("scan_source", 0) or 0),
+        counts={"source_files": len(result.source_files)},
+    )
+    recorder.record(
+        "extract_symbols",
+        status=_stage_status_from_reasons(result.failed_reasons, "extract_symbols"),
+        duration_ms=int(phase_timings.get("extract_symbols", 0) or 0),
+        counts={
+            "files_considered": result.files_considered,
+            "parsed_files": len(result.parsed_files),
+        },
+    )
+    recorder.record(
+        "embed_chunks",
+        status=_stage_status_from_reasons(result.failed_reasons, "embed_chunks"),
+        duration_ms=int(phase_timings.get("embed_chunks", 0) or 0),
+        counts={"indexed_symbols": result.indexed_symbols},
+    )
+    recorder.record(
+        "persist_cache",
+        status=_stage_status_from_reasons(result.failed_reasons, "persist_cache"),
+        duration_ms=int(phase_timings.get("persist_cache", 0) or 0),
+        counts={
+            "files_changed": result.files_changed,
+            "files_removed": result.files_removed,
+            "symbols_removed": result.symbols_removed,
+        },
+    )
+    recorder.record(
+        "validate_integrity",
+        status=_stage_status_from_reasons(result.failed_reasons, "validate_integrity"),
+        duration_ms=int(phase_timings.get("validate_integrity", 0) or 0),
+        counts={
+            "failed_reasons": sum(
+                int(result.failed_reasons.get(reason, 0))
+                for reason in INDEX_STAGE_REASON_CODES["validate_integrity"]
+            )
+        },
+    )
+
+
+def _record_symbol_index_stage(
+    recorder: IndexStageRecorder,
+    symbol_payload: dict[str, object],
+) -> None:
+    """Record symbol-index stage outcome."""
+    failed = int(symbol_payload.get("failed", 0) or 0)
+    recorder.record(
+        "update_symbol_index",
+        status="failed" if failed > 0 else "completed",
+        duration_ms=int(symbol_payload.get("duration_ms", 0) or 0),
+        counts={
+            "files_considered": int(symbol_payload.get("files_considered", 0) or 0),
+            "defs_indexed": int(symbol_payload.get("defs_indexed", 0) or 0),
+            "refs_indexed": int(symbol_payload.get("refs_indexed", 0) or 0),
+            "failed": failed,
+        },
+    )
+
+
+def _record_commit_metadata_stage(
+    recorder: IndexStageRecorder,
+    *,
+    status: str,
+    duration_ms: int,
+    total_symbols: int = 0,
+    indexed_files: int = 0,
+) -> None:
+    """Record commit/publish stage outcome."""
+    recorder.record(
+        "commit_metadata",
+        status=status,
+        duration_ms=duration_ms,
+        counts={
+            "total_symbols": total_symbols,
+            "indexed_files": indexed_files,
+        },
+    )
+
+
+def _build_search_not_ready_payload(
+    *,
+    query: str,
+    health: dict[str, object],
+) -> dict[str, object]:
+    """Build a stable structured error payload for search requests on non-ready caches."""
+    resume_contract = health["resume_contract"]
+    assert isinstance(resume_contract, dict)
+    guidance = CLI_FAILURE_REMEDIATION["search_cache_not_ready"]
+    metadata: dict[str, object] = {
+        "total_results": 0,
+        "needs_reindex": bool(health["needs_reindex"]),
+        "reindex_reason": health["reindex_reason"],
+        "entrypoint": health["entrypoint"],
+        "contract_version": health["contract_version"],
+        "warning_codes": list(health["warning_codes"]),
+        "semantic_search_allowed": health["semantic_search_allowed"],
+        "search_integrity": health["search_integrity"],
+        "build_state": health["build_state"],
+        "expected_index_profile": health["expected_index_profile"],
+        "cached_index_profile": health["cached_index_profile"],
+    }
+    metadata.update(resume_contract)
+    return {
+        "query": query,
+        "results": [],
+        "metadata": metadata,
+        "error": {
+            "type": "search_unavailable",
+            "code": "search_cache_not_ready",
+            "category": "cache_not_ready",
+            "detail": "Semantic search is unavailable because the cache is not ready.",
+            "probable_cause": (
+                "Index metadata or integrity markers are missing, interrupted, "
+                "or still being built."
+            ),
+            "remediation": guidance,
+        },
+        "failure_codes": ["search_cache_not_ready"],
+        "failure_guidance": {"search_cache_not_ready": guidance},
+    }
 
 
 def _resolve_config_file_path(config_path: str | None) -> str:
@@ -1510,19 +1908,13 @@ def _create_watch_service(
     )
 
 
-def _create_runtime(
-    config_path: str | None,
-    embedding_provider: str | None = None,
+def _initialize_runtime(
+    config: GloggurConfig,
+    *,
     rebuild_on_profile_change: bool = False,
     write_locked: bool = False,
 ) -> tuple[GloggurConfig, CacheManager, object]:
-    """Create config/cache/vector runtime and apply profile rebuild logic."""
-    resolved_config_path = _normalize_config_path(config_path)
-    config = _load_config(resolved_config_path)
-    # Apply CLI provider override in-memory to avoid a second config-file read.
-    if embedding_provider:
-        config.embedding_provider = embedding_provider
-    config = _normalize_watch_paths(config, resolved_config_path)
+    """Create cache/vector runtime for an already-loaded config instance."""
     expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     cache = _create_cache_manager(config.cache_dir)
     vector_store = _create_vector_store(config)
@@ -1545,6 +1937,26 @@ def _create_runtime(
                 cache.clear()
                 vector_store.clear()
     return config, cache, vector_store
+
+
+def _create_runtime(
+    config_path: str | None,
+    embedding_provider: str | None = None,
+    rebuild_on_profile_change: bool = False,
+    write_locked: bool = False,
+) -> tuple[GloggurConfig, CacheManager, object]:
+    """Create config/cache/vector runtime and apply profile rebuild logic."""
+    resolved_config_path = _normalize_config_path(config_path)
+    config = _load_config(resolved_config_path)
+    # Apply CLI provider override in-memory to avoid a second config-file read.
+    if embedding_provider:
+        config.embedding_provider = embedding_provider
+    config = _normalize_watch_paths(config, resolved_config_path)
+    return _initialize_runtime(
+        config,
+        rebuild_on_profile_change=rebuild_on_profile_change,
+        write_locked=write_locked,
+    )
 
 
 def _create_cache_manager(cache_dir: str) -> CacheManager:
@@ -1615,6 +2027,10 @@ def _build_status_payload(
     )
     resume_contract = health["resume_contract"]
     assert isinstance(resume_contract, dict)
+    raw_total_symbols = _cache_total_symbols(cache)
+    total_symbols = (
+        raw_total_symbols if resume_contract.get("resume_decision") == "resume_ok" else 0
+    )
     return {
         "cache_dir": config.cache_dir,
         "metadata": metadata.model_dump(mode="json") if metadata else None,
@@ -1628,7 +2044,9 @@ def _build_status_payload(
         "warning_codes": health["warning_codes"],
         "semantic_search_allowed": health["semantic_search_allowed"],
         "search_integrity": health["search_integrity"],
-        "total_symbols": _cache_total_symbols(cache),
+        "build_state": health["build_state"],
+        "raw_total_symbols": raw_total_symbols,
+        "total_symbols": total_symbols,
         **resume_contract,
     }
 
@@ -2617,30 +3035,99 @@ def index(
     """Load config/runtime, index path, and emit summary counts."""
     command_started = time.perf_counter()
     resolved_config_path = _normalize_config_path(config_path)
-    lock_config = _load_config(resolved_config_path)
-    with cache_write_lock(lock_config.cache_dir):
-        config, cache, vector_store = _create_runtime(
-            config_path=resolved_config_path,
-            embedding_provider=embedding_provider,
+    config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
+    if embedding_provider:
+        config.embedding_provider = embedding_provider
+
+    stage_recorder = IndexStageRecorder()
+    bootstrap_started = time.perf_counter()
+    embedding = _create_embedding_provider_for_command(
+        config,
+        require_provider=True,
+    )
+    bootstrap_counts = _warm_embedding_provider(embedding)
+    stage_recorder.record(
+        "bootstrap_model",
+        status="completed",
+        duration_ms=int((time.perf_counter() - bootstrap_started) * 1000),
+        counts=bootstrap_counts,
+    )
+
+    parser_registry = ParserRegistry(
+        extension_map=config.parser_extension_map,
+        adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+    )
+    build_id = _new_build_id()
+    build_started_at = datetime.now(timezone.utc).isoformat()
+    current_stage = "bootstrap_model"
+    active_cache: CacheManager | None = None
+    publish_succeeded = False
+
+    def _merge_failure_reasons(
+        target: dict[str, int],
+        source: object,
+    ) -> dict[str, int]:
+        """Merge positive failure counts from one payload into the aggregate mapping."""
+        if not isinstance(source, dict):
+            return target
+        for raw_reason, raw_count in source.items():
+            reason = str(raw_reason)
+            count = int(raw_count or 0)
+            if count <= 0:
+                continue
+            target[reason] = target.get(reason, 0) + count
+        return target
+
+    def _merge_failure_samples(
+        target: list[str],
+        source: object,
+        *,
+        limit: int = 5,
+    ) -> list[str]:
+        """Append failure samples up to the stable output cap."""
+        if not isinstance(source, list):
+            return target
+        for raw_sample in source:
+            if len(target) >= limit:
+                break
+            target.append(str(raw_sample))
+        return target
+
+    with cache_write_lock(config.cache_dir):
+        click.echo("Indexing...", err=True)
+        active_cache = _create_cache_manager(config.cache_dir)
+        active_cache.cleanup_staged_builds()
+        stage_dir = active_cache.prepare_staged_build(build_id)
+        stage_config = replace(config, cache_dir=stage_dir)
+        stage_config, cache, vector_store = _initialize_runtime(
+            stage_config,
             rebuild_on_profile_change=True,
             write_locked=True,
         )
-        click.echo("Indexing...", err=True)
-        embedding = _create_embedding_provider_for_command(
-            config,
-            require_provider=True,
-        )
-        parser_registry = ParserRegistry(
-            extension_map=config.parser_extension_map,
-            adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
-        )
         indexer = Indexer(
-            config=config,
+            config=stage_config,
             cache=cache,
             parser_registry=parser_registry,
             embedding_provider=embedding,
             vector_store=vector_store,
         )
+
+        def _update_build_stage(stage_name: str) -> None:
+            """Advance the active build-state sidecar to the current lifecycle stage."""
+            nonlocal current_stage
+            current_stage = stage_name
+            assert active_cache is not None
+            _write_cache_build_state(
+                active_cache,
+                state="building",
+                build_id=build_id,
+                started_at=build_started_at,
+                stage=stage_name,
+            )
+
+        _update_build_stage("scan_source")
+        indexer._stage_callback = _update_build_stage
+
         if not as_json:
 
             def _scan(done: int, total: int, status: str) -> None:
@@ -2650,204 +3137,428 @@ def index(
 
             indexer._scan_callback = _scan
 
-            if embedding is not None:
+            def _progress(done: int, total: int) -> None:
+                """Render one in-place embedding progress update for interactive runs."""
+                click.echo(
+                    f"\rEmbedding: {done}/{total} symbols    ",
+                    nl=False,
+                    err=True,
+                )
 
-                def _progress(done: int, total: int) -> None:
-                    """Render one in-place embedding progress update for interactive runs."""
-                    click.echo(
-                        f"\rEmbedding: {done}/{total} symbols    ",
-                        nl=False,
-                        err=True,
+            indexer._progress_callback = _progress
+
+        def _handle_interrupt(_signal_name: str) -> None:
+            """Mark the build interrupted and terminate child workers on SIGINT/SIGTERM."""
+            assert active_cache is not None
+            _write_cache_build_state(
+                active_cache,
+                state="interrupted",
+                build_id=build_id,
+                started_at=build_started_at,
+                stage=current_stage,
+                cleanup_pending=True,
+            )
+            _terminate_index_children()
+
+        try:
+            with _index_signal_guard(_handle_interrupt):
+                if os.path.isdir(path):
+                    result = indexer.index_repository(path)
+                    _record_repository_index_stages(stage_recorder, result)
+
+                    _update_build_stage("update_symbol_index")
+                    symbol_payload = _run_symbol_index(
+                        index_target=path,
+                        config=config,
+                        parser_registry=parser_registry,
+                        prefetched_files=result.parsed_files,
+                        file_paths=result.source_files,
+                    )
+                    _record_symbol_index_stage(stage_recorder, symbol_payload)
+
+                    overall_failed_reasons = dict(result.failed_reasons)
+                    _merge_failure_reasons(
+                        overall_failed_reasons,
+                        symbol_payload.get("failed_reasons"),
+                    )
+                    overall_failed_samples = list(result.failed_samples)
+                    _merge_failure_samples(
+                        overall_failed_samples,
+                        symbol_payload.get("failed_samples"),
+                    )
+                    overall_failed = result.failed + int(symbol_payload.get("failed", 0) or 0)
+
+                    commit_duration_ms = 0
+                    total_symbols = 0
+                    indexed_files = 0
+                    if overall_failed == 0:
+                        _update_build_stage("commit_metadata")
+                        commit_started = time.perf_counter()
+                        active_cache.publish_staged_build(build_id)
+                        publish_succeeded = True
+                        total_symbols = active_cache.count_symbols()
+                        indexed_files = active_cache.count_files()
+                        _persist_last_success_resume_state(config, active_cache)
+                        active_cache.clear_build_state()
+                        commit_duration_ms = int((time.perf_counter() - commit_started) * 1000)
+                        _record_commit_metadata_stage(
+                            stage_recorder,
+                            status="completed",
+                            duration_ms=commit_duration_ms,
+                            total_symbols=total_symbols,
+                            indexed_files=indexed_files,
+                        )
+                    else:
+                        _write_cache_build_state(
+                            active_cache,
+                            state="interrupted",
+                            build_id=build_id,
+                            started_at=build_started_at,
+                            stage=current_stage,
+                            cleanup_pending=True,
+                        )
+                        _record_commit_metadata_stage(
+                            stage_recorder,
+                            status="not_run",
+                            duration_ms=0,
+                        )
+
+                    command_duration_ms = int((time.perf_counter() - command_started) * 1000)
+                    if not as_json:
+                        click.echo("", err=True)
+                    payload = result.as_payload()
+                    payload["failed"] = overall_failed
+                    payload["failed_reasons"] = overall_failed_reasons
+                    payload["failed_samples"] = overall_failed_samples
+                    payload["symbol_index"] = symbol_payload
+                    payload["timings_ms"] = {
+                        "total": command_duration_ms,
+                        "legacy_index": result.duration_ms,
+                        "symbol_index": int(symbol_payload.get("duration_ms", 0) or 0),
+                        "cleanup": int(result.phase_timings_ms.get("cleanup", 0)),
+                        "consistency_checks": int(
+                            result.phase_timings_ms.get("consistency_checks", 0)
+                        ),
+                    }
+                    payload["duration_ms"] = command_duration_ms
+                    payload["stages"] = stage_recorder.as_payload()
+                    if as_json and debug_timings:
+                        payload["slow_files"] = _build_slow_files_payload(result.file_timings)
+                    payload.update(_build_index_failure_contract(overall_failed_reasons))
+                    if as_json and overall_failed > 0 and not allow_partial:
+                        _attach_primary_error_from_failure_contract(
+                            payload,
+                            error_type="index_failure",
+                            detail="Indexing did not finish cleanly.",
+                            probable_cause=(
+                                "One or more repository or symbol-index stages failed; "
+                                "inspect failed_reasons and failed_samples for the concrete causes."
+                            ),
+                            default_remediation=DEFAULT_INDEX_FAILURE_REMEDIATION,
+                        )
+                    _emit(payload, as_json)
+                    if overall_failed > 0 and not allow_partial:
+                        raise click.exceptions.Exit(1)
+                    return
+
+                files_considered = 1
+                if any(path.endswith(ext) for ext in config.supported_extensions):
+                    segments = set(os.path.normpath(os.path.abspath(path)).split(os.sep))
+                    if any(excluded in segments for excluded in config.excluded_dirs):
+                        files_considered = 0
+                else:
+                    files_considered = 0
+
+                stage_recorder.record(
+                    "scan_source",
+                    status="completed",
+                    duration_ms=0,
+                    counts={"source_files": files_considered},
+                )
+
+                if files_considered:
+                    cache.delete_index_metadata()
+
+                _update_build_stage("extract_symbols")
+                single_index_started = time.perf_counter()
+                execution = indexer.index_file_with_details(path) if files_considered else None
+                legacy_index_ms = int((time.perf_counter() - single_index_started) * 1000)
+
+                cleanup_started = time.perf_counter()
+                stale_cleanup = (
+                    indexer.prune_missing_file_entries()
+                    if files_considered
+                    else {
+                        "files_removed": 0,
+                        "symbols_removed": 0,
+                        "failed": 0,
+                        "failed_reasons": {},
+                        "failed_samples": [],
+                    }
+                )
+                if vector_store and files_considered:
+                    vector_store.save()
+                cleanup_ms = int((time.perf_counter() - cleanup_started) * 1000)
+
+                _update_build_stage("validate_integrity")
+                consistency_started = time.perf_counter()
+                consistency = (
+                    indexer.validate_vector_metadata_consistency()
+                    if files_considered
+                    else {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+                )
+                consistency_ms = int((time.perf_counter() - consistency_started) * 1000)
+
+                failed_reasons: dict[str, int] = {}
+                failed_samples: list[str] = []
+                indexed = 0
+                unchanged = 0
+                failed = 0
+                indexed_symbols = 0
+                execution_timing = (
+                    execution.timing if execution and execution.timing is not None else None
+                )
+                outcome = execution.outcome if execution else None
+                if outcome:
+                    if outcome.status == "indexed":
+                        indexed = 1
+                        indexed_symbols = outcome.symbols_indexed
+                    elif outcome.status == "unchanged":
+                        unchanged = 1
+                    else:
+                        failed = 1
+                        reason = outcome.reason or "indexing_error"
+                        failed_reasons[reason] = 1
+                        detail = outcome.detail or "indexing failed"
+                        failed_samples.append(f"{path}: {detail}")
+
+                files_removed = int(stale_cleanup.get("files_removed", 0))
+                symbols_removed = int(stale_cleanup.get("symbols_removed", 0))
+                stale_failed = int(stale_cleanup.get("failed", 0))
+                failed += stale_failed
+                _merge_failure_reasons(failed_reasons, stale_cleanup.get("failed_reasons"))
+                _merge_failure_samples(failed_samples, stale_cleanup.get("failed_samples"))
+                failed += int(consistency.get("failed", 0))
+                _merge_failure_reasons(failed_reasons, consistency.get("failed_reasons"))
+                _merge_failure_samples(failed_samples, consistency.get("failed_samples"))
+
+                vector_integrity = consistency.get("integrity")
+                if not isinstance(vector_integrity, dict):
+                    vector_integrity = _integrity_marker(
+                        name="vector_cache",
+                        status="missing",
+                        reason_codes=["vector_integrity_missing"],
+                        detail="vector/cache integrity marker missing",
+                    )
+                chunk_integrity = _integrity_marker(
+                    name="chunk_span",
+                    status=(
+                        "failed"
+                        if failed_reasons.get("chunk_span_integrity_error", 0) > 0
+                        else "passed"
+                    ),
+                    reason_codes=(
+                        ["chunk_span_integrity_error"]
+                        if failed_reasons.get("chunk_span_integrity_error", 0) > 0
+                        else []
+                    ),
+                    detail=(
+                        failed_samples[0]
+                        if (
+                            failed_reasons.get("chunk_span_integrity_error", 0) > 0
+                            and failed_samples
+                        )
+                        else "chunk/span integrity checks passed"
+                    ),
+                )
+                cache.set_search_integrity(
+                    {
+                        "vector_cache": vector_integrity,
+                        "chunk_span": chunk_integrity,
+                    }
+                )
+
+                extract_duration_ms = 0
+                embed_duration_ms = 0
+                persist_duration_ms = cleanup_ms
+                if execution_timing is not None:
+                    extract_duration_ms = execution_timing.parse_ms + execution_timing.edge_ms
+                    embed_duration_ms = execution_timing.embed_ms
+                    persist_duration_ms += execution_timing.persist_ms
+
+                stage_recorder.record(
+                    "extract_symbols",
+                    status=(
+                        _stage_status_from_reasons(failed_reasons, "extract_symbols")
+                        if files_considered
+                        else "not_run"
+                    ),
+                    duration_ms=extract_duration_ms,
+                    counts={"files_considered": files_considered},
+                )
+                stage_recorder.record(
+                    "embed_chunks",
+                    status=(
+                        _stage_status_from_reasons(failed_reasons, "embed_chunks")
+                        if files_considered
+                        else "not_run"
+                    ),
+                    duration_ms=embed_duration_ms,
+                    counts={"indexed_symbols": indexed_symbols},
+                )
+                stage_recorder.record(
+                    "persist_cache",
+                    status=(
+                        _stage_status_from_reasons(failed_reasons, "persist_cache")
+                        if files_considered
+                        else "not_run"
+                    ),
+                    duration_ms=persist_duration_ms if files_considered else 0,
+                    counts={
+                        "files_changed": indexed,
+                        "files_removed": files_removed,
+                        "symbols_removed": (outcome.symbols_removed if outcome else 0)
+                        + symbols_removed,
+                    },
+                )
+                stage_recorder.record(
+                    "validate_integrity",
+                    status=(
+                        _stage_status_from_reasons(failed_reasons, "validate_integrity")
+                        if files_considered
+                        else "not_run"
+                    ),
+                    duration_ms=consistency_ms if files_considered else 0,
+                    counts={"failed": int(consistency.get("failed", 0) or 0)},
+                )
+
+                if outcome and outcome.status != "failed" and failed == 0:
+                    metadata = IndexMetadata(
+                        version=config.index_version,
+                        total_symbols=cache.count_symbols(),
+                        indexed_files=cache.count_files(),
+                    )
+                    cache.set_index_metadata(metadata)
+                    cache.set_index_profile(config.embedding_profile())
+
+                _update_build_stage("update_symbol_index")
+                symbol_payload = _run_symbol_index(
+                    index_target=path,
+                    config=config,
+                    parser_registry=parser_registry,
+                    prefetched_files=(
+                        [execution.prepared.snapshot] if execution and execution.prepared else None
+                    ),
+                    file_paths=[path] if files_considered else None,
+                )
+                _record_symbol_index_stage(stage_recorder, symbol_payload)
+
+                overall_failed_reasons = dict(failed_reasons)
+                _merge_failure_reasons(
+                    overall_failed_reasons,
+                    symbol_payload.get("failed_reasons"),
+                )
+                overall_failed_samples = list(failed_samples)
+                _merge_failure_samples(
+                    overall_failed_samples,
+                    symbol_payload.get("failed_samples"),
+                )
+                overall_failed = failed + int(symbol_payload.get("failed", 0) or 0)
+
+                if overall_failed == 0:
+                    _update_build_stage("commit_metadata")
+                    commit_started = time.perf_counter()
+                    active_cache.publish_staged_build(build_id)
+                    publish_succeeded = True
+                    _persist_last_success_resume_state(config, active_cache)
+                    active_cache.clear_build_state()
+                    commit_duration_ms = int((time.perf_counter() - commit_started) * 1000)
+                    _record_commit_metadata_stage(
+                        stage_recorder,
+                        status="completed",
+                        duration_ms=commit_duration_ms,
+                        total_symbols=active_cache.count_symbols(),
+                        indexed_files=active_cache.count_files(),
+                    )
+                else:
+                    _write_cache_build_state(
+                        active_cache,
+                        state="interrupted",
+                        build_id=build_id,
+                        started_at=build_started_at,
+                        stage=current_stage,
+                        cleanup_pending=True,
+                    )
+                    _record_commit_metadata_stage(
+                        stage_recorder,
+                        status="not_run",
+                        duration_ms=0,
                     )
 
-                indexer._progress_callback = _progress
-
-        if os.path.isdir(path):
-            result = indexer.index_repository(path)
-            symbol_payload = _run_symbol_index(
-                index_target=path,
-                config=config,
-                parser_registry=parser_registry,
-                prefetched_files=result.parsed_files,
-                file_paths=result.source_files,
-            )
-            command_duration_ms = int((time.perf_counter() - command_started) * 1000)
-            if not as_json:
-                click.echo("", err=True)  # newline after final progress line
-            if result.failed == 0:
-                _persist_last_success_resume_state(config, cache)
-            payload = result.as_payload()
-            payload["symbol_index"] = symbol_payload
-            payload["timings_ms"] = {
-                "total": command_duration_ms,
-                "legacy_index": result.duration_ms,
-                "symbol_index": int(symbol_payload.get("duration_ms", 0) or 0),
-                "cleanup": int(result.phase_timings_ms.get("cleanup", 0)),
-                "consistency_checks": int(result.phase_timings_ms.get("consistency_checks", 0)),
-            }
-            payload["duration_ms"] = command_duration_ms
-            if as_json and debug_timings:
-                payload["slow_files"] = _build_slow_files_payload(result.file_timings)
-            if as_json and result.failed > 0 and not allow_partial:
-                _attach_primary_error_from_failure_contract(
-                    payload,
-                    error_type="index_failure",
-                    detail="Indexing completed with file-level failures.",
-                    probable_cause=(
-                        "One or more files failed during indexing; inspect failed_reasons "
-                        "and failed_samples for the per-file causes."
-                    ),
-                    default_remediation=DEFAULT_INDEX_FAILURE_REMEDIATION,
-                )
-            _emit(payload, as_json)
-            if result.failed > 0 and not allow_partial:
-                raise click.exceptions.Exit(1)
-            return
-
-        files_considered = 1
-        if any(path.endswith(ext) for ext in config.supported_extensions):
-            segments = set(os.path.normpath(os.path.abspath(path)).split(os.sep))
-            if any(excluded in segments for excluded in config.excluded_dirs):
-                files_considered = 0
-        else:
-            files_considered = 0
-        if files_considered:
-            cache.delete_index_metadata()
-        single_index_started = time.perf_counter()
-        execution = indexer.index_file_with_details(path) if files_considered else None
-        legacy_index_ms = int((time.perf_counter() - single_index_started) * 1000)
-        cleanup_started = time.perf_counter()
-        stale_cleanup = (
-            indexer.prune_missing_file_entries()
-            if files_considered
-            else {
-                "files_removed": 0,
-                "symbols_removed": 0,
-                "failed": 0,
-                "failed_reasons": {},
-                "failed_samples": [],
-            }
-        )
-        if vector_store and files_considered:
-            vector_store.save()
-        cleanup_ms = int((time.perf_counter() - cleanup_started) * 1000)
-        consistency_started = time.perf_counter()
-        consistency = (
-            indexer.validate_vector_metadata_consistency()
-            if files_considered
-            else {"failed": 0, "failed_reasons": {}, "failed_samples": []}
-        )
-        consistency_ms = int((time.perf_counter() - consistency_started) * 1000)
-        failed_reasons: dict[str, int] = {}
-        failed_samples: list[str] = []
-        indexed = 0
-        unchanged = 0
-        failed = 0
-        indexed_symbols = 0
-        outcome = execution.outcome if execution else None
-        if outcome:
-            if outcome.status == "indexed":
-                indexed = 1
-                indexed_symbols = outcome.symbols_indexed
-            elif outcome.status == "unchanged":
-                unchanged = 1
-            else:
-                failed = 1
-                reason = outcome.reason or "indexing_error"
-                failed_reasons[reason] = 1
-                detail = outcome.detail or "indexing failed"
-                failed_samples.append(f"{path}: {detail}")
-        files_removed = int(stale_cleanup.get("files_removed", 0))
-        symbols_removed = int(stale_cleanup.get("symbols_removed", 0))
-        stale_failed = int(stale_cleanup.get("failed", 0))
-        failed += stale_failed
-        stale_failed_reasons = stale_cleanup.get("failed_reasons", {})
-        if isinstance(stale_failed_reasons, dict):
-            for reason, count in stale_failed_reasons.items():
-                reason_key = str(reason)
-                reason_count = int(count)
-                failed_reasons[reason_key] = failed_reasons.get(reason_key, 0) + reason_count
-        stale_failed_samples = stale_cleanup.get("failed_samples", [])
-        if isinstance(stale_failed_samples, list):
-            for sample in stale_failed_samples:
-                if len(failed_samples) >= 5:
-                    break
-                failed_samples.append(str(sample))
-        failed += int(consistency.get("failed", 0))
-        consistency_failed_reasons = consistency.get("failed_reasons", {})
-        if isinstance(consistency_failed_reasons, dict):
-            for reason, count in consistency_failed_reasons.items():
-                reason_key = str(reason)
-                reason_count = int(count)
-                failed_reasons[reason_key] = failed_reasons.get(reason_key, 0) + reason_count
-        consistency_failed_samples = consistency.get("failed_samples", [])
-        if isinstance(consistency_failed_samples, list):
-            for sample in consistency_failed_samples:
-                if len(failed_samples) >= 5:
-                    break
-                failed_samples.append(str(sample))
-        if outcome and outcome.status != "failed" and failed == 0:
-            metadata = IndexMetadata(
-                version=config.index_version,
-                total_symbols=cache.count_symbols(),
-                indexed_files=cache.count_files(),
-            )
-            cache.set_index_metadata(metadata)
-            cache.set_index_profile(config.embedding_profile())
-            _persist_last_success_resume_state(config, cache)
-        result = {
-            "files_considered": files_considered,
-            "indexed": indexed,
-            "unchanged": unchanged,
-            "failed": failed,
-            "failed_reasons": failed_reasons,
-            "failed_samples": failed_samples,
-            "files_changed": indexed,
-            "files_removed": files_removed,
-            "symbols_added": outcome.symbols_added if outcome else 0,
-            "symbols_updated": outcome.symbols_updated if outcome else 0,
-            "symbols_removed": (outcome.symbols_removed if outcome else 0) + symbols_removed,
-            "indexed_files": indexed,
-            "skipped_files": unchanged,
-            "indexed_symbols": indexed_symbols,
-            "duration_ms": 0,
-        }
-        symbol_payload = _run_symbol_index(
-            index_target=path,
-            config=config,
-            parser_registry=parser_registry,
-            prefetched_files=(
-                [execution.prepared.snapshot] if execution and execution.prepared else None
-            ),
-            file_paths=[path] if files_considered else None,
-        )
-        command_duration_ms = int((time.perf_counter() - command_started) * 1000)
-        result["symbol_index"] = symbol_payload
-        result["timings_ms"] = {
-            "total": command_duration_ms,
-            "legacy_index": legacy_index_ms,
-            "symbol_index": int(symbol_payload.get("duration_ms", 0) or 0),
-            "cleanup": cleanup_ms,
-            "consistency_checks": consistency_ms,
-        }
-        result["duration_ms"] = command_duration_ms
-        if as_json and debug_timings and execution and execution.timing is not None:
-            result["slow_files"] = [execution.timing.as_payload()]
-        result.update(_build_index_failure_contract(failed_reasons))
-        if as_json and failed > 0 and not allow_partial:
-            _attach_primary_error_from_failure_contract(
-                result,
-                error_type="index_failure",
-                detail="Indexing completed with file-level failures.",
-                probable_cause=(
-                    "One or more file, cleanup, or vector-consistency steps failed; inspect "
-                    "failed_reasons and failed_samples for the concrete cause."
-                ),
-                default_remediation=DEFAULT_INDEX_FAILURE_REMEDIATION,
-            )
-        _emit(result, as_json)
-        if failed > 0 and not allow_partial:
-            raise click.exceptions.Exit(1)
+                result = {
+                    "files_considered": files_considered,
+                    "indexed": indexed,
+                    "unchanged": unchanged,
+                    "failed": overall_failed,
+                    "failed_reasons": overall_failed_reasons,
+                    "failed_samples": overall_failed_samples,
+                    "files_changed": indexed,
+                    "files_removed": files_removed,
+                    "symbols_added": outcome.symbols_added if outcome else 0,
+                    "symbols_updated": outcome.symbols_updated if outcome else 0,
+                    "symbols_removed": (outcome.symbols_removed if outcome else 0)
+                    + symbols_removed,
+                    "indexed_files": indexed,
+                    "skipped_files": unchanged,
+                    "indexed_symbols": indexed_symbols,
+                    "duration_ms": 0,
+                    "symbol_index": symbol_payload,
+                }
+                command_duration_ms = int((time.perf_counter() - command_started) * 1000)
+                result["timings_ms"] = {
+                    "total": command_duration_ms,
+                    "legacy_index": legacy_index_ms,
+                    "symbol_index": int(symbol_payload.get("duration_ms", 0) or 0),
+                    "cleanup": cleanup_ms,
+                    "consistency_checks": consistency_ms,
+                }
+                result["duration_ms"] = command_duration_ms
+                result["stages"] = stage_recorder.as_payload()
+                if as_json and debug_timings and execution_timing is not None:
+                    result["slow_files"] = [execution_timing.as_payload()]
+                result.update(_build_index_failure_contract(overall_failed_reasons))
+                if as_json and overall_failed > 0 and not allow_partial:
+                    _attach_primary_error_from_failure_contract(
+                        result,
+                        error_type="index_failure",
+                        detail="Indexing did not finish cleanly.",
+                        probable_cause=(
+                            "One or more file, cleanup, consistency, or symbol-index stages "
+                            "failed; inspect failed_reasons and failed_samples "
+                            "for the concrete causes."
+                        ),
+                        default_remediation=DEFAULT_INDEX_FAILURE_REMEDIATION,
+                    )
+                _emit(result, as_json)
+                if overall_failed > 0 and not allow_partial:
+                    raise click.exceptions.Exit(1)
+        except BaseException:
+            if active_cache is not None:
+                try:
+                    if publish_succeeded:
+                        active_cache.clear_build_state()
+                    else:
+                        _write_cache_build_state(
+                            active_cache,
+                            state="interrupted",
+                            build_id=build_id,
+                            started_at=build_started_at,
+                            stage=current_stage,
+                            cleanup_pending=True,
+                        )
+                except Exception:
+                    pass
+            raise
 
 
 def _validate_search_confidence_options(
@@ -3389,79 +4100,28 @@ def search(
     normalized_search_mode = search_mode.strip().lower() if search_mode else "semantic"
 
     if needs_reindex:
-        blocked_pack = ContextPack(
-            query=query,
-            summary={
-                "strategy": "blocked",
-                "reason": "reindex_required",
-                "winner": None,
-                "hits": 0,
-                "search_mode": normalized_search_mode,
-                "entrypoint": health["entrypoint"],
-                "contract_version": health["contract_version"],
-                "warning_codes": health["warning_codes"],
-                "semantic_search_allowed": health["semantic_search_allowed"],
-                "search_integrity": health["search_integrity"],
-                "backend_thresholds": {},
-            },
-            hits=(),
-            debug={
-                "timings": {
-                    "total_ms": 0,
-                    "backend_ms": {},
-                },
-                "backend_scores": {},
-                "backend_errors": {},
-                "thresholds": {},
-                "commands": {},
-                "constraints": {
-                    "search_mode": normalized_search_mode,
-                    "language": language,
-                    "path_prefix": resolved_path_prefix,
-                    "max_files": max_files,
-                    "max_snippets": resolved_max_snippets,
-                    "time_budget_ms": time_budget_ms,
-                },
-            },
-        )
-        payload = blocked_pack.to_dict(include_debug=debug_router)
-        summary_payload = payload.get("summary")
-        if isinstance(summary_payload, dict):
-            summary_payload.setdefault("query_mode", query_mode)
-            summary_payload.setdefault("search_mode", normalized_search_mode)
-            summary_payload.setdefault("needs_reindex", health["needs_reindex"])
-            summary_payload.setdefault("reindex_reason", reindex_reason)
-            summary_payload.setdefault("expected_index_profile", health["expected_index_profile"])
-            summary_payload.setdefault("cached_index_profile", health["cached_index_profile"])
-            summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
-            summary_payload.setdefault("legacy_kind_filter", kind)
-            summary_payload.setdefault("legacy_context_radius", context_radius)
-            summary_payload.setdefault("legacy_top_k", top_k)
-            summary_payload.setdefault("legacy_confidence_threshold", confidence_threshold)
-            summary_payload.setdefault("legacy_max_requery_attempts", max_requery_attempts)
-            summary_payload.setdefault("legacy_retry_enabled", not disable_bounded_requery)
-            summary_payload.setdefault("file_filter", resolved_path_prefix)
-            summary_payload.setdefault("tool_version", GLOGGUR_VERSION)
-            for key, value in health.items():
-                if key == "resume_contract":
-                    continue
-                summary_payload.setdefault(str(key), value)
-            for key, value in resume_contract.items():
-                summary_payload.setdefault(str(key), value)
-
+        payload = _build_search_not_ready_payload(query=query, health=health)
         if debug_router:
-            debug_payload = payload.get("debug")
-            if not isinstance(debug_payload, dict):
-                debug_payload = {}
-                payload["debug"] = debug_payload
-            debug_payload["resume_contract"] = resume_contract
-            debug_payload["search_health"] = health
-            debug_payload["tool_version"] = GLOGGUR_VERSION
-
-        if stream and as_json:
-            return
+            payload["debug"] = {
+                "search_health": health,
+                "query_mode": query_mode,
+                "search_mode": normalized_search_mode,
+                "language": language,
+                "path_prefix": resolved_path_prefix,
+                "max_files": max_files,
+                "max_snippets": resolved_max_snippets,
+                "time_budget_ms": time_budget_ms,
+                "ranking_mode": ranking_mode,
+                "kind": kind,
+                "context_radius": context_radius,
+                "top_k": top_k,
+                "confidence_threshold": confidence_threshold,
+                "max_requery_attempts": max_requery_attempts,
+                "bounded_retry_enabled": not disable_bounded_requery,
+                "tool_version": GLOGGUR_VERSION,
+            }
         _emit(payload, as_json)
-        return
+        raise click.exceptions.Exit(1)
 
     metadata_store = _create_metadata_store(config)
     searcher: HybridSearch | None = None

@@ -99,14 +99,22 @@ def test_corruption_recovery_commands_work_in_simulated_no_faiss_runtime(
     }
 
     result = _run_cli(args_map[command], env, timeout=120)
-    assert result.returncode == 0, f"{result.stderr}\n{result.stdout}"
+    expected_returncode = 1 if command == "search" else 0
+    assert result.returncode == expected_returncode, f"{result.stderr}\n{result.stdout}"
     payload = _parse_json_payload(result.stdout)
     if command == "status":
         assert "needs_reindex" in payload
     elif command == "search":
-        assert payload.get("schema_version") == 2
-        assert "summary" in payload
-        assert "hits" in payload
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "search_cache_not_ready"
+        metadata = payload["metadata"]
+        assert isinstance(metadata, dict)
+        assert metadata["needs_reindex"] is True
+        assert metadata["resume_reason_codes"] == [
+            "missing_index_metadata",
+            "cache_corruption_recovered",
+        ]
     elif command == "inspect":
         assert "reports_total" in payload
     elif command == "clear-cache":

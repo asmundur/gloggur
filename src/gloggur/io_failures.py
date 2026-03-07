@@ -14,6 +14,7 @@ import sqlite3
 from dataclasses import dataclass
 
 IO_ERROR_CATEGORIES = {
+    "cache_lock_held",
     "permission_denied",
     "read_only_filesystem",
     "disk_full_or_quota",
@@ -22,6 +23,13 @@ IO_ERROR_CATEGORIES = {
 }
 
 _CATEGORY_DETAILS: dict[str, tuple[str, list[str]]] = {
+    "cache_lock_held": (
+        "Another gloggur process currently holds the cache writer lock.",
+        [
+            "Wait for the active `index`, `watch`, or `clear-cache` command to finish.",
+            "Retry after the lock holder exits or releases the cache write lock.",
+        ],
+    ),
     "permission_denied": (
         "The process does not have permission for this filesystem operation.",
         [
@@ -83,6 +91,7 @@ class StorageIOError(RuntimeError):
     probable_cause: str
     remediation: list[str]
     detail: str
+    context: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         """Validate that ``category`` is one of the known stable categories."""
@@ -98,17 +107,18 @@ class StorageIOError(RuntimeError):
 
     def to_payload(self) -> dict[str, object]:
         """Return machine-readable error payload for JSON outputs."""
-        return {
-            "error": {
-                "type": "io_failure",
-                "category": self.category,
-                "operation": self.operation,
-                "path": self.path,
-                "probable_cause": self.probable_cause,
-                "remediation": self.remediation,
-                "detail": self.detail,
-            }
+        error: dict[str, object] = {
+            "type": "io_failure",
+            "category": self.category,
+            "operation": self.operation,
+            "path": self.path,
+            "probable_cause": self.probable_cause,
+            "remediation": self.remediation,
+            "detail": self.detail,
         }
+        if isinstance(self.context, dict):
+            error.update(self.context)
+        return {"error": error}
 
 
 def wrap_io_error(exc: Exception, *, operation: str, path: str) -> StorageIOError:

@@ -115,6 +115,9 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    scripts/gloggur search "<query>" --top-k 5 --json
    scripts/gloggur search "rg -S -g '*.py' AuthToken" --json
    ```
+   If the cache is not reusable, `search --json` exits non-zero with
+   `error.code=search_cache_not_ready` and a top-level `metadata` object that
+   includes resume/build-state details.
 3. **Confirm coverage**:
    ```bash
    scripts/gloggur status --json
@@ -239,7 +242,7 @@ Gloggur also auto-loads a repo-local `.env` file; exported process environment v
 ## Cache handling
 
 Gloggur stores its cache in `.gloggur-cache`. This directory is **local-only** and should never be committed.
-`gloggur status --json` includes `schema_version` and `needs_reindex` so agents can detect stale cache state without manual cleanup.
+`gloggur status --json` includes `schema_version`, `needs_reindex`, `build_state`, `raw_total_symbols`, and `total_symbols` so agents can distinguish raw on-disk rows from reusable search state without manual cleanup.
 Watch mode writes runtime files (`watch_state.json`, `watch.pid`, `watch.log`) under `.gloggur-cache` by default.
 
 Cross-workspace note:
@@ -261,7 +264,8 @@ Writer lock behavior:
 
 - lock acquisition is non-blocking with bounded retry/backoff
 - default policy: `5000ms` total wait, exponential delays (`25ms` initial, capped at `250ms`)
-- timeout exits non-zero with structured JSON error (`operation: acquire cache write lock`)
+- timeout exits non-zero with structured JSON error (`operation: acquire cache write lock`, `category: cache_lock_held`)
+- lock failures can include `holder_pid`, `holder_started_at`, `holder_age_ms`, and `holder_command`
 - tunables:
   - `GLOGGUR_CACHE_LOCK_TIMEOUT_MS`
   - `GLOGGUR_CACHE_LOCK_INITIAL_BACKOFF_MS`
@@ -276,6 +280,8 @@ SQLite behavior under contention:
 
 Publication consistency:
 
-- index metadata is cleared before a rebuild starts
-- metadata/profile are published only after vector artifacts are saved
-- if a writer is interrupted, `status`/`search` report `needs_reindex=true` instead of advertising a healthy partial state
+- index writes are staged under `.gloggur-cache/.builds/<build_id>/`
+- the last committed cache remains readable until the staged build publishes successfully
+- `status --json` exposes in-progress or interrupted writers through `build_state`
+- if a first build is interrupted, `status` reports `resume_reason_codes` including `index_interrupted` / `missing_index_metadata`, and `search --json` fails non-zero with `search_cache_not_ready`
+- if a rebuild is interrupted after a healthy cache already exists, readers keep using the last committed cache while `build_state.state="interrupted"` signals the abandoned staged build

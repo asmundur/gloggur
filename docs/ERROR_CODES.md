@@ -136,6 +136,11 @@ Fields:
   - Meaning: deprecated v1-only search options or parsing assumptions were used after ContextPack v2 cutover.
   - Retryability: retry after migrating to v2 schema/options.
   - Operator action: parse `schema_version=2` payload fields (`summary`, `hits`) and remove v1-only flags.
+- `search_cache_not_ready`
+  - Command(s): `search`.
+  - Meaning: search was attempted against a cache that is still building, interrupted, or otherwise not reusable.
+  - Retryability: retry after a successful index build or after the active writer finishes.
+  - Operator action: inspect `status --json` for `build_state` / resume details, then run `gloggur index . --json` if recovery is required.
 - `search_router_backends_failed`
   - Command(s): `search`.
   - Meaning: all enabled router backends failed to produce usable evidence.
@@ -384,6 +389,14 @@ Fields:
   - Retryability: retry after restarting watch or rebuilding cache state.
   - Operator action: inspect daemon state writes and rerun watch.
 
+## I/O Failure Categories
+
+- `cache_lock_held`
+  - Command(s): writer commands such as `index`, `clear-cache`, and watch batch updates.
+  - Meaning: another Glöggur process currently holds the cache writer lock.
+  - Retryability: retry after the active writer exits or releases the lock.
+  - Operator action: wait for the active writer, or inspect `error.holder_pid`, `error.holder_started_at`, `error.holder_age_ms`, and `error.holder_command` when present.
+
 ## Resume Reason Codes
 
 - `missing_index_metadata`
@@ -391,6 +404,11 @@ Fields:
   - Meaning: index metadata required for safe resume is missing.
   - Retryability: retry after a successful full index run.
   - Operator action: run `gloggur index . --json`.
+- `build_in_progress`
+  - Command(s): `status`, `search`.
+  - Meaning: an index build is currently running and metadata has not been committed yet.
+  - Retryability: retry after the active build completes.
+  - Operator action: wait for the current writer or inspect `build_state` in `status --json`.
 - `index_interrupted`
   - Command(s): `status`, `search`.
   - Meaning: a previous index run appears to have been interrupted before finishing cleanly.

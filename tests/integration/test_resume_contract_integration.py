@@ -257,8 +257,11 @@ def test_resume_requires_reindex_when_last_success_tool_version_is_tampered() ->
         assert payload["resume_fingerprint_match"] is False
 
         search_run = _run_cli(["search", "add", "--json"], env)
-        assert search_run.returncode == 0, f"{search_run.stderr}\n{search_run.stdout}"
+        assert search_run.returncode == 1, f"{search_run.stderr}\n{search_run.stdout}"
         search_payload = _parse_json_payload(search_run.stdout)
+        error = search_payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "search_cache_not_ready"
         metadata = search_payload["metadata"]
         assert isinstance(metadata, dict)
         assert metadata["needs_reindex"] is True

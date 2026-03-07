@@ -96,6 +96,28 @@ def test_cli_index_search_status_and_clear_cache() -> None:
         assert clear_payload["cleared"] is True
 
 
+def test_cli_index_json_includes_stages_by_default() -> None:
+    """index --json should always include deterministic top-level stage telemetry."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        stages = payload["stages"]
+        assert isinstance(stages, list)
+        assert [stage["name"] for stage in stages] == list(cli_main.INDEX_STAGE_ORDER)
+        assert all(stage["status"] == "completed" for stage in stages)
+
+
 def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
     """search --json should emit ContextPack v2 and exclude removed v1 payload keys."""
     runner = CliRunner()
@@ -969,24 +991,24 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_changed_payload["last_success_tool_version_match"] is True
 
         search_changed = runner.invoke(cli, ["search", "add", "--json"], env=env_model_b)
-        assert search_changed.exit_code == 0
+        assert search_changed.exit_code == 1
         search_changed_payload = _parse_json_output(search_changed.output)
         assert search_changed_payload["results"] == []
-        assert search_changed_payload["metadata"]["needs_reindex"] is True
-        assert "embedding profile changed" in str(
-            search_changed_payload["metadata"]["reindex_reason"]
-        )
-        assert search_changed_payload["metadata"]["resume_decision"] == "reindex_required"
-        assert search_changed_payload["metadata"]["resume_reason_codes"] == [
+        error = search_changed_payload["error"]
+        assert isinstance(error, dict)
+        assert error["type"] == "search_unavailable"
+        assert error["code"] == "search_cache_not_ready"
+        metadata = search_changed_payload["metadata"]
+        assert metadata["needs_reindex"] is True
+        assert "embedding profile changed" in str(metadata["reindex_reason"])
+        assert metadata["resume_decision"] == "reindex_required"
+        assert metadata["resume_reason_codes"] == [
             "embedding_profile_changed"
         ]
-        assert search_changed_payload["metadata"]["resume_fingerprint_match"] is False
-        assert (
-            search_changed_payload["metadata"]["last_success_resume_fingerprint"]
-            == first_success_fingerprint
-        )
-        assert search_changed_payload["metadata"]["last_success_resume_fingerprint_match"] is False
-        assert search_changed_payload["metadata"]["last_success_tool_version_match"] is True
+        assert metadata["resume_fingerprint_match"] is False
+        assert metadata["last_success_resume_fingerprint"] == first_success_fingerprint
+        assert metadata["last_success_resume_fingerprint_match"] is False
+        assert metadata["last_success_tool_version_match"] is True
 
         rebuild_index = runner.invoke(cli, ["index", str(repo), "--json"], env=env_model_b)
         assert rebuild_index.exit_code == 0
@@ -1188,7 +1210,7 @@ def test_cli_index_reports_vector_metadata_mismatch_on_tampered_vector_map() -> 
         assert isinstance(error, dict)
         assert error["type"] == "index_failure"
         assert error["code"] == "vector_metadata_mismatch"
-        assert "Indexing completed with file-level failures." in str(error["detail"])
+        assert "Indexing did not finish cleanly." in str(error["detail"])
 
 
 def test_cli_index_transient_vector_upsert_failure_is_not_sticky(
@@ -1427,16 +1449,19 @@ def test_cli_search_self_heals_corrupted_cache() -> None:
     db_path.write_bytes(b"broken sqlite bytes")
 
     first_search = runner.invoke(cli, ["search", "add", "--json"], env=env)
-    assert first_search.exit_code == 0
+    assert first_search.exit_code == 1
     assert "Cache corruption detected at" in first_search.output
     first_payload = _parse_json_output(first_search.output)
     assert first_payload["results"] == []
+    error = first_payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "search_cache_not_ready"
     metadata = first_payload["metadata"]
     assert isinstance(metadata, dict)
     assert int(metadata["total_results"]) == 0
 
     second_search = runner.invoke(cli, ["search", "add", "--json"], env=env)
-    assert second_search.exit_code == 0
+    assert second_search.exit_code == 1
     assert "Cache corruption detected at" not in second_search.output
 
 
