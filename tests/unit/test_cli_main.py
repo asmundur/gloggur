@@ -820,6 +820,262 @@ def test_parsers_check_reports_required_and_known_gap_cases(tmp_path: Path) -> N
     assert payload["language_support_contract"]["schema_version"] == "1"
 
 
+def test_parsers_check_exits_non_zero_when_capability_checks_fail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """parsers check should exit non-zero when required capability checks fail."""
+    config = cli_main.GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+    )
+    emitted: dict[str, object] = {}
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(cli_main, "ParserRegistry", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        cli_main,
+        "run_parser_capability_check",
+        lambda **_kwargs: {"ok": False, "required_case_counts": {"failed": 1}},
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_emit",
+        lambda payload, as_json: emitted.update({"payload": payload, "as_json": as_json}),
+    )
+
+    with pytest.raises(cli_main.click.exceptions.Exit) as exc_info:
+        cli_main._parsers_check_impl(config_path=None, as_json=True)
+
+    assert exc_info.value.exit_code == 1
+    assert emitted["as_json"] is True
+    payload = emitted["payload"]
+    assert isinstance(payload, dict)
+    assert payload["ok"] is False
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("py", ".py"),
+        (" PY ", ".py"),
+        (".tsx", ".tsx"),
+    ],
+)
+def test_normalize_extension_token_normalizes_case_spacing_and_dot_prefix(
+    raw: str,
+    expected: str,
+) -> None:
+    """Extension tokens should normalize to dot-prefixed lowercase values."""
+    assert cli_main._normalize_extension_token(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "."])
+def test_normalize_extension_token_rejects_empty_and_dot_only_tokens(raw: str) -> None:
+    """Invalid extension tokens should fail closed before policy validation."""
+    with pytest.raises(ValueError):
+        cli_main._normalize_extension_token(raw)
+
+
+def test_dedupe_extensions_preserves_order_and_drops_duplicates() -> None:
+    """Duplicate extension tokens should be removed after normalization."""
+    deduped = cli_main._dedupe_extensions([".py", "py", ".JS", ".js"])
+    assert deduped == [".py", ".js"]
+
+
+def test_validate_extension_policy_wraps_invalid_extension_tokens(
+    tmp_path: Path,
+) -> None:
+    """Invalid extension tokens should surface as structured IO failures."""
+    config = cli_main.GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+        supported_extensions=[" "],
+    )
+    config_path = tmp_path / "broken.gloggur.yaml"
+
+    with pytest.raises(StorageIOError) as exc_info:
+        cli_main._validate_extension_policy(config=config, config_path=str(config_path))
+
+    error = exc_info.value
+    assert error.operation == "validate extension policy"
+    assert "invalid extension tokens" in error.probable_cause.lower()
+    assert "ValueError" in error.detail
+
+
+def test_extension_label_returns_placeholder_for_extensionless_paths() -> None:
+    """Skipped-extension diagnostics should bucket extensionless files explicitly."""
+    assert cli_main._extension_label("README") == "<no_extension>"
+
+
+def test_build_skipped_extension_diagnostics_returns_empty_payload_when_disabled() -> None:
+    """Disabled skipped-extension diagnostics should return an empty contract payload."""
+    payload = cli_main._build_skipped_extension_diagnostics(
+        enabled=False,
+        counts={".txt": 2},
+        samples=["notes.txt"],
+    )
+    assert payload == {
+        "enabled": False,
+        "warning_code": None,
+        "skipped_files": 0,
+        "by_extension": {},
+        "sample_paths": [],
+    }
+
+
+def test_collect_index_skipped_extension_diagnostics_records_directory_unsupported_files(
+    tmp_path: Path,
+) -> None:
+    """index skipped-extension diagnostics should record unsupported files in directories."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "module.py").write_text("def ok() -> None:\n    pass\n", encoding="utf8")
+    (repo / "notes.txt").write_text("plain text\n", encoding="utf8")
+    config = cli_main.GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+    )
+
+    diagnostics = cli_main._collect_index_skipped_extension_diagnostics(
+        path=str(repo),
+        config=config,
+        enabled=True,
+    )
+
+    assert diagnostics["enabled"] is True
+    assert diagnostics["warning_code"] == "unsupported_extensions_skipped"
+    assert diagnostics["skipped_files"] == 1
+    assert diagnostics["by_extension"] == {".txt": 1}
+
+
+def test_collect_index_skipped_extension_diagnostics_returns_empty_for_excluded_single_path(
+    tmp_path: Path,
+) -> None:
+    """index skipped-extension diagnostics should ignore unsupported files under excluded dirs."""
+    excluded_dir = tmp_path / "excluded"
+    excluded_dir.mkdir()
+    target = excluded_dir / "notes.txt"
+    target.write_text("plain text\n", encoding="utf8")
+    config = cli_main.GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+        excluded_dirs=["excluded"],
+    )
+
+    diagnostics = cli_main._collect_index_skipped_extension_diagnostics(
+        path=str(target),
+        config=config,
+        enabled=True,
+    )
+
+    assert diagnostics["enabled"] is True
+    assert diagnostics["warning_code"] is None
+    assert diagnostics["skipped_files"] == 0
+
+
+def test_collect_inspect_skipped_extension_diagnostics_records_directory_unsupported_files(
+    tmp_path: Path,
+) -> None:
+    """inspect skipped-extension diagnostics should record unsupported files in-scope."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "module.py").write_text("def ok() -> None:\n    pass\n", encoding="utf8")
+    (repo / "notes.txt").write_text("plain text\n", encoding="utf8")
+    config = cli_main.GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+    )
+
+    diagnostics = cli_main._collect_inspect_skipped_extension_diagnostics(
+        path=str(repo),
+        config=config,
+        include_tests=False,
+        include_scripts=False,
+        enabled=True,
+    )
+
+    assert diagnostics["enabled"] is True
+    assert diagnostics["warning_code"] == "unsupported_extensions_skipped"
+    assert diagnostics["skipped_files"] == 1
+    assert diagnostics["by_extension"] == {".txt": 1}
+
+
+def test_collect_inspect_skipped_extension_diagnostics_returns_empty_for_excluded_path(
+    tmp_path: Path,
+) -> None:
+    """inspect skipped-extension diagnostics should ignore excluded single-file paths."""
+    excluded_dir = tmp_path / "excluded"
+    excluded_dir.mkdir()
+    target = excluded_dir / "notes.txt"
+    target.write_text("plain text\n", encoding="utf8")
+    config = cli_main.GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+        excluded_dirs=["excluded"],
+    )
+
+    diagnostics = cli_main._collect_inspect_skipped_extension_diagnostics(
+        path=str(target),
+        config=config,
+        include_tests=False,
+        include_scripts=False,
+        enabled=True,
+    )
+
+    assert diagnostics["enabled"] is True
+    assert diagnostics["warning_code"] is None
+    assert diagnostics["skipped_files"] == 0
+
+
+def test_collect_inspect_skipped_extension_diagnostics_respects_default_scope_filters(
+    tmp_path: Path,
+) -> None:
+    """inspect skipped-extension diagnostics should not count out-of-scope test paths."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    target = tests_dir / "notes.txt"
+    target.write_text("plain text\n", encoding="utf8")
+    config = cli_main.GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+    )
+
+    diagnostics = cli_main._collect_inspect_skipped_extension_diagnostics(
+        path=str(target),
+        config=config,
+        include_tests=False,
+        include_scripts=False,
+        enabled=True,
+    )
+
+    assert diagnostics["enabled"] is True
+    assert diagnostics["warning_code"] is None
+    assert diagnostics["skipped_files"] == 0
+
+
+def test_attach_skipped_extension_diagnostics_normalizes_existing_warning_codes() -> None:
+    """warning_codes should be normalized, deduplicated, and sorted before emission."""
+    payload: dict[str, object] = {"warning_codes": ["zeta", "", 1]}
+    diagnostics = {
+        "enabled": True,
+        "warning_code": "unsupported_extensions_skipped",
+        "skipped_files": 1,
+        "by_extension": {".txt": 1},
+        "sample_paths": ["notes.txt"],
+    }
+
+    cli_main._attach_skipped_extension_diagnostics(
+        payload=payload,
+        warn_on_skipped_extensions=True,
+        diagnostics=diagnostics,
+    )
+
+    assert payload["warn_on_skipped_extensions"] is True
+    assert payload["skipped_extension_diagnostics"] == diagnostics
+    assert payload["warning_codes"] == ["1", "unsupported_extensions_skipped", "zeta"]
+
+
 def test_resolve_artifact_destination_rejects_unsupported_scheme() -> None:
     """Artifact destination parser should fail closed for non-file URI schemes."""
     with pytest.raises(cli_main.CLIContractError) as exc_info:
