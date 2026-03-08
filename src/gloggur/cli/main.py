@@ -75,6 +75,10 @@ from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io
 from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.coverage import CoverageIngester
 from gloggur.parsers.registry import ParserRegistry
+from gloggur.parsers.support_contract import (
+    build_language_support_contract,
+    run_parser_capability_check,
+)
 from gloggur.path_filters import is_indexable_source_path
 from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
 from gloggur.search import hybrid_search as hybrid_search_module
@@ -123,6 +127,38 @@ def adapters() -> None:
     """Inspect adapter registry state and discoverability."""
 
 
+@cli.group()
+def parsers() -> None:
+    """Run parser capability checks and inspect language support contracts."""
+
+
+@parsers.command("check")
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def parsers_check(config_path: str | None, as_json: bool) -> None:
+    """Run built-in parser capability corpus checks."""
+    _with_io_failure_handling(_parsers_check_impl)(
+        config_path=config_path,
+        as_json=as_json,
+    )
+
+
+def _parsers_check_impl(config_path: str | None, as_json: bool) -> None:
+    """Run built-in parser capability corpus checks."""
+    config = _load_config(config_path)
+    parser_registry = ParserRegistry(
+        extension_map=config.parser_extension_map,
+        adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+    )
+    payload = run_parser_capability_check(
+        parser_registry=parser_registry,
+        config=config,
+    )
+    _emit(payload, as_json=as_json)
+    if not bool(payload.get("ok")):
+        raise click.exceptions.Exit(1)
+
+
 @adapters.command("list")
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
@@ -150,6 +186,8 @@ def _adapters_list_impl(config_path: str | None, as_json: bool) -> None:
             "storage_backends": list_storage_backends(),
             "runtime_hosts": list_runtime_hosts(),
         },
+        "extension_policy": _build_extension_policy_contract(config),
+        "language_support_contract": build_language_support_contract(config=config),
     }
     _emit(payload, as_json=as_json)
 
@@ -679,7 +717,8 @@ def _load_config(config_path: str | None) -> GloggurConfig:
                 break
     _validate_legacy_local_fallback_env()
     try:
-        return GloggurConfig.load(path=load_path)
+        config = GloggurConfig.load(path=load_path)
+        return _validate_extension_policy(config=config, config_path=error_path)
     except OSError as exc:
         raise wrap_io_error(
             exc,
@@ -700,6 +739,127 @@ def _load_config(config_path: str | None) -> GloggurConfig:
             ],
             detail=f"{type(exc).__name__}: {exc}",
         ) from exc
+
+
+def _normalize_extension_token(value: str) -> str:
+    """Return a normalized extension token (dot-prefixed lowercase)."""
+    normalized = value.strip().lower()
+    if not normalized:
+        raise ValueError("extension tokens cannot be empty")
+    if not normalized.startswith("."):
+        normalized = f".{normalized}"
+    if normalized == ".":
+        raise ValueError("extension tokens cannot be only '.'")
+    return normalized
+
+
+def _dedupe_extensions(values: Sequence[str]) -> list[str]:
+    """Return stable deduplicated extension list."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        extension = _normalize_extension_token(str(raw_value))
+        if extension in seen:
+            continue
+        seen.add(extension)
+        ordered.append(extension)
+    return ordered
+
+
+def _validate_extension_policy(*, config: GloggurConfig, config_path: str) -> GloggurConfig:
+    """Validate supported extension policy and parser mapping consistency."""
+    try:
+        supported_extensions = _dedupe_extensions(config.supported_extensions)
+        parser_extension_map = {
+            _normalize_extension_token(str(extension)): str(language).strip()
+            for extension, language in config.parser_extension_map.items()
+        }
+    except ValueError as exc:
+        raise StorageIOError(
+            category="unknown_io_error",
+            operation="validate extension policy",
+            path=config_path,
+            probable_cause="Configured file-extension policy contains invalid extension tokens.",
+            remediation=[
+                "Use dot-prefixed extensions such as `.py`, `.ts`, and `.tsx`.",
+                "Remove empty extension values and rerun the command.",
+            ],
+            detail=f"{type(exc).__name__}: {exc}",
+        ) from exc
+
+    map_without_supported = sorted(
+        extension for extension in parser_extension_map if extension not in supported_extensions
+    )
+    if map_without_supported:
+        joined = ", ".join(map_without_supported)
+        raise StorageIOError(
+            category="unknown_io_error",
+            operation="validate extension policy",
+            path=config_path,
+            probable_cause=(
+                "parser_extension_map contains extensions that are not present in "
+                "supported_extensions."
+            ),
+            remediation=[
+                f"Add the missing extensions to supported_extensions: {joined}.",
+                "Or remove those parser_extension_map entries and rerun.",
+            ],
+            detail=f"parser_extension_map keys missing from supported_extensions: {joined}",
+        )
+
+    effective_extension_map = ParserRegistry(
+        extension_map=parser_extension_map,
+    ).supported_extensions()
+    unsupported_without_parser = sorted(
+        extension for extension in supported_extensions if extension not in effective_extension_map
+    )
+    if unsupported_without_parser:
+        joined = ", ".join(unsupported_without_parser)
+        raise StorageIOError(
+            category="unknown_io_error",
+            operation="validate extension policy",
+            path=config_path,
+            probable_cause=(
+                "supported_extensions includes file types without registered parser mappings."
+            ),
+            remediation=[
+                f"Add parser_extension_map entries for: {joined}.",
+                "Or remove unsupported extensions from supported_extensions and rerun.",
+            ],
+            detail=f"supported_extensions missing parser mappings: {joined}",
+        )
+
+    config.supported_extensions = supported_extensions
+    config.parser_extension_map = parser_extension_map
+    return config
+
+
+def _build_extension_policy_contract(config: GloggurConfig) -> dict[str, object]:
+    """Return a machine-readable extension-policy contract snapshot."""
+    effective_extension_map = ParserRegistry(
+        extension_map=config.parser_extension_map,
+    ).supported_extensions()
+    unmapped_supported_extensions = sorted(
+        extension
+        for extension in config.supported_extensions
+        if extension not in effective_extension_map
+    )
+    return {
+        "supported_extensions": list(config.supported_extensions),
+        "parser_extension_overrides": {
+            key: value
+            for key, value in sorted(config.parser_extension_map.items(), key=lambda item: item[0])
+        },
+        "effective_extension_map": {
+            key: value
+            for key, value in sorted(
+                effective_extension_map.items(),
+                key=lambda item: item[0],
+            )
+        },
+        "unmapped_supported_extensions": unmapped_supported_extensions,
+        "valid": len(unmapped_supported_extensions) == 0,
+    }
 
 
 def _normalize_config_path(config_path: str | None) -> str | None:
@@ -732,6 +892,179 @@ def _normalize_watch_paths(config: GloggurConfig, config_path: str | None) -> Gl
 def _hash_content(source: str) -> str:
     """Hash content to detect changes."""
     return hashlib.sha256(source.encode("utf8")).hexdigest()
+
+
+def _extension_label(path: str) -> str:
+    """Return normalized extension label used by skipped-extension diagnostics."""
+    extension = os.path.splitext(path)[1].strip().lower()
+    if extension:
+        return extension
+    return "<no_extension>"
+
+
+def _empty_skipped_extension_diagnostics(*, enabled: bool) -> dict[str, object]:
+    """Return empty skipped-extension diagnostics payload."""
+    return {
+        "enabled": enabled,
+        "warning_code": None,
+        "skipped_files": 0,
+        "by_extension": {},
+        "sample_paths": [],
+    }
+
+
+def _build_skipped_extension_diagnostics(
+    *,
+    enabled: bool,
+    counts: dict[str, int],
+    samples: list[str],
+) -> dict[str, object]:
+    """Build skipped-extension diagnostics payload with deterministic ordering."""
+    if not enabled:
+        return _empty_skipped_extension_diagnostics(enabled=False)
+    total = sum(max(0, int(count)) for count in counts.values())
+    warning_code = "unsupported_extensions_skipped" if total > 0 else None
+    return {
+        "enabled": True,
+        "warning_code": warning_code,
+        "skipped_files": total,
+        "by_extension": {key: counts[key] for key in sorted(counts)},
+        "sample_paths": samples,
+    }
+
+
+def _collect_index_skipped_extension_diagnostics(
+    *,
+    path: str,
+    config: GloggurConfig,
+    enabled: bool,
+    sample_limit: int = 10,
+) -> dict[str, object]:
+    """Collect unsupported-extension diagnostics for index command scope."""
+    if not enabled:
+        return _empty_skipped_extension_diagnostics(enabled=False)
+
+    counts: dict[str, int] = {}
+    samples: list[str] = []
+    supported_extensions = tuple(config.supported_extensions)
+    excluded_dirs = set(config.excluded_dirs)
+
+    def _record(candidate_path: str) -> None:
+        """Record one skipped path under its normalized extension bucket."""
+        extension = _extension_label(candidate_path)
+        counts[extension] = counts.get(extension, 0) + 1
+        if len(samples) < sample_limit:
+            samples.append(candidate_path)
+
+    if os.path.isdir(path):
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [name for name in dirs if name not in excluded_dirs]
+            files.sort()
+            for filename in files:
+                full_path = os.path.join(root, filename)
+                if any(full_path.endswith(ext) for ext in supported_extensions):
+                    continue
+                _record(full_path)
+    else:
+        normalized = os.path.normpath(path)
+        segments = {segment for segment in normalized.split(os.sep) if segment}
+        if any(excluded in segments for excluded in excluded_dirs):
+            return _build_skipped_extension_diagnostics(
+                enabled=True,
+                counts=counts,
+                samples=samples,
+            )
+        if not any(normalized.endswith(ext) for ext in supported_extensions):
+            _record(path)
+    return _build_skipped_extension_diagnostics(enabled=True, counts=counts, samples=samples)
+
+
+def _collect_inspect_skipped_extension_diagnostics(
+    *,
+    path: str,
+    config: GloggurConfig,
+    include_tests: bool,
+    include_scripts: bool,
+    enabled: bool,
+    sample_limit: int = 10,
+) -> dict[str, object]:
+    """Collect unsupported-extension diagnostics for inspect command scope."""
+    if not enabled:
+        return _empty_skipped_extension_diagnostics(enabled=False)
+
+    counts: dict[str, int] = {}
+    samples: list[str] = []
+    supported_extensions = tuple(config.supported_extensions)
+    excluded_dirs = set(config.excluded_dirs)
+
+    def _record(candidate_path: str) -> None:
+        """Record one skipped path under its normalized extension bucket."""
+        extension = _extension_label(candidate_path)
+        counts[extension] = counts.get(extension, 0) + 1
+        if len(samples) < sample_limit:
+            samples.append(candidate_path)
+
+    if os.path.isdir(path):
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [name for name in dirs if name not in excluded_dirs]
+            files.sort()
+            for filename in files:
+                full_path = os.path.join(root, filename)
+                if not _should_include_inspect_path(
+                    full_path,
+                    include_tests=include_tests,
+                    include_scripts=include_scripts,
+                ):
+                    continue
+                if any(full_path.endswith(ext) for ext in supported_extensions):
+                    continue
+                _record(full_path)
+    else:
+        normalized = os.path.normpath(os.path.abspath(path))
+        segments = {segment for segment in normalized.split(os.sep) if segment}
+        if any(excluded in segments for excluded in excluded_dirs):
+            return _build_skipped_extension_diagnostics(
+                enabled=True,
+                counts=counts,
+                samples=samples,
+            )
+        if not _should_include_inspect_path(
+            path,
+            include_tests=include_tests,
+            include_scripts=include_scripts,
+        ):
+            return _build_skipped_extension_diagnostics(
+                enabled=True,
+                counts=counts,
+                samples=samples,
+            )
+        if not any(path.endswith(ext) for ext in supported_extensions):
+            _record(path)
+    return _build_skipped_extension_diagnostics(enabled=True, counts=counts, samples=samples)
+
+
+def _attach_skipped_extension_diagnostics(
+    *,
+    payload: dict[str, object],
+    warn_on_skipped_extensions: bool,
+    diagnostics: dict[str, object],
+) -> None:
+    """Attach skipped-extension diagnostics and warning code into payload."""
+    payload["warn_on_skipped_extensions"] = warn_on_skipped_extensions
+    payload["skipped_extension_diagnostics"] = diagnostics
+    warning_code = diagnostics.get("warning_code")
+    if not isinstance(warning_code, str) or not warning_code:
+        return
+    warning_codes = payload.get("warning_codes")
+    normalized_warning_codes: list[str]
+    if isinstance(warning_codes, list):
+        normalized_warning_codes = [str(value) for value in warning_codes if str(value)]
+    else:
+        normalized_warning_codes = []
+    if warning_code not in normalized_warning_codes:
+        normalized_warning_codes.append(warning_code)
+    normalized_warning_codes.sort()
+    payload["warning_codes"] = normalized_warning_codes
 
 
 def _canonicalize_hf_snapshot_model(model: str) -> str:
@@ -2109,6 +2442,8 @@ def _build_status_payload(
         "semantic_search_allowed": health["semantic_search_allowed"],
         "search_integrity": health["search_integrity"],
         "build_state": health["build_state"],
+        "extension_policy": _build_extension_policy_contract(config),
+        "language_support_contract": build_language_support_contract(config=config),
         "raw_total_symbols": raw_total_symbols,
         "total_symbols": total_symbols,
         **resume_contract,
@@ -3087,6 +3422,12 @@ def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str,
     default=False,
     help="Include per-file timing breakdowns in index --json output.",
 )
+@click.option(
+    "--warn-on-skipped-extensions",
+    is_flag=True,
+    default=False,
+    help="Include diagnostics for unsupported file extensions skipped during indexing.",
+)
 @_with_io_failure_handling
 def index(
     path: str,
@@ -3095,6 +3436,7 @@ def index(
     embedding_provider: str | None,
     allow_partial: bool,
     debug_timings: bool,
+    warn_on_skipped_extensions: bool,
 ) -> None:
     """Load config/runtime, index path, and emit summary counts."""
     command_started = time.perf_counter()
@@ -3102,6 +3444,11 @@ def index(
     config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
     if embedding_provider:
         config.embedding_provider = embedding_provider
+    skipped_extension_diagnostics = _collect_index_skipped_extension_diagnostics(
+        path=path,
+        config=config,
+        enabled=warn_on_skipped_extensions,
+    )
 
     stage_recorder = IndexStageRecorder()
     bootstrap_started = time.perf_counter()
@@ -3317,6 +3664,11 @@ def index(
                     payload["stages"] = stage_recorder.as_payload()
                     if as_json and debug_timings:
                         payload["slow_files"] = _build_slow_files_payload(result.file_timings)
+                    _attach_skipped_extension_diagnostics(
+                        payload=payload,
+                        warn_on_skipped_extensions=warn_on_skipped_extensions,
+                        diagnostics=skipped_extension_diagnostics,
+                    )
                     payload.update(_build_index_failure_contract(overall_failed_reasons))
                     if as_json and overall_failed > 0 and not allow_partial:
                         _attach_primary_error_from_failure_contract(
@@ -3602,6 +3954,11 @@ def index(
                 result["stages"] = stage_recorder.as_payload()
                 if as_json and debug_timings and execution_timing is not None:
                     result["slow_files"] = [execution_timing.as_payload()]
+                _attach_skipped_extension_diagnostics(
+                    payload=result,
+                    warn_on_skipped_extensions=warn_on_skipped_extensions,
+                    diagnostics=skipped_extension_diagnostics,
+                )
                 result.update(_build_index_failure_contract(overall_failed_reasons))
                 if as_json and overall_failed > 0 and not allow_partial:
                     _attach_primary_error_from_failure_contract(
@@ -4612,6 +4969,12 @@ def _load_cached_inspect_reports(
     default=False,
     help="Exit zero even when some files fail inspection.",
 )
+@click.option(
+    "--warn-on-skipped-extensions",
+    is_flag=True,
+    default=False,
+    help="Include diagnostics for unsupported file extensions skipped during inspect.",
+)
 @_with_io_failure_handling
 def inspect(
     path: str,
@@ -4622,6 +4985,7 @@ def inspect(
     include_tests: bool,
     include_scripts: bool,
     allow_partial: bool,
+    warn_on_skipped_extensions: bool,
 ) -> None:
     """Run docstring inspection and emit warnings/reports."""
     config = _load_config(config_path)
@@ -4674,6 +5038,13 @@ def inspect(
         segments = set(os.path.normpath(os.path.abspath(path)).split(os.sep))
         if any(excluded in segments for excluded in config.excluded_dirs):
             paths = []
+    skipped_extension_diagnostics = _collect_inspect_skipped_extension_diagnostics(
+        path=path,
+        config=config,
+        include_tests=include_tests_effective,
+        include_scripts=include_scripts_effective,
+        enabled=warn_on_skipped_extensions,
+    )
     for file_path in paths:
         files_considered += 1
         try:
@@ -4798,6 +5169,11 @@ def inspect(
         "skipped_files": skipped_files,
     }
     payload.update(_build_inspect_failure_contract(failed_reasons))
+    _attach_skipped_extension_diagnostics(
+        payload=payload,
+        warn_on_skipped_extensions=warn_on_skipped_extensions,
+        diagnostics=skipped_extension_diagnostics,
+    )
     if as_json and failed_files > 0 and not allow_partial:
         _attach_primary_error_from_failure_contract(
             payload,

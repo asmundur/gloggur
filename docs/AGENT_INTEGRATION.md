@@ -135,6 +135,15 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    scripts/gloggur inspect . --json
    ```
    Inspection skips unchanged files by default; add `--force` to reinspect everything.
+   To diagnose unsupported extension skips explicitly:
+   ```bash
+   scripts/gloggur inspect . --json --warn-on-skipped-extensions
+   ```
+
+5. **Validate parser capability contract (optional, useful before language-heavy work)**:
+   ```bash
+   scripts/gloggur parsers check --json
+   ```
 
 ## Support Bundles
 

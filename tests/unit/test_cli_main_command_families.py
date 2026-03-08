@@ -453,6 +453,50 @@ def test_inspect_json_noops_for_unsupported_single_file(
     assert payload["failed"] == 0
 
 
+def test_inspect_json_warns_on_skipped_extensions_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    target = tmp_path / "notes.txt"
+    target.write_text("plain text\n", encoding="utf8")
+    config = GloggurConfig(cache_dir=str(tmp_path / "cache"), embedding_provider="test")
+
+    class FakeCache:
+        def get_audit_file_metadata(self, _path: str) -> None:
+            return None
+
+        def delete_audit_reports_for_file(self, _path: str) -> None:
+            pass
+
+        def set_audit_report(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def upsert_audit_file_metadata(self, metadata: object) -> None:
+            pass
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: FakeCache())
+    monkeypatch.setattr(cli_main, "_create_embedding_provider_for_command", lambda _cfg: None)
+    monkeypatch.setattr(cli_main, "audit_docstrings", lambda *args, **kwargs: [])
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["inspect", str(target), "--json", "--warn-on-skipped-extensions"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["warn_on_skipped_extensions"] is True
+    diagnostics = payload["skipped_extension_diagnostics"]
+    assert diagnostics["enabled"] is True
+    assert diagnostics["warning_code"] == "unsupported_extensions_skipped"
+    assert diagnostics["skipped_files"] == 1
+    assert diagnostics["by_extension"] == {".txt": 1}
+    assert str(target) in diagnostics["sample_paths"]
+    assert payload["warning_codes"] == ["unsupported_extensions_skipped"]
+
+
 def test_inspect_json_skips_excluded_single_file_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -144,6 +144,9 @@ def test_build_status_payload_surfaces_missing_search_integrity_markers(tmp_path
     assert payload["semantic_search_allowed"] is False
     assert "vector_integrity_missing" in payload["warning_codes"]
     assert "chunk_span_integrity_missing" in payload["warning_codes"]
+    assert payload["extension_policy"]["valid"] is True
+    assert payload["language_support_contract"]["schema_version"] == "1"
+    assert ".jsx" in payload["language_support_contract"]["supported_extensions"]
 
 
 def test_build_status_payload_zeroes_total_symbols_for_non_ready_cache(tmp_path: Path) -> None:
@@ -787,6 +790,34 @@ def test_adapters_list_reports_discoverable_categories(tmp_path: Path) -> None:
     assert "embedding_providers" in available
     assert "storage_backends" in available
     assert "runtime_hosts" in available
+    assert "extension_policy" in payload
+    assert payload["extension_policy"]["valid"] is True
+    support_contract = payload["language_support_contract"]
+    assert support_contract["schema_version"] == "1"
+    assert ".jsx" in support_contract["supported_extensions"]
+    assert ".tsx" in support_contract["supported_extensions"]
+    assert ".html" not in support_contract["supported_extensions"]
+
+
+def test_parsers_check_reports_required_and_known_gap_cases(tmp_path: Path) -> None:
+    """parsers check should emit machine-readable required/known-gap summary."""
+    runner = CliRunner()
+    env = {"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")}
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["parsers", "check", "--json"],
+        env=env,
+    )
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["schema_version"] == "1"
+    assert payload["required_case_counts"]["failed"] == 0
+    assert payload["known_gap_case_counts"]["total"] > 0
+    assert payload["known_gap_case_counts"]["confirmed"] >= 1
+    assert "language_support_contract" in payload
+    assert payload["language_support_contract"]["schema_version"] == "1"
 
 
 def test_resolve_artifact_destination_rejects_unsupported_scheme() -> None:
@@ -3572,6 +3603,45 @@ def test_core_commands_wrap_non_mapping_config_payload_as_structured_io_failure(
     assert remediation
     assert "top-level mapping" in str(remediation[0]).lower()
     assert "ValueError" in str(error["detail"])
+
+
+@pytest.mark.parametrize(
+    ("config_text", "detail_fragment"),
+    [
+        (
+            "supported_extensions:\n"
+            "  - .py\n"
+            "  - .mjs\n",
+            "missing parser mappings",
+        ),
+        (
+            "supported_extensions:\n"
+            "  - .py\n"
+            "parser_extension_map:\n"
+            "  .mjs: javascript\n",
+            "missing from supported_extensions",
+        ),
+    ],
+)
+def test_status_wraps_invalid_extension_policy_as_structured_io_failure(
+    tmp_path: Path,
+    config_text: str,
+    detail_fragment: str,
+) -> None:
+    """status should fail closed when extension policy config is inconsistent."""
+    runner = CliRunner()
+    bad_config = tmp_path / "bad.gloggur.yaml"
+    bad_config.write_text(config_text, encoding="utf8")
+
+    result = runner.invoke(cli_main.cli, ["status", "--json", "--config", str(bad_config)])
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "io_failure"
+    assert error["operation"] == "validate extension policy"
+    assert detail_fragment in str(error["detail"])
     assert "Traceback (most recent call last)" not in result.output
 
 

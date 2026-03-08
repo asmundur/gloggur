@@ -344,6 +344,79 @@ def test_index_single_file_noops_for_excluded_or_unsupported_paths(
     assert symbol_calls[0]["file_paths"] is None
 
 
+def test_index_single_file_warns_on_skipped_extensions_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "notes.txt"
+    target.write_text("plain text\n", encoding="utf8")
+    config = GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+    )
+    active_cache = _FakeActiveCache(tmp_path / "staged")
+    stage_cache = _FakeStageCache()
+    symbol_calls: list[dict[str, object]] = []
+
+    class FakeIndexer:
+        def __init__(self, **_kwargs: object) -> None:
+            self._stage_callback = None
+            self._scan_callback = None
+            self._progress_callback = None
+
+        def index_file_with_details(self, _path: str) -> SimpleNamespace:
+            raise AssertionError("single-file indexing should not run for skipped files")
+
+        def prune_missing_file_entries(self) -> dict[str, object]:
+            raise AssertionError("cleanup should not run for skipped files")
+
+        def validate_vector_metadata_consistency(self) -> dict[str, object]:
+            raise AssertionError("consistency should not run for skipped files")
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
+    monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
+    monkeypatch.setattr(
+        cli_main,
+        "_initialize_runtime",
+        lambda stage_config, **_kwargs: (stage_config, stage_cache, object()),
+    )
+    monkeypatch.setattr(cli_main, "ParserRegistry", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_main, "Indexer", FakeIndexer)
+    monkeypatch.setattr(
+        cli_main,
+        "_run_symbol_index",
+        lambda **kwargs: symbol_calls.append(kwargs) or {"failed": 0, "duration_ms": 0},
+    )
+    monkeypatch.setattr(cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["index", str(target), "--json", "--warn-on-skipped-extensions"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["warn_on_skipped_extensions"] is True
+    diagnostics = payload["skipped_extension_diagnostics"]
+    assert diagnostics["enabled"] is True
+    assert diagnostics["warning_code"] == "unsupported_extensions_skipped"
+    assert diagnostics["skipped_files"] == 1
+    assert diagnostics["by_extension"] == {".txt": 1}
+    assert str(target) in diagnostics["sample_paths"]
+    assert payload["warning_codes"] == ["unsupported_extensions_skipped"]
+    assert symbol_calls[0]["file_paths"] is None
+
+
 def test_index_single_file_debug_timings_adds_slow_file_and_missing_integrity_marker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

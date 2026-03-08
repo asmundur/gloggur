@@ -8,7 +8,7 @@ The current design emphasises **lexical candidate generation** backed by **seman
 
 ### Chunk‑first indexing
 
-Gloggur extracts symbols using Tree‑sitter parsers for Python, JavaScript/TypeScript, Go, Rust, Java and more.  Each symbol’s definition and docstring are split into one or more **chunks**, and each chunk is assigned a stable, hashed ID.  The indexer persists symbols, chunks and edges into a local SQLite/FAISS cache.  Incremental indexing updates only modified files, keeping search fast without reprocessing the entire project.
+Gloggur extracts symbols using Tree‑sitter parsers for Python (`.py`), JavaScript (`.js`, `.jsx`), TypeScript (`.ts`, `.tsx`), Rust (`.rs`), Go (`.go`), and Java (`.java`). Each symbol’s definition and docstring are split into one or more **chunks**, and each chunk is assigned a stable, hashed ID. The indexer persists symbols, chunks and edges into a local SQLite/FAISS cache. Incremental indexing updates only modified files, keeping search fast without reprocessing the entire project.
 
 ### Search & discovery
 
@@ -98,7 +98,9 @@ include_minified_js: false       # set true to include `*.min.js` files
 supported_extensions:
   - .py
   - .js
+  - .jsx
   - .ts
+  - .tsx
   - .rs
   - .go
   - .java
@@ -134,6 +136,28 @@ gloggur extract sample.py 0 42 --json
 `extract` requires repo-relative paths under the active workspace root and reads exact raw bytes before decoding with UTF-8 replacement.
 
 Graph commands return `edge_id`, `edge_type`, `from_id`, `to_id`, `file_path`, `line` and `confidence`.  Inspect commands return audit findings per symbol with categories such as missing docstring, parameter mismatch and summary quality.
+
+## Language Support Contract
+
+Gloggur exposes a machine-readable support contract for extensions/languages and parser tiers:
+
+```bash
+gloggur status --json
+gloggur adapters list --json
+```
+
+Parser capability checks against a built-in corpus:
+
+```bash
+gloggur parsers check --json
+```
+
+To surface unsupported-extension skip diagnostics during indexing/inspect runs:
+
+```bash
+gloggur index . --json --warn-on-skipped-extensions
+gloggur inspect . --json --warn-on-skipped-extensions
+```
 
 ## Current status
 
