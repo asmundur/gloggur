@@ -17,6 +17,7 @@ from gloggur.indexer.concurrency import cache_write_lock
 from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
 from gloggur.models import IndexMetadata
 from gloggur.parsers.registry import ParserRegistry
+from gloggur.path_filters import is_indexable_source_path
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
 from gloggur.symbol_index.indexer import SymbolIndexer
 
@@ -407,15 +408,14 @@ class WatchService:
             path = os.path.abspath(raw_path)
             if not self._in_scope(path, watch_root=watch_root, watch_file=watch_file):
                 continue
-            if self._is_excluded(path):
+            if not self._is_supported_file(path):
                 continue
             is_deleted = self._is_deleted_change(change)
             if is_deleted:
                 operations[path] = "deleted"
                 continue
-            if self._is_supported_file(path):
-                if operations.get(path) != "deleted":
-                    operations[path] = "changed"
+            if operations.get(path) != "deleted":
+                operations[path] = "changed"
 
         result = BatchResult(files_considered=len(operations))
         metadata_invalidated = False
@@ -621,15 +621,14 @@ class WatchService:
             return False
 
     def _is_supported_file(self, path: str) -> bool:
-        """Return True for configured source file extensions."""
+        """Return True when a path is in scope for watch indexing."""
 
-        return any(path.endswith(ext) for ext in self._supported_extensions)
-
-    def _is_excluded(self, path: str) -> bool:
-        """Return True if a path includes an excluded directory segment."""
-
-        segments = set(os.path.normpath(path).split(os.sep))
-        return any(excluded in segments for excluded in self.config.excluded_dirs)
+        return is_indexable_source_path(
+            path,
+            supported_extensions=self._supported_extensions,
+            excluded_dirs=self.config.excluded_dirs,
+            include_minified_js=self.config.include_minified_js,
+        )
 
     @staticmethod
     def _is_deleted_change(change: object) -> bool:

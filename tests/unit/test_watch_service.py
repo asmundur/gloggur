@@ -25,12 +25,14 @@ def _build_watch_service(
     repo: Path,
     cache_dir: str,
     watch_state_file: str | None = None,
+    include_minified_js: bool = False,
 ) -> tuple[WatchService, CacheManager]:
     config = GloggurConfig(
         cache_dir=cache_dir,
         watch_path=str(repo),
         watch_state_file=watch_state_file or str(Path(cache_dir) / "watch_state.json"),
         local_embedding_model="local",
+        include_minified_js=include_minified_js,
     )
     cache = CacheManager(CacheConfig(cache_dir))
     vector_store = VectorStore(VectorStoreConfig(cache_dir))
@@ -85,6 +87,47 @@ def test_watch_service_process_batch_changed_unchanged_and_deleted(
         assert deleted.deleted_files == 1
         assert cache.get_file_metadata(str(sample)) is None
         assert cache.count_files() == 0
+
+
+def test_watch_service_skips_minified_js_by_default_and_can_include(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watch filtering should skip `.min.js` by default and index when opted in."""
+    monkeypatch.setattr(VectorStore, "_check_faiss", staticmethod(lambda: False))
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {"vendor/jquery.min.js": "function minifiedVendor(){return 1};"}
+        )
+        minified = repo / "vendor" / "jquery.min.js"
+
+        skip_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(skip_cache_dir)
+        skip_service, _skip_cache = _build_watch_service(repo, skip_cache_dir)
+        skipped = skip_service.process_batch(
+            changes={(2, str(minified))},
+            watch_root=str(repo),
+        )
+
+        assert skipped.files_considered == 0
+        assert skipped.indexed_files == 0
+        assert skipped.skipped_files == 0
+        assert skipped.error_count == 0
+
+        include_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(include_cache_dir)
+        include_service, _include_cache = _build_watch_service(
+            repo,
+            include_cache_dir,
+            include_minified_js=True,
+        )
+        included = include_service.process_batch(
+            changes={(2, str(minified))},
+            watch_root=str(repo),
+        )
+
+        assert included.files_considered == 1
+        assert included.indexed_files == 1
+        assert included.error_count == 0
 
 
 def test_watch_service_unchanged_file_does_not_reindex(

@@ -12,6 +12,7 @@ from gloggur.config import GloggurConfig
 from gloggur.indexer.shared import ParsedFileSnapshot
 from gloggur.models import Symbol
 from gloggur.parsers.registry import ParserRegistry
+from gloggur.path_filters import is_indexable_source_path
 from gloggur.symbol_index.models import IndexedFile, SymbolIndexResult, SymbolOccurrence
 from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 
@@ -118,11 +119,7 @@ class SymbolIndexer:
             else (
                 list(self._iter_source_files(target))
                 if target.is_dir()
-                else (
-                    [str(target)]
-                    if self._is_supported_file(str(target)) and not self._is_excluded(str(target))
-                    else []
-                )
+                else ([str(target)] if self._is_supported_file(str(target)) else [])
             )
         )
         seen_paths: set[str] = set()
@@ -283,17 +280,18 @@ class SymbolIndexer:
             dirs[:] = [name for name in dirs if name not in excludes]
             for filename in filenames:
                 full_path = os.path.join(current_root, filename)
-                if self._is_supported_file(full_path) and not self._is_excluded(full_path):
+                if self._is_supported_file(full_path):
                     files.append(full_path)
         files.sort()
         return files
 
     def _is_supported_file(self, path: str) -> bool:
-        return any(path.endswith(ext) for ext in self.config.supported_extensions)
-
-    def _is_excluded(self, path: str) -> bool:
-        normalized = set(os.path.normpath(path).split(os.sep))
-        return any(excluded in normalized for excluded in self.config.excluded_dirs)
+        return is_indexable_source_path(
+            path,
+            supported_extensions=self.config.supported_extensions,
+            excluded_dirs=self.config.excluded_dirs,
+            include_minified_js=self.config.include_minified_js,
+        )
 
     @staticmethod
     def _hash_content(source: str) -> str:

@@ -11,8 +11,11 @@ from gloggur.symbol_index.indexer import SymbolIndexer
 from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 
 
-def _config(tmp_path) -> GloggurConfig:
-    return GloggurConfig(cache_dir=str(tmp_path / "cache"))
+def _config(tmp_path, *, include_minified_js: bool = False) -> GloggurConfig:
+    return GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        include_minified_js=include_minified_js,
+    )
 
 
 def test_symbol_index_creates_expected_db_path(tmp_path) -> None:
@@ -49,6 +52,34 @@ def test_symbol_index_skips_unchanged_files_incrementally(tmp_path) -> None:
     assert first.files_changed == 1
     assert second.files_changed == 0
     assert second.files_unchanged == 1
+
+
+def test_symbol_index_skips_minified_js_by_default_and_can_include(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.js").write_text("function appMain() { return 1; }\n", encoding="utf8")
+    vendor_dir = repo / "vendor"
+    vendor_dir.mkdir()
+    (vendor_dir / "jquery.min.js").write_text(
+        "function minifiedVendor(){return 1};",
+        encoding="utf8",
+    )
+
+    default_indexer = SymbolIndexer(
+        repo_root=repo,
+        config=_config(tmp_path),
+        parser_registry=ParserRegistry(),
+    )
+    default_result = default_indexer.index_path(str(repo))
+    assert default_result.files_considered == 1
+
+    include_indexer = SymbolIndexer(
+        repo_root=repo,
+        config=_config(tmp_path, include_minified_js=True),
+        parser_registry=ParserRegistry(),
+    )
+    include_result = include_indexer.index_path(str(repo))
+    assert include_result.files_considered == 2
 
 
 def test_symbol_index_replaces_changed_file_occurrences(tmp_path) -> None:

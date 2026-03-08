@@ -277,6 +277,7 @@ def test_index_directory_ignores_non_mapping_failure_reasons_and_non_list_sample
     [
         lambda root: root / "excluded" / "sample.py",
         lambda root: root / "notes.txt",
+        lambda root: root / "vendor.min.js",
     ],
 )
 def test_index_single_file_noops_for_excluded_or_unsupported_paths(

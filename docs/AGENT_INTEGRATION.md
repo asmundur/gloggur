@@ -238,6 +238,7 @@ python scripts/run_reference_agent_eval.py --mode eval --format json --min-pass-
 
 You can tailor indexing and embedding behavior via `.gloggur.yaml` or `.gloggur.json` at the repo root. See the README for supported keys and environment variables.
 Gloggur also auto-loads a repo-local `.env` file; exported process environment variables take precedence over `.env`.
+By default, `*.min.js` files are skipped during index/watch; set `include_minified_js: true` (or `GLOGGUR_INCLUDE_MINIFIED_JS=true`) when you need vendored/minified JavaScript indexed.
 
 ## Cache handling
 

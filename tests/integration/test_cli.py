@@ -118,6 +118,40 @@ def test_cli_index_json_includes_stages_by_default() -> None:
         assert all(stage["status"] == "completed" for stage in stages)
 
 
+def test_cli_index_skips_django_vendor_minified_js_by_default() -> None:
+    """Default index flow should treat Django-style vendored minified JS as out-of-scope."""
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "django/contrib/admin/static/admin/js/vendor/jquery/jquery.min.js": (
+                    "function jqueryLike(){return 1};"
+                ),
+                "django/contrib/admin/static/admin/js/vendor/select2/select2.full.min.js": (
+                    "function select2Like(){return 2};"
+                ),
+                "django/contrib/admin/static/admin/js/vendor/jquery/jquery.js": (
+                    "function jquerySource(){ return 3; }\n"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert int(payload["files_considered"]) == 1
+        assert int(payload["failed"]) == 0
+        failed_reasons = payload.get("failed_reasons", {})
+        assert isinstance(failed_reasons, dict)
+        assert "chunk_span_integrity_error" not in failed_reasons
+
+
 def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
     """search --json should emit ContextPack v2 and exclude removed v1 payload keys."""
     runner = CliRunner()

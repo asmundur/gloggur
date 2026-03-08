@@ -18,6 +18,7 @@ from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.models import EdgeRecord, FileMetadata, IndexMetadata, Symbol, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
+from gloggur.path_filters import is_indexable_source_path
 from gloggur.storage.vector_store import VectorStore
 
 FAILURE_REMEDIATION: dict[str, list[str]] = {
@@ -927,12 +928,14 @@ class Indexer:
                     yield full_path
 
     def _is_supported_file(self, path: str) -> bool:
-        """Return whether a file path has a supported extension."""
+        """Return whether a file path is in scope for indexing."""
 
-        for ext in self.config.supported_extensions:
-            if path.endswith(ext):
-                return True
-        return False
+        return is_indexable_source_path(
+            path,
+            supported_extensions=self.config.supported_extensions,
+            excluded_dirs=self.config.excluded_dirs,
+            include_minified_js=self.config.include_minified_js,
+        )
 
     def _prune_stale_files(self, seen_paths: set[str]) -> dict[str, object]:
         """Remove cached file/symbol rows for files no longer present in the index walk."""

@@ -10,7 +10,10 @@ def test_load_from_yaml_and_env_overrides(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "embedding_provider: openai\ncache_dir: file-cache\nopenai_embedding_model: model-a\n",
+        "embedding_provider: openai\n"
+        "cache_dir: file-cache\n"
+        "openai_embedding_model: model-a\n"
+        "include_minified_js: true\n",
         encoding="utf8",
     )
     monkeypatch.setenv("GLOGGUR_CACHE_DIR", "env-cache")
@@ -20,6 +23,7 @@ def test_load_from_yaml_and_env_overrides(tmp_path, monkeypatch) -> None:
     assert config.embedding_provider == "openai"
     assert config.openai_embedding_model == "model-a"
     assert config.cache_dir == "env-cache"
+    assert config.include_minified_js is True
 
 
 def test_load_auto_detect_json_and_overrides(tmp_path, monkeypatch) -> None:
@@ -47,6 +51,7 @@ def test_load_env_values(monkeypatch) -> None:
     monkeypatch.setenv("GLOGGUR_GEMINI_MODEL", "gemini-model")
     monkeypatch.setenv("GLOGGUR_GEMINI_API_KEY", "gemini-key")
     monkeypatch.setenv("GLOGGUR_CACHE_DIR", "cache-dir")
+    monkeypatch.setenv("GLOGGUR_INCLUDE_MINIFIED_JS", "true")
 
     config = GloggurConfig.load(path=None)
 
@@ -62,6 +67,7 @@ def test_load_env_values(monkeypatch) -> None:
     assert config.gemini_embedding_model == "gemini-model"
     assert config.gemini_api_key == "gemini-key"
     assert config.cache_dir == "cache-dir"
+    assert config.include_minified_js is True
 
 
 def test_load_env_watch_values(monkeypatch) -> None:

@@ -88,12 +88,13 @@ gloggur inspect . --json
 
 ## Configuration
 
-Place a `.gloggur.yaml` or `.gloggur.json` file in your project root to customise embedding providers, cache location, watch settings and supported file extensions.  Environment variables can override any option.  Here is a minimal example:
+Place a `.gloggur.yaml` or `.gloggur.json` file in your project root to customise embedding providers, cache location, watch settings and supported file extensions. By default, minified JavaScript (`*.min.js`) is excluded from index/watch runs to avoid noisy vendor artifacts; set `include_minified_js: true` when you explicitly need those files indexed. Environment variables can override any option.  Here is a minimal example:
 
 ```yaml
 embedding_provider: openai       # or 'gemini' or 'local'
 cache_dir: .gloggur-cache
 watch_enabled: false
+include_minified_js: false       # set true to include `*.min.js` files
 supported_extensions:
   - .py
   - .js

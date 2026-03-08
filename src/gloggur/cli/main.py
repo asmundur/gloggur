@@ -75,6 +75,7 @@ from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io
 from gloggur.models import AuditFileMetadata, IndexMetadata
 from gloggur.parsers.coverage import CoverageIngester
 from gloggur.parsers.registry import ParserRegistry
+from gloggur.path_filters import is_indexable_source_path
 from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
 from gloggur.search import hybrid_search as hybrid_search_module
 from gloggur.search.hybrid_search import HybridSearch
@@ -3333,13 +3334,16 @@ def index(
                         raise click.exceptions.Exit(1)
                     return
 
-                files_considered = 1
-                if any(path.endswith(ext) for ext in config.supported_extensions):
-                    segments = set(os.path.normpath(os.path.abspath(path)).split(os.sep))
-                    if any(excluded in segments for excluded in config.excluded_dirs):
-                        files_considered = 0
-                else:
-                    files_considered = 0
+                files_considered = (
+                    1
+                    if is_indexable_source_path(
+                        path,
+                        supported_extensions=config.supported_extensions,
+                        excluded_dirs=config.excluded_dirs,
+                        include_minified_js=config.include_minified_js,
+                    )
+                    else 0
+                )
 
                 stage_recorder.record(
                     "scan_source",

@@ -53,6 +53,7 @@ class GloggurConfig:
         default_factory=lambda: [".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java"]
     )
     parser_extension_map: dict[str, str] = field(default_factory=dict)
+    include_minified_js: bool = False
     excluded_dirs: list[str] = field(
         default_factory=lambda: [
             ".git",
@@ -239,6 +240,9 @@ class GloggurConfig:
             data["watch_pid_file"] = _env_value("GLOGGUR_WATCH_PID_FILE")
         if _env_value("GLOGGUR_WATCH_LOG_FILE"):
             data["watch_log_file"] = _env_value("GLOGGUR_WATCH_LOG_FILE")
+        include_minified_js = _env_bool("GLOGGUR_INCLUDE_MINIFIED_JS")
+        if include_minified_js is not None:
+            data["include_minified_js"] = include_minified_js
         if _env_value("GLOGGUR_DOCSTRING_SEMANTIC_MIN_CHARS"):
             try:
                 data["docstring_semantic_min_chars"] = int(

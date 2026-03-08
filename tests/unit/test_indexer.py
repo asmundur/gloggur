@@ -55,6 +55,71 @@ def test_indexer_indexes_repo_and_sets_metadata() -> None:
         assert search_integrity["chunk_span"]["status"] == "passed"
 
 
+def test_indexer_skips_minified_js_by_default_and_can_include_with_config() -> None:
+    """Repository scan should exclude `.min.js` unless explicitly opted in."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "app.js": "function appMain() { return 1; }\n",
+                "vendor/jquery.min.js": "function minifiedVendor(){return 1};",
+            }
+        )
+
+        default_cache = tempfile.mkdtemp(prefix="gloggur-cache-")
+        default_indexer = Indexer(
+            config=GloggurConfig(cache_dir=default_cache),
+            cache=CacheManager(CacheConfig(default_cache)),
+            parser_registry=ParserRegistry(),
+        )
+        default_result = default_indexer.index_repository(str(repo))
+
+        assert default_result.failed == 0
+        assert default_result.files_considered == 1
+        assert all(
+            not path.endswith("jquery.min.js")
+            for path in default_result.source_files
+        )
+
+        include_cache = tempfile.mkdtemp(prefix="gloggur-cache-")
+        include_indexer = Indexer(
+            config=GloggurConfig(cache_dir=include_cache, include_minified_js=True),
+            cache=CacheManager(CacheConfig(include_cache)),
+            parser_registry=ParserRegistry(),
+        )
+        include_result = include_indexer.index_repository(str(repo))
+
+        assert include_result.failed == 0
+        assert include_result.files_considered == 2
+        assert any(path.endswith("jquery.min.js") for path in include_result.source_files)
+
+
+def test_indexer_skips_django_vendor_minified_paths_by_default() -> None:
+    """Django-style vendored minified paths should be treated as out-of-scope by default."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "django/contrib/admin/static/admin/js/vendor/jquery/jquery.min.js": (
+                    "function jqueryLike(){return 1};"
+                ),
+                "django/contrib/admin/static/admin/js/vendor/select2/select2.full.min.js": (
+                    "function select2Like(){return 2};"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=CacheManager(CacheConfig(cache_dir)),
+            parser_registry=ParserRegistry(),
+        )
+
+        result = indexer.index_repository(str(repo))
+
+        assert result.failed == 0
+        assert result.files_considered == 0
+        assert "chunk_span_integrity_error" not in result.failed_reasons
+
+
 def test_indexer_fails_closed_on_chunk_span_integrity_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
