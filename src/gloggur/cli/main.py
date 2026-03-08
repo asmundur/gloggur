@@ -80,7 +80,7 @@ from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
 from gloggur.search import hybrid_search as hybrid_search_module
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router import (
-    SearchConstraints,
+    SearchIntent,
     SearchRouter,
     load_search_router_config,
 )
@@ -4244,7 +4244,7 @@ def search(
         repo_root=router_repo_root,
         raw_path=resolved_path_prefix,
     )
-    constraints = SearchConstraints(
+    intent = SearchIntent(
         search_mode=normalized_search_mode,
         language=language,
         path_prefix=routing_path_prefix,
@@ -4254,7 +4254,7 @@ def search(
     )
     pack = router.search(
         query=query,
-        constraints=constraints,
+        intent=intent,
         mode=mode,
         include_debug=debug_router,
     )

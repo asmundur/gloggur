@@ -183,6 +183,7 @@ Pytest defaults for this repo:
 - For identifier-heavy lookups where tests are noisy, use `--ranking-mode source-first`.
 - Grep/ripgrep style queries are accepted as input compatibility (`rg Foo`, `rg -g "*.py" Foo`, `grep -R foo_bar src/`).
 - Quoted short grep patterns are preserved in router debug (`parsed_query.pattern_quoted=true` for queries like `rg "id"`).
+- Router contract boundary: callers provide intent-only routing fields; grep/ripgrep flags are parsed into internal execution hints and surfaced in `debug.constraints`.
 - Use `--file` for exact file or directory-prefix scoping (`exact_or_prefix` with
   normalized `src/` vs `./src/` behavior); check
   `metadata.file_filter_warning_codes` for `file_filter_no_match`.

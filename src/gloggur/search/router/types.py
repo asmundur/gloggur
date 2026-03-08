@@ -4,8 +4,21 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class SearchIntent:
+    """Public caller-facing search intent for ContextPack routing."""
+
+    search_mode: str = "semantic"
+    language: str | None = None
+    path_prefix: str | None = None
+    path_filters: tuple[str, ...] = ()
+    max_files: int | None = None
+    max_snippets: int | None = None
+    time_budget_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class SearchConstraints:
-    """Agent-facing search constraints for ContextPack routing."""
+    """Compatibility adapter for older callers during SearchIntent migration."""
 
     search_mode: str = "semantic"
     language: str | None = None
@@ -19,6 +32,17 @@ class SearchConstraints:
     max_files: int | None = None
     max_snippets: int | None = None
     time_budget_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionHints:
+    """Internal backend execution hints derived from parsed compatibility inputs."""
+
+    include_globs: tuple[str, ...] = ()
+    exclude_globs: tuple[str, ...] = ()
+    case_mode: str | None = None
+    word_match: bool = False
+    fixed_string: bool = False
 
 
 @dataclass(frozen=True)

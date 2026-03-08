@@ -24,9 +24,11 @@ from gloggur.search.router.types import (
     ContextHit,
     ContextPack,
     ContextSpan,
+    ExecutionHints,
     QueryHints,
     RouterOutcome,
     SearchConstraints,
+    SearchIntent,
 )
 from gloggur.storage.metadata_store import MetadataStore
 from gloggur.symbol_index.store import SymbolIndexStore
@@ -37,6 +39,7 @@ _BACKEND_TIE_PRIORITY = {
     "symbol": 1,
     "semantic": 2,
 }
+_RANK_FUSION_K = 60
 
 
 def _normalize_string_tuple(values: object) -> tuple[str, ...]:
@@ -53,12 +56,21 @@ def _normalize_string_tuple(values: object) -> tuple[str, ...]:
     return tuple(ordered)
 
 
-def _normalize_constraints(
-    constraints: SearchConstraints | None,
+def _normalize_search_mode(value: object) -> str:
+    search_mode = (
+        str(value).strip().lower() if isinstance(value, str) and str(value).strip() else "semantic"
+    )
+    if search_mode not in {"semantic", "by_fqname", "by_fqname_regex", "by_path"}:
+        return "semantic"
+    return search_mode
+
+
+def _normalize_search_intent(
+    intent: SearchIntent | None,
     config: SearchRouterConfig,
-) -> SearchConstraints:
-    """Resolve runtime constraints with config defaults."""
-    base = constraints or SearchConstraints()
+) -> SearchIntent:
+    """Resolve runtime intent values with config defaults."""
+    base = intent or SearchIntent()
     max_files = (
         base.max_files
         if isinstance(base.max_files, int) and base.max_files > 0
@@ -82,69 +94,93 @@ def _normalize_constraints(
         if isinstance(base.path_prefix, str) and base.path_prefix.strip()
         else None
     )
-    search_mode = (
-        base.search_mode.strip().lower()
-        if isinstance(base.search_mode, str) and base.search_mode.strip()
-        else "semantic"
-    )
-    if search_mode not in {"semantic", "by_fqname", "by_fqname_regex", "by_path"}:
-        search_mode = "semantic"
     path_filters = _normalize_string_tuple(base.path_filters)
-    include_globs = _normalize_string_tuple(base.include_globs)
-    exclude_globs = _normalize_string_tuple(base.exclude_globs)
-    case_mode: str | None = None
-    if isinstance(base.case_mode, str):
-        normalized_case = base.case_mode.strip().lower()
-        if normalized_case in {"ignore", "smart"}:
-            case_mode = normalized_case
-    return SearchConstraints(
-        search_mode=search_mode,
+    return SearchIntent(
+        search_mode=_normalize_search_mode(base.search_mode),
         language=language,
         path_prefix=path_prefix,
         path_filters=path_filters,
-        include_globs=include_globs,
-        exclude_globs=exclude_globs,
-        case_mode=case_mode,
-        word_match=bool(base.word_match),
-        fixed_string=bool(base.fixed_string),
         max_files=max_files,
         max_snippets=max_snippets,
         time_budget_ms=time_budget_ms,
     )
 
 
-def _merge_constraints_with_query_compat(
-    constraints: SearchConstraints,
+def _normalize_execution_hints(hints: ExecutionHints | None) -> ExecutionHints:
+    include_globs = _normalize_string_tuple(hints.include_globs if hints is not None else ())
+    exclude_globs = _normalize_string_tuple(hints.exclude_globs if hints is not None else ())
+    case_mode: str | None = None
+    if hints is not None and isinstance(hints.case_mode, str):
+        normalized_case = hints.case_mode.strip().lower()
+        if normalized_case in {"ignore", "smart"}:
+            case_mode = normalized_case
+    return ExecutionHints(
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        case_mode=case_mode,
+        word_match=bool(hints.word_match) if hints is not None else False,
+        fixed_string=bool(hints.fixed_string) if hints is not None else False,
+    )
+
+
+def _intent_and_hints_from_constraints(
+    constraints: SearchConstraints | None,
     *,
-    parsed: ParsedQueryCompat,
-) -> SearchConstraints:
-    if parsed.source != "grep_compat" or parsed.fallback_used:
-        return constraints
-    merged_path_filters = list(constraints.path_filters)
-    for candidate in parsed.path_filters:
-        if candidate not in merged_path_filters:
-            merged_path_filters.append(candidate)
-    include_globs = list(constraints.include_globs)
-    for candidate in parsed.include_globs:
-        if candidate not in include_globs:
-            include_globs.append(candidate)
-    exclude_globs = list(constraints.exclude_globs)
-    for candidate in parsed.exclude_globs:
-        if candidate not in exclude_globs:
-            exclude_globs.append(candidate)
-    return SearchConstraints(
+    config: SearchRouterConfig,
+) -> tuple[SearchIntent, ExecutionHints]:
+    """Convert compatibility constraints into SearchIntent + internal execution hints."""
+    if constraints is None:
+        return _normalize_search_intent(None, config), _normalize_execution_hints(None)
+    intent = SearchIntent(
         search_mode=constraints.search_mode,
         language=constraints.language,
         path_prefix=constraints.path_prefix,
-        path_filters=tuple(merged_path_filters),
-        include_globs=tuple(include_globs),
-        exclude_globs=tuple(exclude_globs),
-        case_mode=parsed.case_mode if parsed.case_mode is not None else constraints.case_mode,
-        word_match=constraints.word_match or parsed.word_match,
-        fixed_string=constraints.fixed_string or parsed.fixed_string,
+        path_filters=constraints.path_filters,
         max_files=constraints.max_files,
         max_snippets=constraints.max_snippets,
         time_budget_ms=constraints.time_budget_ms,
+    )
+    hints = ExecutionHints(
+        include_globs=constraints.include_globs,
+        exclude_globs=constraints.exclude_globs,
+        case_mode=constraints.case_mode,
+        word_match=constraints.word_match,
+        fixed_string=constraints.fixed_string,
+    )
+    return _normalize_search_intent(intent, config), _normalize_execution_hints(hints)
+
+
+def _merge_execution_hints_with_query_compat(
+    execution_hints: ExecutionHints,
+    *,
+    parsed: ParsedQueryCompat,
+) -> tuple[ExecutionHints, tuple[str, ...]]:
+    merged_path_filters: list[str] = []
+    if parsed.source != "grep_compat" or parsed.fallback_used:
+        return execution_hints, ()
+    merged_path_filters = []
+    for candidate in parsed.path_filters:
+        if candidate not in merged_path_filters:
+            merged_path_filters.append(candidate)
+    include_globs = list(execution_hints.include_globs)
+    for candidate in parsed.include_globs:
+        if candidate not in include_globs:
+            include_globs.append(candidate)
+    exclude_globs = list(execution_hints.exclude_globs)
+    for candidate in parsed.exclude_globs:
+        if candidate not in exclude_globs:
+            exclude_globs.append(candidate)
+    return (
+        ExecutionHints(
+            include_globs=tuple(include_globs),
+            exclude_globs=tuple(exclude_globs),
+            case_mode=(
+                parsed.case_mode if parsed.case_mode is not None else execution_hints.case_mode
+            ),
+            word_match=execution_hints.word_match or parsed.word_match,
+            fixed_string=execution_hints.fixed_string or parsed.fixed_string,
+        ),
+        tuple(merged_path_filters),
     )
 
 
@@ -178,13 +214,11 @@ def _path_quality(path: str) -> float:
     return 0.7
 
 
-def _quality_exact(
-    result: BackendResult, hints: QueryHints, constraints: SearchConstraints
-) -> float:
+def _quality_exact(result: BackendResult, hints: QueryHints, intent: SearchIntent) -> float:
     if not result.hits:
         return 0.0
     match_strength = max(hit.raw_score for hit in result.hits)
-    hit_density = min(len(result.hits) / max(1, constraints.max_snippets or 1), 1.0)
+    hit_density = min(len(result.hits) / max(1, intent.max_snippets or 1), 1.0)
     path_quality = sum(_path_quality(hit.path) for hit in result.hits) / len(result.hits)
     hint_overlap = sum(
         _token_overlap_score(text=f"{hit.path}\n{hit.snippet}", hints=hints) for hit in result.hits
@@ -198,13 +232,11 @@ def _quality_exact(
     )
 
 
-def _quality_symbol(
-    result: BackendResult, hints: QueryHints, constraints: SearchConstraints
-) -> float:
+def _quality_symbol(result: BackendResult, hints: QueryHints, intent: SearchIntent) -> float:
     if not result.hits:
         return 0.0
     name_match = max(hit.raw_score for hit in result.hits)
-    ref_density = min(len(result.hits) / max(1, constraints.max_snippets or 1), 1.0)
+    ref_density = min(len(result.hits) / max(1, intent.max_snippets or 1), 1.0)
     path_quality = sum(_path_quality(hit.path) for hit in result.hits) / len(result.hits)
     hint_overlap = sum(
         _token_overlap_score(text=f"{hit.path}\n{hit.snippet}", hints=hints) for hit in result.hits
@@ -243,14 +275,14 @@ def _compute_quality(
     result: BackendResult,
     *,
     hints: QueryHints,
-    constraints: SearchConstraints,
+    intent: SearchIntent,
 ) -> float:
     if result.error:
         return 0.0
     if result.name == "exact":
-        return _quality_exact(result, hints, constraints)
+        return _quality_exact(result, hints, intent)
     if result.name == "symbol":
-        return _quality_symbol(result, hints, constraints)
+        return _quality_symbol(result, hints, intent)
     return _quality_semantic(result, hints)
 
 
@@ -334,35 +366,215 @@ def _route_auto(results: list[BackendResult], config: SearchRouterConfig) -> Rou
     )
 
 
-def _merge_backend_hits(
-    results_by_name: dict[str, BackendResult], max_snippets: int
-) -> list[BackendHit]:
-    """Merge best exact+semantic hits with deterministic fallback."""
-    exact_hits = list(results_by_name.get("exact", BackendResult("exact", (), 0)).hits)
-    semantic_hits = list(results_by_name.get("semantic", BackendResult("semantic", (), 0)).hits)
+def _lexical_support_for_backend(result: BackendResult, *, hints: QueryHints) -> float:
+    if not result.hits:
+        return 0.0
+    overlap = sum(
+        _token_overlap_score(text=f"{hit.path}\n{hit.snippet}", hints=hints) for hit in result.hits
+    ) / len(result.hits)
+    if result.name == "exact":
+        tagged = sum(
+            1 for hit in result.hits if "literal_match" in hit.tags or "symbol_match" in hit.tags
+        )
+        tag_signal = tagged / len(result.hits)
+        return max(0.0, min(1.0, 0.50 + 0.30 * overlap + 0.20 * tag_signal))
+    if result.name == "symbol":
+        tagged = sum(
+            1 for hit in result.hits if "symbol_def" in hit.tags or "symbol_ref" in hit.tags
+        )
+        tag_signal = tagged / len(result.hits)
+        return max(0.0, min(1.0, 0.42 + 0.35 * overlap + 0.23 * tag_signal))
+    tagged = sum(1 for hit in result.hits if "semantic_high_conf" in hit.tags)
+    tag_signal = tagged / len(result.hits)
+    return max(0.0, min(1.0, 0.25 + 0.55 * overlap + 0.20 * tag_signal))
 
-    primary_count = max(1, math.ceil(max_snippets * 0.6))
-    secondary_count = max(1, max_snippets - primary_count)
-    merged = exact_hits[:primary_count] + semantic_hits[:secondary_count]
 
-    if len(merged) < max_snippets:
-        symbol_hits = list(results_by_name.get("symbol", BackendResult("symbol", (), 0)).hits)
-        for item in symbol_hits:
-            if len(merged) >= max_snippets:
-                break
-            merged.append(item)
-    return merged[:max_snippets]
+def _adaptive_backend_weight(
+    result: BackendResult,
+    *,
+    hints: QueryHints,
+    intent: SearchIntent,
+    threshold_met: bool,
+    max_backend_ms: int,
+) -> float:
+    if not result.hits:
+        return 0.0
+    hit_density = min(len(result.hits) / max(1, intent.max_snippets or 1), 1.0)
+    lexical_support = _lexical_support_for_backend(result, hints=hints)
+    timing_penalty = min(max(result.timing_ms / max(1, max_backend_ms), 0.0), 1.0)
+    threshold_factor = 1.0 if threshold_met else 0.65
+    raw_weight = (
+        0.55 * result.quality_score
+        + 0.20 * hit_density
+        + 0.15 * lexical_support
+        + 0.10 * (1.0 - timing_penalty)
+    )
+    return max(0.0, min(1.0, raw_weight * threshold_factor))
+
+
+def _adaptive_fusion_selection(
+    *,
+    results_by_name: dict[str, BackendResult],
+    intent: SearchIntent,
+    hints: QueryHints,
+    config: SearchRouterConfig,
+) -> tuple[list[BackendHit], dict[str, int], dict[str, float], dict[str, bool], dict[str, float]]:
+    available = {name: result for name, result in results_by_name.items() if result.hits}
+    if not available:
+        return [], {}, {}, {}, {}
+
+    ordered_backends = sorted(
+        available.keys(),
+        key=lambda name: (
+            _BACKEND_TIE_PRIORITY.get(name, 99),
+            available[name].timing_ms,
+            name,
+        ),
+    )
+    max_snippets = max(1, intent.max_snippets or config.max_snippets)
+    eligibility = {
+        name: bool(
+            available[name].hits and available[name].quality_score >= _threshold_for(name, config)
+        )
+        for name in ordered_backends
+    }
+    max_backend_ms = max((available[name].timing_ms for name in ordered_backends), default=1)
+    backend_weights = {
+        name: _adaptive_backend_weight(
+            available[name],
+            hints=hints,
+            intent=intent,
+            threshold_met=eligibility[name],
+            max_backend_ms=max_backend_ms,
+        )
+        for name in ordered_backends
+    }
+
+    allocation = {name: 0 for name in ordered_backends}
+    for name in ordered_backends:
+        if not eligibility.get(name):
+            continue
+        if allocation[name] >= len(available[name].hits):
+            continue
+        if sum(allocation.values()) >= max_snippets:
+            break
+        allocation[name] += 1
+
+    remaining = max_snippets - sum(allocation.values())
+    proportional_shares = {name: 0.0 for name in ordered_backends}
+    if remaining > 0:
+        contributors = [
+            name
+            for name in ordered_backends
+            if len(available[name].hits) > allocation[name] and backend_weights.get(name, 0.0) > 0.0
+        ]
+        if not contributors:
+            contributors = [
+                name for name in ordered_backends if len(available[name].hits) > allocation[name]
+            ]
+        if contributors:
+            total_weight = sum(backend_weights.get(name, 0.0) for name in contributors)
+            if total_weight <= 0.0:
+                total_weight = float(len(contributors))
+            fractional: dict[str, float] = {}
+            distributed = 0
+            for name in contributors:
+                share = (
+                    backend_weights.get(name, 0.0) / total_weight
+                    if total_weight > 0.0
+                    else 1.0 / len(contributors)
+                )
+                proportional_shares[name] = share
+                capacity = len(available[name].hits) - allocation[name]
+                whole = min(capacity, int(math.floor(remaining * share)))
+                allocation[name] += whole
+                distributed += whole
+                fractional[name] = (remaining * share) - whole
+
+            leftover = remaining - distributed
+            if leftover > 0:
+                remainder_order = sorted(
+                    contributors,
+                    key=lambda name: (
+                        -fractional.get(name, 0.0),
+                        -backend_weights.get(name, 0.0),
+                        _BACKEND_TIE_PRIORITY.get(name, 99),
+                        available[name].timing_ms,
+                        name,
+                    ),
+                )
+                while leftover > 0:
+                    progressed = False
+                    for name in remainder_order:
+                        if allocation[name] >= len(available[name].hits):
+                            continue
+                        allocation[name] += 1
+                        leftover -= 1
+                        progressed = True
+                        if leftover <= 0:
+                            break
+                    if not progressed:
+                        break
+
+    ranked_candidates = {
+        name: list(available[name].hits)[: allocation.get(name, 0)] for name in ordered_backends
+    }
+    vote_scores: dict[tuple[str, int, int], float] = {}
+    first_seen: dict[tuple[str, int, int], int] = {}
+    representatives: dict[tuple[str, int, int], BackendHit] = {}
+    order_counter = 0
+    for name in ordered_backends:
+        candidates = ranked_candidates.get(name, [])
+        for rank, hit in enumerate(candidates, start=1):
+            key = (hit.path, hit.start_line, hit.end_line)
+            vote_scores[key] = vote_scores.get(key, 0.0) + (1.0 / (_RANK_FUSION_K + rank))
+            if key not in first_seen:
+                first_seen[key] = order_counter
+            order_counter += 1
+            existing = representatives.get(key)
+            if existing is None:
+                representatives[key] = hit
+                continue
+            merged_tags = tuple(sorted(set(existing.tags) | set(hit.tags)))
+            preferred = existing if existing.raw_score >= hit.raw_score else hit
+            if preferred.tags != merged_tags:
+                preferred = replace(preferred, tags=merged_tags)
+            representatives[key] = preferred
+
+    ordered_keys = sorted(
+        vote_scores,
+        key=lambda key: (
+            -vote_scores[key],
+            first_seen.get(key, 0),
+            key[0],
+            key[1],
+            key[2],
+        ),
+    )
+    selected_hits = [representatives[key] for key in ordered_keys]
+    return (
+        selected_hits[:max_snippets],
+        allocation,
+        backend_weights,
+        eligibility,
+        proportional_shares,
+    )
 
 
 def _pack_hits(
     hits: list[BackendHit],
     *,
     repo_root: Path,
-    constraints: SearchConstraints,
+    intent: SearchIntent,
     config: SearchRouterConfig,
+    preserve_ranked_order: bool = False,
 ) -> tuple[ContextHit, ...]:
     """Dedupe and cap context hits with deterministic ordering."""
-    sorted_hits = sorted(hits, key=lambda item: (-item.raw_score, item.path, item.start_line))
+    sorted_hits = (
+        list(hits)
+        if preserve_ranked_order
+        else sorted(hits, key=lambda item: (-item.raw_score, item.path, item.start_line))
+    )
 
     deduped: list[BackendHit] = []
     for candidate in sorted_hits:
@@ -370,12 +582,16 @@ def _pack_hits(
         for index, existing in enumerate(deduped):
             if not _spans_overlap(candidate, existing):
                 continue
-            # Prefer smaller spans, then higher score.
-            if _span_length(candidate) < _span_length(existing) or (
-                _span_length(candidate) == _span_length(existing)
-                and candidate.raw_score > existing.raw_score
-            ):
-                deduped[index] = candidate
+            if preserve_ranked_order:
+                # Keep first-seen hit when order is already pre-ranked by fusion.
+                pass
+            else:
+                # Prefer smaller spans, then higher score.
+                if _span_length(candidate) < _span_length(existing) or (
+                    _span_length(candidate) == _span_length(existing)
+                    and candidate.raw_score > existing.raw_score
+                ):
+                    deduped[index] = candidate
             replaced = True
             break
         if not replaced:
@@ -385,31 +601,47 @@ def _pack_hits(
     for hit in deduped:
         bucket = by_path.setdefault(hit.path, [])
         bucket.append(hit)
-    for bucket in by_path.values():
-        bucket.sort(key=lambda item: (-item.raw_score, item.start_line, item.end_line))
+    if not preserve_ranked_order:
+        for bucket in by_path.values():
+            bucket.sort(key=lambda item: (-item.raw_score, item.start_line, item.end_line))
 
-    max_files = constraints.max_files or config.max_files
-    max_snippets = constraints.max_snippets or config.max_snippets
-    selected_files = sorted(by_path.keys(), key=lambda path: -by_path[path][0].raw_score)[
-        :max_files
-    ]
-
-    ordered: list[BackendHit] = []
-    cursor = {path: 0 for path in selected_files}
-    while len(ordered) < max_snippets:
-        advanced = False
-        for path in selected_files:
-            index = cursor[path]
-            bucket = by_path[path]
-            if index >= len(bucket):
-                continue
-            ordered.append(bucket[index])
-            cursor[path] += 1
-            advanced = True
+    max_files = intent.max_files or config.max_files
+    max_snippets = intent.max_snippets or config.max_snippets
+    ordered: list[BackendHit]
+    if preserve_ranked_order:
+        ordered = []
+        selected_files: list[str] = []
+        selected_file_set: set[str] = set()
+        for hit in deduped:
+            path = hit.path
+            if path not in selected_file_set:
+                if len(selected_files) >= max_files:
+                    continue
+                selected_files.append(path)
+                selected_file_set.add(path)
+            ordered.append(hit)
             if len(ordered) >= max_snippets:
                 break
-        if not advanced:
-            break
+    else:
+        selected_files = sorted(by_path.keys(), key=lambda path: -by_path[path][0].raw_score)[
+            :max_files
+        ]
+        ordered = []
+        cursor = {path: 0 for path in selected_files}
+        while len(ordered) < max_snippets:
+            advanced = False
+            for path in selected_files:
+                index = cursor[path]
+                bucket = by_path[path]
+                if index >= len(bucket):
+                    continue
+                ordered.append(bucket[index])
+                cursor[path] += 1
+                advanced = True
+                if len(ordered) >= max_snippets:
+                    break
+            if not advanced:
+                break
 
     context_hits: list[ContextHit] = []
     total_chars = 0
@@ -477,6 +709,7 @@ class SearchRouter:
         self,
         *,
         query: str,
+        intent: SearchIntent | None = None,
         constraints: SearchConstraints | None = None,
         mode: str = "auto",
         include_debug: bool = False,
@@ -487,7 +720,14 @@ class SearchRouter:
         if normalized_mode not in {"auto", "exact", "semantic", "hybrid"}:
             normalized_mode = "auto"
 
-        resolved_constraints = _normalize_constraints(constraints, self.config)
+        if intent is not None:
+            resolved_intent = _normalize_search_intent(intent, self.config)
+            resolved_execution_hints = _normalize_execution_hints(None)
+        else:
+            resolved_intent, resolved_execution_hints = _intent_and_hints_from_constraints(
+                constraints,
+                config=self.config,
+            )
         parsed_query = parse_query_compat(query)
         effective_query = query
         if (
@@ -497,10 +737,22 @@ class SearchRouter:
             and parsed_query.pattern.strip()
         ):
             effective_query = parsed_query.pattern.strip()
-        resolved_constraints = _merge_constraints_with_query_compat(
-            resolved_constraints,
+        (
+            resolved_execution_hints,
+            parsed_path_filters,
+        ) = _merge_execution_hints_with_query_compat(
+            resolved_execution_hints,
             parsed=parsed_query,
         )
+        if parsed_path_filters:
+            merged_path_filters = list(resolved_intent.path_filters)
+            for candidate in parsed_path_filters:
+                if candidate not in merged_path_filters:
+                    merged_path_filters.append(candidate)
+            resolved_intent = replace(
+                resolved_intent,
+                path_filters=tuple(merged_path_filters),
+            )
         hints = extract_query_hints(effective_query)
         if (
             parsed_query.source == "grep_compat"
@@ -530,7 +782,8 @@ class SearchRouter:
                     query=effective_query,
                     hints=hints,
                     repo_root=self.repo_root,
-                    constraints=resolved_constraints,
+                    intent=resolved_intent,
+                    execution_hints=resolved_execution_hints,
                     config=self.config,
                 )
             if name == "semantic":
@@ -545,7 +798,8 @@ class SearchRouter:
                     query=effective_query,
                     searcher=self.searcher,
                     repo_root=self.repo_root,
-                    constraints=resolved_constraints,
+                    intent=resolved_intent,
+                    execution_hints=resolved_execution_hints,
                     config=self.config,
                 )
             if self.symbol_store is None:
@@ -560,7 +814,8 @@ class SearchRouter:
                 hints=hints,
                 query=effective_query,
                 repo_root=self.repo_root,
-                constraints=resolved_constraints,
+                intent=resolved_intent,
+                execution_hints=resolved_execution_hints,
                 config=self.config,
             )
 
@@ -568,7 +823,7 @@ class SearchRouter:
         if len(backend_names) == 1:
             backend_results.append(_run_backend(backend_names[0]))
         else:
-            timeout_seconds = max((resolved_constraints.time_budget_ms or 1) / 1000.0, 0.1)
+            timeout_seconds = max((resolved_intent.time_budget_ms or 1) / 1000.0, 0.1)
             with ThreadPoolExecutor(max_workers=len(backend_names)) as executor:
                 futures = {executor.submit(_run_backend, name): name for name in backend_names}
                 try:
@@ -580,10 +835,29 @@ class SearchRouter:
 
         enriched_results: list[BackendResult] = []
         for result in backend_results:
-            quality = _compute_quality(result, hints=hints, constraints=resolved_constraints)
+            quality = _compute_quality(result, hints=hints, intent=resolved_intent)
             enriched_results.append(replace(result, quality_score=quality))
 
         results_by_name = {result.name: result for result in enriched_results}
+        max_backend_ms = max((result.timing_ms for result in enriched_results), default=1)
+        eligibility = {
+            result.name: bool(
+                result.hits and result.quality_score >= _threshold_for(result.name, self.config)
+            )
+            for result in enriched_results
+        }
+        backend_weights = {
+            result.name: _adaptive_backend_weight(
+                result,
+                hints=hints,
+                intent=resolved_intent,
+                threshold_met=eligibility[result.name],
+                max_backend_ms=max_backend_ms,
+            )
+            for result in enriched_results
+        }
+        fusion_allocation: dict[str, int] = {}
+        fusion_proportional_shares: dict[str, float] = {}
         outcome: RouterOutcome
         selected_hits: list[BackendHit]
         if normalized_mode == "hybrid":
@@ -594,8 +868,17 @@ class SearchRouter:
                 considered=tuple(result.name for result in enriched_results),
                 backend_scores={result.name: result.quality_score for result in enriched_results},
             )
-            selected_hits = _merge_backend_hits(
-                results_by_name, resolved_constraints.max_snippets or self.config.max_snippets
+            (
+                selected_hits,
+                fusion_allocation,
+                backend_weights,
+                eligibility,
+                fusion_proportional_shares,
+            ) = _adaptive_fusion_selection(
+                results_by_name=results_by_name,
+                intent=resolved_intent,
+                hints=hints,
+                config=self.config,
             )
         elif normalized_mode in {"exact", "semantic"}:
             forced = results_by_name.get(normalized_mode)
@@ -614,9 +897,17 @@ class SearchRouter:
         else:
             outcome = _route_auto(enriched_results, self.config)
             if outcome.strategy == "hybrid":
-                selected_hits = _merge_backend_hits(
-                    results_by_name,
-                    resolved_constraints.max_snippets or self.config.max_snippets,
+                (
+                    selected_hits,
+                    fusion_allocation,
+                    backend_weights,
+                    eligibility,
+                    fusion_proportional_shares,
+                ) = _adaptive_fusion_selection(
+                    results_by_name=results_by_name,
+                    intent=resolved_intent,
+                    hints=hints,
+                    config=self.config,
                 )
             elif outcome.strategy == "suppressed":
                 selected_hits = []
@@ -627,8 +918,9 @@ class SearchRouter:
         packed_hits = _pack_hits(
             selected_hits,
             repo_root=self.repo_root,
-            constraints=resolved_constraints,
+            intent=resolved_intent,
             config=self.config,
+            preserve_ranked_order=outcome.strategy == "hybrid",
         )
 
         total_ms = int((time.perf_counter() - started) * 1000)
@@ -660,19 +952,26 @@ class SearchRouter:
             "commands": {
                 result.name: list(result.commands) for result in enriched_results if result.commands
             },
+            "backend_weights": backend_weights,
+            "fusion_budget": {
+                "max_snippets": resolved_intent.max_snippets or self.config.max_snippets,
+                "allocation": fusion_allocation,
+                "proportional_shares": fusion_proportional_shares,
+            },
+            "eligibility": eligibility,
             "constraints": {
-                "search_mode": resolved_constraints.search_mode,
-                "language": resolved_constraints.language,
-                "path_prefix": resolved_constraints.path_prefix,
-                "path_filters": list(resolved_constraints.path_filters),
-                "include_globs": list(resolved_constraints.include_globs),
-                "exclude_globs": list(resolved_constraints.exclude_globs),
-                "case_mode": resolved_constraints.case_mode,
-                "word_match": resolved_constraints.word_match,
-                "fixed_string": resolved_constraints.fixed_string,
-                "max_files": resolved_constraints.max_files,
-                "max_snippets": resolved_constraints.max_snippets,
-                "time_budget_ms": resolved_constraints.time_budget_ms,
+                "search_mode": resolved_intent.search_mode,
+                "language": resolved_intent.language,
+                "path_prefix": resolved_intent.path_prefix,
+                "path_filters": list(resolved_intent.path_filters),
+                "include_globs": list(resolved_execution_hints.include_globs),
+                "exclude_globs": list(resolved_execution_hints.exclude_globs),
+                "case_mode": resolved_execution_hints.case_mode,
+                "word_match": resolved_execution_hints.word_match,
+                "fixed_string": resolved_execution_hints.fixed_string,
+                "max_files": resolved_intent.max_files,
+                "max_snippets": resolved_intent.max_snippets,
+                "time_budget_ms": resolved_intent.time_budget_ms,
             },
             "parsed_query": parsed_query.to_debug_payload(),
         }
@@ -688,7 +987,13 @@ class SearchRouter:
                 "backend_scores": {
                     result.name: result.quality_score for result in enriched_results
                 },
+                "backend_weights": backend_weights,
                 "backend_timings": {result.name: result.timing_ms for result in enriched_results},
+                "fusion_budget": {
+                    "allocation": fusion_allocation,
+                    "proportional_shares": fusion_proportional_shares,
+                    "eligibility": eligibility,
+                },
                 "pack": {
                     "hits": len(packed_hits),
                     "files": len({hit.path for hit in packed_hits}),

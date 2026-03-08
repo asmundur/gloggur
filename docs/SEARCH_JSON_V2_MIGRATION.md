@@ -64,6 +64,12 @@ gloggur extract src/example.py 128 246 --json
 - fail-closed behavior when reindex is required
 - additive hit-level fields do not require a schema-version bump
 
+## Router contract boundary (new)
+
+- Public router callers should pass intent-only fields (`SearchIntent`): search mode, language/path scope, limits, and time budget.
+- Grep/ripgrep compatibility flags (`-i`, `-w`, `-F`, `--glob`, etc.) are translated into internal execution hints inside the router.
+- CLI flags and ContextPack v2 payload shape remain unchanged.
+
 ## v1 flags removed from search
 
 These now fail with `search_contract_v1_removed`:

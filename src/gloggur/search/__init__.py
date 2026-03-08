@@ -4,6 +4,7 @@ from gloggur.search.compat import attach_legacy_search_contract
 from gloggur.search.router import (
     ContextPack,
     SearchConstraints,
+    SearchIntent,
     SearchRouter,
     SearchRouterConfig,
     load_search_router_config,
@@ -13,6 +14,7 @@ __all__ = [
     "attach_legacy_search_contract",
     "ContextPack",
     "SearchConstraints",
+    "SearchIntent",
     "SearchRouter",
     "SearchRouterConfig",
     "load_search_router_config",

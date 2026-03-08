@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from gloggur.search.router import SearchConstraints, SearchRouter, SearchRouterConfig
+from gloggur.search.router import SearchConstraints, SearchIntent, SearchRouter, SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
 from gloggur.search.router.types import BackendHit, BackendResult
 
@@ -151,6 +151,90 @@ def test_search_router_hybrid_merges_when_threshold_not_met(
     assert "src/b.py" in paths
 
 
+def test_search_router_hybrid_uses_rank_fusion_for_final_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    exact_result = BackendResult(
+        name="exact",
+        hits=(
+            BackendHit(
+                backend="exact",
+                path="src/a.py",
+                start_line=1,
+                end_line=1,
+                snippet="def alpha(): pass",
+                raw_score=0.9,
+                tags=("literal_match",),
+            ),
+            BackendHit(
+                backend="exact",
+                path="src/b.py",
+                start_line=2,
+                end_line=2,
+                snippet="def beta(): pass",
+                raw_score=0.8,
+                tags=("literal_match",),
+            ),
+        ),
+        timing_ms=9,
+    )
+    semantic_result = BackendResult(
+        name="semantic",
+        hits=(
+            BackendHit(
+                backend="semantic",
+                path="src/b.py",
+                start_line=2,
+                end_line=2,
+                snippet="def beta(): pass",
+                raw_score=0.95,
+                tags=("semantic_match", "semantic_high_conf"),
+            ),
+            BackendHit(
+                backend="semantic",
+                path="src/c.py",
+                start_line=3,
+                end_line=3,
+                snippet="def gamma(): pass",
+                raw_score=0.9,
+                tags=("semantic_match",),
+            ),
+        ),
+        timing_ms=11,
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: exact_result,
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_semantic_backend",
+        lambda **_kwargs: semantic_result,
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda *_args, **_kwargs: 0.1,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact", "semantic"), max_snippets=3),
+    )
+    pack_a = router.search(query="ambiguous query", mode="auto")
+    pack_b = router.search(query="ambiguous query", mode="auto")
+
+    assert pack_a.summary["strategy"] == "hybrid"
+    assert pack_a.hits
+    assert pack_a.hits[0].path == "src/b.py"
+    assert isinstance(pack_a.debug, dict)
+    assert "backend_weights" in pack_a.debug
+    assert "fusion_budget" in pack_a.debug
+    assert "eligibility" in pack_a.debug
+    assert [hit.to_dict() for hit in pack_a.hits] == [hit.to_dict() for hit in pack_b.hits]
+
+
 def test_search_router_suppresses_ungrounded_semantic_only_results(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -287,6 +371,60 @@ def test_search_router_forced_exact_bypasses_threadpool_timeout(
     assert pack.hits[0].path == "src/slow.py"
 
 
+def test_search_router_forced_hybrid_strategy_remains_stable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/exact.py",
+                    start_line=5,
+                    end_line=5,
+                    snippet="def exact(): pass",
+                    raw_score=0.8,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_semantic_backend",
+        lambda **_kwargs: BackendResult(
+            name="semantic",
+            hits=(
+                BackendHit(
+                    backend="semantic",
+                    path="src/semantic.py",
+                    start_line=8,
+                    end_line=8,
+                    snippet="def semantic(): pass",
+                    raw_score=0.9,
+                    tags=("semantic_match",),
+                ),
+            ),
+            timing_ms=5,
+        ),
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact", "semantic")),
+    )
+    pack = router.search(query="forced hybrid", mode="hybrid")
+
+    assert pack.summary["strategy"] == "hybrid"
+    assert pack.summary["reason"] == "forced_mode"
+    assert {hit.path for hit in pack.hits} == {"src/exact.py", "src/semantic.py"}
+
+
 def test_search_router_keeps_quoted_short_grep_pattern_for_symbol_hints(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -326,3 +464,141 @@ def test_search_router_keeps_quoted_short_grep_pattern_for_symbol_hints(
     parsed = pack.debug.get("parsed_query")
     assert isinstance(parsed, dict)
     assert parsed.get("pattern_quoted") is True
+
+
+def test_search_router_search_intent_path_is_supported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _exact_backend(**kwargs):
+        captured.update(kwargs)
+        return BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/intent.py",
+                    start_line=11,
+                    end_line=11,
+                    snippet="def intent_path(): pass",
+                    raw_score=0.9,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=5,
+        )
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact",)),
+    )
+    intent = SearchIntent(path_prefix="src", max_snippets=1, time_budget_ms=250)
+    pack = router.search(query="intent path", intent=intent, mode="exact")
+
+    assert pack.hits
+    assert isinstance(captured.get("intent"), SearchIntent)
+    captured_intent = captured["intent"]
+    assert isinstance(captured_intent, SearchIntent)
+    assert captured_intent.path_prefix == "src"
+    assert not hasattr(captured_intent, "case_mode")
+    assert not hasattr(captured_intent, "include_globs")
+    captured_hints = captured.get("execution_hints")
+    assert captured_hints is not None
+    assert getattr(captured_hints, "include_globs", ()) == ()
+
+
+def test_search_router_search_constraints_adapter_preserves_parity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    result = BackendResult(
+        name="exact",
+        hits=(
+            BackendHit(
+                backend="exact",
+                path="src/parity.py",
+                start_line=1,
+                end_line=1,
+                snippet="def parity(): pass",
+                raw_score=0.8,
+                tags=("literal_match",),
+            ),
+        ),
+        timing_ms=3,
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: result,
+    )
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact",)),
+    )
+    intent = SearchIntent(path_prefix="src", max_snippets=1, max_files=1, time_budget_ms=200)
+    constraints = SearchConstraints(path_prefix="src", max_snippets=1, max_files=1, time_budget_ms=200)
+
+    pack_with_intent = router.search(query="parity", intent=intent, mode="exact")
+    pack_with_constraints = router.search(query="parity", constraints=constraints, mode="exact")
+
+    assert [hit.to_dict() for hit in pack_with_intent.hits] == [
+        hit.to_dict() for hit in pack_with_constraints.hits
+    ]
+    assert pack_with_intent.summary == pack_with_constraints.summary
+
+
+def test_query_compat_flags_map_to_execution_hints_without_leaking_into_search_intent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _exact_backend(**kwargs):
+        captured.update(kwargs)
+        return BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/parser.py",
+                    start_line=3,
+                    end_line=3,
+                    snippet="id = find_id()",
+                    raw_score=0.9,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        )
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact",)),
+    )
+    pack = router.search(
+        query='rg -i -w -F -g "*.py" id src/',
+        intent=SearchIntent(),
+        mode="exact",
+        include_debug=True,
+    )
+
+    assert pack.hits
+    captured_intent = captured.get("intent")
+    assert isinstance(captured_intent, SearchIntent)
+    assert not hasattr(captured_intent, "case_mode")
+    assert not hasattr(captured_intent, "fixed_string")
+    captured_hints = captured.get("execution_hints")
+    assert captured_hints is not None
+    assert getattr(captured_hints, "case_mode", None) == "ignore"
+    assert getattr(captured_hints, "word_match", False) is True
+    assert getattr(captured_hints, "fixed_string", False) is True
+    assert "*.py" in getattr(captured_hints, "include_globs", ())

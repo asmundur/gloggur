@@ -11,7 +11,13 @@ from pathlib import Path
 from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router.config import SearchRouterConfig
-from gloggur.search.router.types import BackendHit, BackendResult, QueryHints, SearchConstraints
+from gloggur.search.router.types import (
+    BackendHit,
+    BackendResult,
+    ExecutionHints,
+    QueryHints,
+    SearchIntent,
+)
 from gloggur.symbol_index.models import SymbolOccurrence
 from gloggur.symbol_index.store import SymbolIndexStore
 
@@ -135,19 +141,20 @@ def _matches_exclude_globs(path: str, globs: tuple[str, ...], *, repo_root: Path
 def _path_allowed(
     path: str,
     *,
-    constraints: SearchConstraints,
+    intent: SearchIntent,
+    execution_hints: ExecutionHints,
     config: SearchRouterConfig,
     repo_root: Path,
 ) -> bool:
     if _matches_exclude_globs(path, config.ignore_globs, repo_root=repo_root):
         return False
-    if not _path_matches_prefix(path, constraints.path_prefix, repo_root=repo_root):
+    if not _path_matches_prefix(path, intent.path_prefix, repo_root=repo_root):
         return False
-    if not _path_matches_any_prefix(path, constraints.path_filters, repo_root=repo_root):
+    if not _path_matches_any_prefix(path, intent.path_filters, repo_root=repo_root):
         return False
-    if not _matches_include_globs(path, constraints.include_globs, repo_root=repo_root):
+    if not _matches_include_globs(path, execution_hints.include_globs, repo_root=repo_root):
         return False
-    if _matches_exclude_globs(path, constraints.exclude_globs, repo_root=repo_root):
+    if _matches_exclude_globs(path, execution_hints.exclude_globs, repo_root=repo_root):
         return False
     return True
 
@@ -238,29 +245,32 @@ def _iter_fallback_search_files(
     return tuple(files)
 
 
-def _compile_exact_matcher(pattern: str, constraints: SearchConstraints) -> re.Pattern[str] | None:
+def _compile_exact_matcher(
+    pattern: str,
+    execution_hints: ExecutionHints,
+) -> re.Pattern[str] | None:
     """Compile a Python matcher that approximates ripgrep option semantics."""
-    case_mode = (constraints.case_mode or "sensitive").strip().lower()
+    case_mode = (execution_hints.case_mode or "sensitive").strip().lower()
     flags = 0
     if case_mode == "ignore":
         flags |= re.IGNORECASE
     elif case_mode == "smart" and not any(char.isupper() for char in pattern):
         flags |= re.IGNORECASE
 
-    if constraints.fixed_string:
+    if execution_hints.fixed_string:
         expression = re.escape(pattern)
     else:
         expression = pattern
-    if constraints.word_match:
+    if execution_hints.word_match:
         expression = rf"\b{expression}\b"
 
     try:
         return re.compile(expression, flags)
     except re.error:
-        if constraints.fixed_string:
+        if execution_hints.fixed_string:
             return None
         escaped = re.escape(pattern)
-        if constraints.word_match:
+        if execution_hints.word_match:
             escaped = rf"\b{escaped}\b"
         return re.compile(escaped, flags)
 
@@ -280,7 +290,8 @@ def _run_exact_backend_fallback_scan(
     deduped_patterns: tuple[tuple[str, tuple[str, ...], float], ...],
     hints: QueryHints,
     repo_root: Path,
-    constraints: SearchConstraints,
+    intent: SearchIntent,
+    execution_hints: ExecutionHints,
     config: SearchRouterConfig,
     search_target: str,
     top_k: int,
@@ -289,7 +300,7 @@ def _run_exact_backend_fallback_scan(
     """Fallback exact scan used when ripgrep invocation is unavailable."""
     compiled_patterns: list[tuple[str, re.Pattern[str], tuple[str, ...], float]] = []
     for pattern, tags, base_score in deduped_patterns:
-        matcher = _compile_exact_matcher(pattern, constraints)
+        matcher = _compile_exact_matcher(pattern, execution_hints)
         if matcher is None:
             continue
         compiled_patterns.append((pattern, matcher, tags, base_score))
@@ -299,7 +310,7 @@ def _run_exact_backend_fallback_scan(
     file_candidates = _iter_fallback_search_files(
         repo_root=repo_root,
         search_target=search_target,
-        max_files=constraints.max_files,
+        max_files=intent.max_files,
     )
     hit_map: dict[tuple[str, int, int], BackendHit] = {}
     byte_span_cache: dict[str, LineByteSpanIndex] = {}
@@ -310,7 +321,8 @@ def _run_exact_backend_fallback_scan(
             break
         if not _path_allowed(
             absolute_path,
-            constraints=constraints,
+            intent=intent,
+            execution_hints=execution_hints,
             config=config,
             repo_root=repo_root,
         ):
@@ -373,7 +385,8 @@ def run_exact_backend(
     query: str,
     hints: QueryHints,
     repo_root: Path,
-    constraints: SearchConstraints,
+    intent: SearchIntent,
+    execution_hints: ExecutionHints,
     config: SearchRouterConfig,
 ) -> BackendResult:
     """Run deterministic literal/symbol exact backend using ripgrep."""
@@ -396,23 +409,23 @@ def run_exact_backend(
         seen_patterns.add(normalized)
         deduped_patterns.append((normalized, tags, base_score))
 
-    top_k = max(1, constraints.max_snippets or config.exact_top_k)
+    top_k = max(1, intent.max_snippets or config.exact_top_k)
     cmd_fragments: list[str] = []
     hit_map: dict[tuple[str, int, int], BackendHit] = {}
     byte_span_cache: dict[str, LineByteSpanIndex] = {}
 
-    time_budget_ms = constraints.time_budget_ms or config.default_time_budget_ms
+    time_budget_ms = intent.time_budget_ms or config.default_time_budget_ms
     time_budget_seconds = max(time_budget_ms / 1000.0, 0.1)
     deadline = started + time_budget_seconds
 
     search_target = "."
-    if constraints.path_prefix and not constraints.path_filters:
-        candidate = (repo_root / constraints.path_prefix).resolve()
+    if intent.path_prefix and not intent.path_filters:
+        candidate = (repo_root / intent.path_prefix).resolve()
         if candidate.exists():
             if candidate.is_file():
-                search_target = str(Path(constraints.path_prefix))
+                search_target = str(Path(intent.path_prefix))
             else:
-                search_target = str(Path(constraints.path_prefix))
+                search_target = str(Path(intent.path_prefix))
 
     ripgrep_unavailable = False
     for pattern, tags, base_score in deduped_patterns:
@@ -433,17 +446,17 @@ def run_exact_backend(
             pattern,
             search_target,
         ]
-        if constraints.case_mode == "ignore":
+        if execution_hints.case_mode == "ignore":
             cmd.append("-i")
-        elif constraints.case_mode == "smart":
+        elif execution_hints.case_mode == "smart":
             cmd.append("-S")
-        if constraints.word_match:
+        if execution_hints.word_match:
             cmd.append("-w")
-        if constraints.fixed_string:
+        if execution_hints.fixed_string:
             cmd.append("-F")
-        for include_glob in constraints.include_globs:
+        for include_glob in execution_hints.include_globs:
             cmd.extend(["--glob", include_glob])
-        for exclude_glob in constraints.exclude_globs:
+        for exclude_glob in execution_hints.exclude_globs:
             cmd.extend(["--glob", f"!{exclude_glob}"])
         for ignore_glob in config.ignore_globs:
             cmd.extend(["--glob", f"!{ignore_glob}"])
@@ -491,7 +504,8 @@ def run_exact_backend(
                 absolute_path = os.path.abspath(str(repo_root / relative_path))
             if not _path_allowed(
                 absolute_path,
-                constraints=constraints,
+                intent=intent,
+                execution_hints=execution_hints,
                 config=config,
                 repo_root=repo_root,
             ):
@@ -535,7 +549,8 @@ def run_exact_backend(
             deduped_patterns=tuple(deduped_patterns),
             hints=hints,
             repo_root=repo_root,
-            constraints=constraints,
+            intent=intent,
+            execution_hints=execution_hints,
             config=config,
             search_target=search_target,
             top_k=top_k,
@@ -568,7 +583,8 @@ def run_semantic_backend(
     query: str,
     searcher: HybridSearch,
     repo_root: Path,
-    constraints: SearchConstraints,
+    intent: SearchIntent,
+    execution_hints: ExecutionHints,
     config: SearchRouterConfig,
 ) -> BackendResult:
     """Run semantic backend over existing HybridSearch."""
@@ -576,14 +592,14 @@ def run_semantic_backend(
 
     filters: dict[str, str] = {
         "ranking_mode": "balanced",
-        "mode": constraints.search_mode or "semantic",
+        "mode": intent.search_mode or "semantic",
     }
-    if constraints.path_prefix:
-        filters["file"] = constraints.path_prefix
-    if constraints.language:
-        filters["language"] = constraints.language
+    if intent.path_prefix:
+        filters["file"] = intent.path_prefix
+    if intent.language:
+        filters["language"] = intent.language
 
-    top_k = max(1, constraints.max_snippets or config.semantic_top_k)
+    top_k = max(1, intent.max_snippets or config.semantic_top_k)
     payload = searcher.search(
         query,
         filters=filters,
@@ -609,7 +625,8 @@ def run_semantic_backend(
             normalized_path = os.path.abspath(str(repo_root / normalized_path))
         if not _path_allowed(
             normalized_path,
-            constraints=constraints,
+            intent=intent,
+            execution_hints=execution_hints,
             config=config,
             repo_root=repo_root,
         ):
@@ -679,11 +696,11 @@ def _usage_intent(query: str) -> bool:
 def _resolve_case_sensitive(
     *,
     symbol_candidates: tuple[str, ...],
-    constraints: SearchConstraints,
+    execution_hints: ExecutionHints,
 ) -> bool:
-    if constraints.case_mode == "ignore":
+    if execution_hints.case_mode == "ignore":
         return False
-    if constraints.case_mode == "smart":
+    if execution_hints.case_mode == "smart":
         return any(any(char.isupper() for char in candidate) for candidate in symbol_candidates)
     return False
 
@@ -736,13 +753,14 @@ def run_symbol_backend(
     hints: QueryHints,
     query: str,
     repo_root: Path,
-    constraints: SearchConstraints,
+    intent: SearchIntent,
+    execution_hints: ExecutionHints,
     config: SearchRouterConfig,
 ) -> BackendResult:
     """Run symbol occurrence backend over .gloggur/index/symbols.db."""
     started = time.perf_counter()
 
-    top_k = max(1, constraints.max_snippets or config.symbol_top_k)
+    top_k = max(1, intent.max_snippets or config.symbol_top_k)
     if not symbol_store.available:
         reason = symbol_store.unavailability_reason or "missing or unreadable symbols.db"
         return BackendResult(
@@ -754,13 +772,13 @@ def run_symbol_backend(
         )
     try:
         prefix_filters: tuple[str, ...] = ()
-        if constraints.path_prefix:
-            prefix_filters = (constraints.path_prefix,)
-        if constraints.path_filters:
-            prefix_filters = tuple(list(prefix_filters) + list(constraints.path_filters))
+        if intent.path_prefix:
+            prefix_filters = (intent.path_prefix,)
+        if intent.path_filters:
+            prefix_filters = tuple(list(prefix_filters) + list(intent.path_filters))
         occurrences = symbol_store.list_occurrences(
             path_prefixes=prefix_filters,
-            language=constraints.language,
+            language=intent.language,
         )
     except Exception as exc:
         return BackendResult(
@@ -792,7 +810,7 @@ def run_symbol_backend(
 
     case_sensitive = _resolve_case_sensitive(
         symbol_candidates=symbol_candidates,
-        constraints=constraints,
+        execution_hints=execution_hints,
     )
     query_tokens = tuple(token for token in hints.identifier_tokens if token)
     usage_intent = _usage_intent(query)
@@ -806,7 +824,8 @@ def run_symbol_backend(
             path = os.path.abspath(str(repo_root / path))
         if not _path_allowed(
             path,
-            constraints=constraints,
+            intent=intent,
+            execution_hints=execution_hints,
             config=config,
             repo_root=repo_root,
         ):
@@ -817,8 +836,8 @@ def run_symbol_backend(
             symbol_candidates,
             query_tokens=query_tokens,
             case_sensitive=case_sensitive,
-            fixed_string=constraints.fixed_string,
-            word_match=constraints.word_match,
+            fixed_string=execution_hints.fixed_string,
+            word_match=execution_hints.word_match,
         )
         if score <= 0.0:
             continue

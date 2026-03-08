@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from gloggur.search.router.backends import run_exact_backend
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
-from gloggur.search.router.types import SearchConstraints
+from gloggur.search.router.types import ExecutionHints, SearchIntent
 
 
 def test_run_exact_backend_uses_remaining_budget_for_single_pattern(
@@ -40,7 +40,8 @@ def test_run_exact_backend_uses_remaining_budget_for_single_pattern(
         query="caller",
         hints=extract_query_hints("caller"),
         repo_root=tmp_path,
-        constraints=SearchConstraints(max_snippets=1, time_budget_ms=900),
+        intent=SearchIntent(max_snippets=1, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
         config=SearchRouterConfig(),
     )
 
@@ -74,7 +75,8 @@ def test_run_exact_backend_falls_back_when_ripgrep_is_unavailable(
         query="caller",
         hints=extract_query_hints("caller"),
         repo_root=tmp_path,
-        constraints=SearchConstraints(max_snippets=1, time_budget_ms=900),
+        intent=SearchIntent(max_snippets=1, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
         config=SearchRouterConfig(),
     )
 

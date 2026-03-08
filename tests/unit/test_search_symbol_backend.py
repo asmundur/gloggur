@@ -4,7 +4,7 @@ from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.search.router.backends import run_symbol_backend
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
-from gloggur.search.router.types import SearchConstraints
+from gloggur.search.router.types import ExecutionHints, SearchIntent
 from gloggur.symbol_index.models import IndexedFile, SymbolOccurrence
 from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 
@@ -74,7 +74,8 @@ def test_symbol_backend_prefers_definition_for_non_usage_queries(tmp_path) -> No
         hints=extract_query_hints(query),
         query=query,
         repo_root=repo,
-        constraints=SearchConstraints(),
+        intent=SearchIntent(),
+        execution_hints=ExecutionHints(),
         config=SearchRouterConfig(),
     )
 
@@ -90,7 +91,8 @@ def test_symbol_backend_prefers_references_for_usage_queries(tmp_path) -> None:
         hints=extract_query_hints(query),
         query=query,
         repo_root=repo,
-        constraints=SearchConstraints(),
+        intent=SearchIntent(),
+        execution_hints=ExecutionHints(),
         config=SearchRouterConfig(),
     )
 
@@ -106,7 +108,8 @@ def test_symbol_backend_emits_def_and_ref_tags(tmp_path) -> None:
         hints=extract_query_hints(query),
         query=query,
         repo_root=repo,
-        constraints=SearchConstraints(max_snippets=10),
+        intent=SearchIntent(max_snippets=10),
+        execution_hints=ExecutionHints(),
         config=SearchRouterConfig(),
     )
 
@@ -130,7 +133,8 @@ def test_symbol_backend_reports_error_when_symbol_index_missing(tmp_path) -> Non
         hints=extract_query_hints(query),
         query=query,
         repo_root=repo,
-        constraints=SearchConstraints(),
+        intent=SearchIntent(),
+        execution_hints=ExecutionHints(),
         config=SearchRouterConfig(),
     )
 
@@ -155,7 +159,8 @@ def test_symbol_backend_reports_error_when_symbol_index_is_corrupt(tmp_path) -> 
         hints=extract_query_hints(query),
         query=query,
         repo_root=repo,
-        constraints=SearchConstraints(),
+        intent=SearchIntent(),
+        execution_hints=ExecutionHints(),
         config=SearchRouterConfig(),
     )
 
