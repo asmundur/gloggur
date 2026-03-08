@@ -29,6 +29,41 @@ def _write_fallback_marker(cache_dir: str) -> None:
     marker.touch(exist_ok=True)
 
 
+def _install_fake_sentence_transformers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stdout_text: str = "",
+    stderr_text: str = "",
+) -> None:
+    """Install a lightweight sentence-transformers stub for CLI bootstrap tests."""
+
+    class FakeVector:
+        def __init__(self, values: list[float]) -> None:
+            self._values = values
+
+        def tolist(self) -> list[float]:
+            return list(self._values)
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name: str, cache_folder: str | None = None) -> None:
+            _ = model_name, cache_folder
+            if stdout_text:
+                sys.stdout.write(stdout_text)
+            if stderr_text:
+                sys.stderr.write(stderr_text)
+
+        def encode(self, texts, normalize_embeddings: bool = True):  # noqa: ANN001
+            _ = normalize_embeddings
+            return [FakeVector([0.25, 0.75]) for _ in texts]
+
+        def get_sentence_embedding_dimension(self) -> int:
+            return 2
+
+    fake_module = type(sys)("sentence_transformers")
+    fake_module.SentenceTransformer = FakeSentenceTransformer
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+
+
 def _parse_json_output(output: str) -> dict[str, object]:
     """Parse JSON output from CLI command output."""
     start = output.find("{")
@@ -179,6 +214,44 @@ def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
         assert "metadata" not in payload
         assert all(hit.get("path") == "sample.py" for hit in hits if isinstance(hit, dict))
         assert all("start_byte" in hit and "end_byte" in hit for hit in hits if isinstance(hit, dict))
+
+
+def test_cli_search_json_is_clean_under_local_bootstrap_stdout_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """search --json should stay directly parseable even when local bootstrap writes progress."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    _install_fake_sentence_transformers(
+        monkeypatch,
+        stdout_text=(
+            "Loading weights:  50%|#####     | 100/199\r"
+            "Materializing param=encoder.layer.0.output.dense.weight\r"
+        ),
+        stderr_text=(
+            "No sentence-transformers model found with name fake. "
+            "Creating a new one with mean pooling.\n"
+        ),
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "local",
+            "GLOGGUR_LOCAL_MODEL": "fake-local-model",
+        }
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(cli, ["search", "add", "--json", "--top-k", "3"], env=env)
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["schema_version"] == 2
+        hits = payload.get("hits")
+        assert isinstance(hits, list)
+        assert hits
 
 
 def test_cli_index_builds_symbol_index_and_reports_incremental_counters() -> None:

@@ -11,6 +11,41 @@ from gloggur.embeddings.local import LocalEmbeddingProvider
 from gloggur.embeddings.openai import OpenAIEmbeddingProvider
 
 
+def _install_fake_sentence_transformers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stdout_text: str = "",
+    stderr_text: str = "",
+) -> None:
+    """Install a lightweight sentence-transformers stub for bootstrap tests."""
+
+    class FakeVector:
+        def __init__(self, values: list[float]) -> None:
+            self._values = values
+
+        def tolist(self) -> list[float]:
+            return list(self._values)
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name: str, cache_folder: str | None = None) -> None:
+            _ = model_name, cache_folder
+            if stdout_text:
+                sys.stdout.write(stdout_text)
+            if stderr_text:
+                sys.stderr.write(stderr_text)
+
+        def encode(self, texts, normalize_embeddings: bool = True):  # noqa: ANN001
+            _ = normalize_embeddings
+            return [FakeVector([0.25, 0.75]) for _ in texts]
+
+        def get_sentence_embedding_dimension(self) -> int:
+            return 2
+
+    fake_module = ModuleType("sentence_transformers")
+    fake_module.SentenceTransformer = FakeSentenceTransformer
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+
+
 def test_local_embedding_legacy_fallback_controls_are_ignored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -67,6 +102,33 @@ def test_local_embedding_filters_expected_wrapper_warning() -> None:
     assert filtered == ""
 
 
+def test_local_embedding_suppresses_bootstrap_progress_from_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Known local model bootstrap chatter should not leak to stdout/stderr."""
+    _install_fake_sentence_transformers(
+        monkeypatch,
+        stdout_text=(
+            "Loading weights:  50%|#####     | 100/199\r"
+            "Loading weights: 100%|##########| 199/199\r"
+            "Materializing param=encoder.layer.0.output.dense.weight\r"
+        ),
+        stderr_text=(
+            "No sentence-transformers model found with name fake. "
+            "Creating a new one with mean pooling.\n"
+        ),
+    )
+
+    provider = LocalEmbeddingProvider("fake", cache_dir=str(tmp_path))
+
+    assert provider.get_dimension() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_local_embedding_preserves_unexpected_stderr_lines() -> None:
     """Unexpected stderr must remain visible even when the wrapper line is filtered."""
     filtered = LocalEmbeddingProvider._filter_expected_wrapper_warning(
@@ -76,6 +138,27 @@ def test_local_embedding_preserves_unexpected_stderr_lines() -> None:
     )
 
     assert filtered == "real warning\n"
+
+
+def test_local_embedding_redirects_unexpected_bootstrap_stdout_to_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Unexpected bootstrap stdout should be preserved, but only via stderr."""
+    _install_fake_sentence_transformers(
+        monkeypatch,
+        stdout_text="unexpected bootstrap stdout\n",
+        stderr_text="unexpected bootstrap stderr\n",
+    )
+
+    provider = LocalEmbeddingProvider("fake", cache_dir=str(tmp_path))
+
+    assert provider.get_dimension() == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unexpected bootstrap stdout" in captured.err
+    assert "unexpected bootstrap stderr" in captured.err
 
 
 def test_openai_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

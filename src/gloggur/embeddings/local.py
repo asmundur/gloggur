@@ -3,13 +3,17 @@ from __future__ import annotations
 import io
 import sys
 from collections.abc import Iterable
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 
 from gloggur.embeddings.base import EmbeddingProvider
 
 _EXPECTED_WRAPPER_WARNING_TOKENS = (
     "No sentence-transformers model found",
     "Creating a new one with mean pooling.",
+)
+_EXPECTED_BOOTSTRAP_PROGRESS_TOKENS = (
+    "Loading weights:",
+    "Materializing param=",
 )
 
 
@@ -41,30 +45,43 @@ class LocalEmbeddingProvider(EmbeddingProvider):
                 "install local extras (pip install -e '.[local]')."
             ) from exc
         try:
+            stdout_buffer = io.StringIO()
             stderr_buffer = io.StringIO()
-            with redirect_stderr(stderr_buffer):
+            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
                 self._model = SentenceTransformer(self.model_name, cache_folder=self.cache_dir)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load local embedding model '{self.model_name}' "
                 f"({type(exc).__name__}: {exc})"
             ) from exc
-        filtered_stderr = self._filter_expected_wrapper_warning(stderr_buffer.getvalue())
-        if filtered_stderr:
-            sys.stderr.write(filtered_stderr)
+        filtered_stdout = self._filter_expected_bootstrap_output(stdout_buffer.getvalue())
+        filtered_stderr = self._filter_expected_bootstrap_output(stderr_buffer.getvalue())
+        unexpected_output = f"{filtered_stdout}{filtered_stderr}"
+        if unexpected_output:
+            sys.stderr.write(unexpected_output)
         return self._model
+
+    @staticmethod
+    def _filter_expected_bootstrap_output(output_text: str) -> str:
+        """Suppress expected bootstrap chatter while preserving actionable diagnostics."""
+        if not output_text:
+            return ""
+        kept_lines: list[str] = []
+        for line in output_text.splitlines(keepends=True):
+            stripped = line.lstrip()
+            if not stripped.strip():
+                continue
+            if all(token in stripped for token in _EXPECTED_WRAPPER_WARNING_TOKENS):
+                continue
+            if any(token in stripped for token in _EXPECTED_BOOTSTRAP_PROGRESS_TOKENS):
+                continue
+            kept_lines.append(line)
+        return "".join(kept_lines)
 
     @staticmethod
     def _filter_expected_wrapper_warning(stderr_text: str) -> str:
         """Suppress only the expected sentence-transformers wrapper bootstrap line."""
-        if not stderr_text:
-            return ""
-        kept_lines: list[str] = []
-        for line in stderr_text.splitlines(keepends=True):
-            if all(token in line for token in _EXPECTED_WRAPPER_WARNING_TOKENS):
-                continue
-            kept_lines.append(line)
-        return "".join(kept_lines)
+        return LocalEmbeddingProvider._filter_expected_bootstrap_output(stderr_text)
 
     def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""
