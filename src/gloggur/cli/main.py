@@ -125,6 +125,8 @@ def cli() -> None:
 
 _ACTIVE_JSON_CONFIG: GloggurConfig | None = None
 _ACTIVE_JSON_EMBEDDING: EmbeddingProvider | None = None
+WATCH_DAEMON_READY_TIMEOUT_SECONDS = 5.0
+WATCH_DAEMON_READY_POLL_INTERVAL_SECONDS = 0.05
 
 
 @cli.group()
@@ -2170,6 +2172,55 @@ def _terminate_watch_process(process: object) -> None:
         return
 
 
+def _fail_watch_daemon_startup(
+    *,
+    config: GloggurConfig,
+    pid_path: str,
+    log_file: str,
+    watch_path: str,
+    pid: int,
+    detail: str,
+    probable_cause: str,
+    process: object | None = None,
+) -> None:
+    """Persist a fail-closed daemon-startup state and raise a structured error."""
+    if process is not None:
+        _terminate_watch_process(process)
+    try:
+        _remove_file(pid_path)
+    except StorageIOError:
+        pass
+    try:
+        _write_watch_state(
+            config.watch_state_file,
+            {
+                "running": False,
+                "ready": False,
+                "ready_at": None,
+                "status": "failed_startup",
+                "pid": pid,
+                "watch_path": watch_path,
+                "stopped_at": utc_now_iso(),
+                "last_error": detail,
+            },
+        )
+    except StorageIOError:
+        pass
+    raise StorageIOError(
+        category="unknown_io_error",
+        operation="verify watch daemon startup",
+        path=log_file,
+        probable_cause=probable_cause,
+        remediation=[
+            "Inspect the watch log file for startup errors and traceback details.",
+            "Fix configuration/dependency issues and "
+            "rerun `gloggur watch start --daemon "
+            "--json`.",
+        ],
+        detail=detail,
+    )
+
+
 def _read_watch_state_for_status(path: str) -> dict[str, object]:
     """Read watch status state file with deterministic failure semantics."""
     if not os.path.exists(path):
@@ -2190,6 +2241,63 @@ def _read_watch_state_for_status(path: str) -> dict[str, object]:
         operation="read watch state file",
         path=path,
     )
+
+
+def _watch_status_ready(state: dict[str, object], *, running: bool) -> bool:
+    """Return whether watch state represents a backend that is ready to consume saves."""
+    if not running:
+        return False
+    raw_ready = state.get("ready")
+    if isinstance(raw_ready, bool):
+        return raw_ready
+    raw_status = state.get("status")
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+    return status in {"running", "running_with_errors"}
+
+
+def _watch_ready_state_payload(
+    state: dict[str, object],
+    *,
+    expected_pid: int,
+) -> dict[str, object] | None:
+    """Return a normalized ready-state payload for one watch daemon pid."""
+    try:
+        state_pid = int(state.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    if state_pid != expected_pid:
+        return None
+    if state.get("running") is not True or state.get("ready") is not True:
+        return None
+    ready_at = state.get("ready_at")
+    if not isinstance(ready_at, str) or not ready_at.strip():
+        return None
+    raw_status = state.get("status")
+    status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+    if status not in {"running", "running_with_errors"}:
+        return None
+    return dict(state)
+
+
+def _wait_for_watch_daemon_ready(
+    *,
+    state_path: str,
+    expected_pid: int,
+    timeout_seconds: float = WATCH_DAEMON_READY_TIMEOUT_SECONDS,
+    poll_interval: float = WATCH_DAEMON_READY_POLL_INTERVAL_SECONDS,
+) -> dict[str, object] | None:
+    """Wait for the daemon child to report a ready watch backend in its state file."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        ready_state = _watch_ready_state_payload(
+            load_watch_state(state_path),
+            expected_pid=expected_pid,
+        )
+        if ready_state is not None:
+            return ready_state
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(poll_interval)
 
 
 def _normalize_reason_counts(payload: object) -> dict[str, int]:
@@ -2274,8 +2382,11 @@ def _normalize_watch_status(running: bool, state: dict[str, object]) -> str:
     raw_status = state.get("status")
     status = raw_status if isinstance(raw_status, str) else ""
     normalized = status.strip().lower()
+    ready = _watch_status_ready(state, running=running)
 
     if running:
+        if not ready:
+            return "starting"
         failed_count, _normalized_reasons = _collect_watch_failure_signals(state)
         if failed_count > 0:
             return "running_with_errors"
@@ -2351,6 +2462,8 @@ def _watch_starting_state_payload(*, watch_path: str, pid: int) -> dict[str, obj
         "pid": pid,
         "watch_path": watch_path,
         "last_heartbeat": utc_now_iso(),
+        "ready": False,
+        "ready_at": None,
         # Clear stale failure/batch counters from prior daemon runs so status is
         # scoped to the current process lifecycle.
         "last_batch": {},
@@ -2613,6 +2726,9 @@ def _create_watch_status_payload(config: GloggurConfig) -> dict[str, object]:
     payload.update(state)
     payload.update(_build_watch_failure_contract(payload))
     payload["running"] = running
+    payload["ready"] = _watch_status_ready(payload, running=running)
+    ready_at = payload.get("ready_at")
+    payload["ready_at"] = str(ready_at) if payload["ready"] and ready_at is not None else None
     payload["status"] = _normalize_watch_status(running=running, state=payload)
     return _decorate_payload_with_security_metadata(payload, config=config)
 
@@ -6620,39 +6736,16 @@ def watch_start(
                 operation="spawn watch daemon process",
                 path=sys.executable,
             ) from exc
-        time.sleep(0.05)
         daemon_exit_code = process.poll()
         if daemon_exit_code is not None:
-            try:
-                _remove_file(pid_path)
-            except StorageIOError:
-                pass
-            try:
-                _write_watch_state(
-                    config.watch_state_file,
-                    {
-                        "running": False,
-                        "status": "failed_startup",
-                        "pid": process.pid,
-                        "watch_path": watch_path,
-                        "stopped_at": utc_now_iso(),
-                        "last_error": (f"watch daemon exited early with code {daemon_exit_code}"),
-                    },
-                )
-            except StorageIOError:
-                pass
-            raise StorageIOError(
-                category="unknown_io_error",
-                operation="verify watch daemon startup",
-                path=log_file,
-                probable_cause="Watch daemon exited before reporting a running state.",
-                remediation=[
-                    "Inspect the watch log file for startup errors and traceback details.",
-                    "Fix configuration/dependency issues and "
-                    "rerun `gloggur watch start --daemon "
-                    "--json`.",
-                ],
+            _fail_watch_daemon_startup(
+                config=config,
+                pid_path=pid_path,
+                log_file=log_file,
+                watch_path=watch_path,
+                pid=process.pid,
                 detail=f"RuntimeError: watch daemon exited early with code {daemon_exit_code}",
+                probable_cause="Watch daemon exited before reporting a running state.",
             )
         try:
             _write_pid_file(pid_path, process.pid)
@@ -6667,38 +6760,37 @@ def watch_start(
             except StorageIOError:
                 pass
             raise
-        daemon_exit_code = process.poll()
-        if daemon_exit_code is not None:
-            try:
-                _remove_file(pid_path)
-            except StorageIOError:
-                pass
-            try:
-                _write_watch_state(
-                    config.watch_state_file,
-                    {
-                        "running": False,
-                        "status": "failed_startup",
-                        "pid": process.pid,
-                        "watch_path": watch_path,
-                        "stopped_at": utc_now_iso(),
-                        "last_error": (f"watch daemon exited early with code {daemon_exit_code}"),
-                    },
+        ready_state = _wait_for_watch_daemon_ready(
+            state_path=config.watch_state_file,
+            expected_pid=process.pid,
+        )
+        if ready_state is None:
+            daemon_exit_code = process.poll()
+            if daemon_exit_code is not None:
+                _fail_watch_daemon_startup(
+                    config=config,
+                    pid_path=pid_path,
+                    log_file=log_file,
+                    watch_path=watch_path,
+                    pid=process.pid,
+                    detail=f"RuntimeError: watch daemon exited early with code {daemon_exit_code}",
+                    probable_cause="Watch daemon exited before reporting a stable running state.",
                 )
-            except StorageIOError:
-                pass
-            raise StorageIOError(
-                category="unknown_io_error",
-                operation="verify watch daemon startup",
-                path=log_file,
-                probable_cause="Watch daemon exited before reporting a stable running state.",
-                remediation=[
-                    "Inspect the watch log file for startup errors and traceback details.",
-                    "Fix configuration/dependency issues and "
-                    "rerun `gloggur watch start --daemon "
-                    "--json`.",
-                ],
-                detail=f"RuntimeError: watch daemon exited early with code {daemon_exit_code}",
+            _fail_watch_daemon_startup(
+                config=config,
+                pid_path=pid_path,
+                log_file=log_file,
+                watch_path=watch_path,
+                pid=process.pid,
+                detail=(
+                    "TimeoutError: watch daemon did not report a ready state "
+                    "before the startup timeout elapsed"
+                ),
+                probable_cause=(
+                    "Watch daemon started but did not arm its watcher backend "
+                    "within the startup timeout."
+                ),
+                process=process,
             )
         _emit(
             {
@@ -6707,6 +6799,8 @@ def watch_start(
                 "pid": process.pid,
                 "watch_path": watch_path,
                 "log_file": log_file,
+                "ready": True,
+                "ready_at": ready_state["ready_at"],
             },
             as_json,
         )

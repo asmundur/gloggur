@@ -297,14 +297,18 @@ class WatchService:
         watch_root = os.path.abspath(path)
         watch_target = watch_root if os.path.isdir(watch_root) else os.path.dirname(watch_root)
         watch_file = watch_root if os.path.isfile(watch_root) else None
+        ready = False
+        ready_at: str | None = None
 
         self._write_state(
             running=True,
             watch_path=watch_root,
             started_at=utc_now_iso(),
             last_heartbeat=utc_now_iso(),
+            ready=False,
+            ready_at=None,
             last_batch={},
-            status="running",
+            status="starting",
         )
 
         old_sigterm = signal.signal(signal.SIGTERM, self._handle_stop_signal)
@@ -313,12 +317,25 @@ class WatchService:
             for changes in self._watch_changes(watch_target):
                 if self._stop_event.is_set():
                     break
+                if not ready:
+                    ready = True
+                    ready_at = utc_now_iso()
+                    self._write_state(
+                        running=True,
+                        watch_path=watch_root,
+                        last_heartbeat=ready_at,
+                        ready=True,
+                        ready_at=ready_at,
+                        status="running_with_errors" if self._total_errors else "running",
+                    )
                 batch = self.process_batch(changes, watch_root=watch_root, watch_file=watch_file)
                 if self._is_noop_batch(batch):
                     heartbeat_payload = {
                         "running": True,
                         "watch_path": watch_root,
                         "last_heartbeat": utc_now_iso(),
+                        "ready": ready,
+                        "ready_at": ready_at,
                         "status": "running_with_errors" if self._total_errors else "running",
                     }
                     last_batch_contract = self._noop_last_batch_contract()
@@ -343,6 +360,8 @@ class WatchService:
                     running=True,
                     watch_path=watch_root,
                     last_heartbeat=utc_now_iso(),
+                    ready=ready,
+                    ready_at=ready_at,
                     last_batch=batch.as_dict(),
                     files_considered=self._total_files_considered,
                     indexed=self._total_indexed_files,
@@ -366,6 +385,8 @@ class WatchService:
                 watch_path=watch_root,
                 stopped_at=utc_now_iso(),
                 last_heartbeat=utc_now_iso(),
+                ready=ready,
+                ready_at=ready_at,
                 files_considered=self._total_files_considered,
                 indexed=self._total_indexed_files,
                 unchanged=self._total_skipped_files,
@@ -557,7 +578,8 @@ class WatchService:
             watch_target,
             debounce=max(0, int(self.config.watch_debounce_ms)),
             stop_event=self._stop_event,
-            yield_on_timeout=False,
+            yield_on_timeout=True,
+            rust_timeout=max(100, min(1000, int(self.config.watch_debounce_ms))),
         )
 
     def _process_deleted(

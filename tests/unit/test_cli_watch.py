@@ -26,6 +26,48 @@ def _parse_json_output(output: str) -> dict[str, object]:
     return json.loads(output[start:])
 
 
+def _install_immediate_watch_daemon_ready(
+    monkeypatch,
+    *,
+    ready_at: str = "2026-03-09T11:20:00+00:00",
+) -> str:
+    """Patch daemon readiness polling to report an armed watcher immediately."""
+
+    def fake_wait_for_watch_daemon_ready(
+        *,
+        state_path: str,
+        expected_pid: int,
+        timeout_seconds: float = 0.0,
+        poll_interval: float = 0.0,
+    ) -> dict[str, object]:
+        _ = timeout_seconds, poll_interval
+        state = json.loads(Path(state_path).read_text(encoding="utf8"))
+        assert isinstance(state, dict)
+        state.update(
+            {
+                "pid": expected_pid,
+                "running": True,
+                "ready": True,
+                "ready_at": ready_at,
+                "status": "running",
+            }
+        )
+        Path(state_path).write_text(json.dumps(state, indent=2), encoding="utf8")
+        return state
+
+    monkeypatch.setattr("gloggur.cli.main._wait_for_watch_daemon_ready", fake_wait_for_watch_daemon_ready)
+    return ready_at
+
+
+def _install_never_ready_watch_daemon(monkeypatch) -> None:
+    """Patch daemon readiness polling to simulate a child that never reports ready."""
+
+    monkeypatch.setattr(
+        "gloggur.cli.main._wait_for_watch_daemon_ready",
+        lambda **_kwargs: None,
+    )
+
+
 def test_watch_init_writes_default_config(tmp_path: Path, monkeypatch) -> None:
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
@@ -251,6 +293,7 @@ def test_watch_start_daemon_and_stop(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("gloggur.cli.main.subprocess.Popen", fake_popen)
     monkeypatch.setattr("gloggur.cli.main.os.kill", fake_kill)
     monkeypatch.setattr("gloggur.cli.main.time.sleep", lambda _seconds: None)
+    ready_at = _install_immediate_watch_daemon_ready(monkeypatch)
 
     started = runner.invoke(
         cli,
@@ -260,6 +303,8 @@ def test_watch_start_daemon_and_stop(tmp_path: Path, monkeypatch) -> None:
     started_payload = _parse_json_output(started.output)
     assert started_payload["started"] is True
     assert started_payload["pid"] == 4321
+    assert started_payload["ready"] is True
+    assert started_payload["ready_at"] == ready_at
     assert state["daemon_child_env"] == "1"
 
     alternate_cwd = tmp_path / "other-cwd"
@@ -270,6 +315,9 @@ def test_watch_start_daemon_and_stop(tmp_path: Path, monkeypatch) -> None:
     assert status_running.exit_code == 0
     status_payload = _parse_json_output(status_running.output)
     assert status_payload["running"] is True
+    assert status_payload["ready"] is True
+    assert status_payload["ready_at"] == ready_at
+    assert status_payload["status"] == "running"
     assert status_payload["state_file"] == str(tmp_path / ".gloggur-cache" / "watch_state.json")
 
     stopped = runner.invoke(cli, ["watch", "stop", "--config", str(config_file), "--json"])
@@ -330,6 +378,7 @@ def test_watch_start_daemon_child_ignores_own_pid(tmp_path: Path, monkeypatch) -
         lambda *args, **kwargs: DummyProcess(),
     )
     monkeypatch.setenv("GLOGGUR_WATCH_DAEMON_CHILD", "1")
+    ready_at = _install_immediate_watch_daemon_ready(monkeypatch)
 
     result = runner.invoke(cli, ["watch", "start", "--daemon", "--json"])
 
@@ -337,6 +386,8 @@ def test_watch_start_daemon_child_ignores_own_pid(tmp_path: Path, monkeypatch) -
     payload = _parse_json_output(result.output)
     assert payload["started"] is True
     assert payload["pid"] == 4321
+    assert payload["ready"] is True
+    assert payload["ready_at"] == ready_at
     assert running_pid_checks == [None]
 
 
@@ -388,12 +439,15 @@ def test_watch_start_daemon_forwards_allow_partial_to_child_command(
     )
     monkeypatch.setattr("gloggur.cli.main.time.sleep", lambda _seconds: None)
     monkeypatch.setattr("gloggur.cli.main.subprocess.Popen", fake_popen)
+    ready_at = _install_immediate_watch_daemon_ready(monkeypatch)
 
     result = runner.invoke(cli, ["watch", "start", "--daemon", "--allow-partial", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = _parse_json_output(result.output)
     assert payload["started"] is True
+    assert payload["ready"] is True
+    assert payload["ready_at"] == ready_at
     assert "--allow-partial" in child_cmd
 
 
@@ -465,13 +519,16 @@ def test_watch_start_daemon_resets_stale_last_batch_failure_state(
         "gloggur.cli.main.subprocess.Popen",
         lambda *args, **kwargs: DummyProcess(),
     )
+    ready_at = _install_immediate_watch_daemon_ready(monkeypatch)
 
     result = runner.invoke(cli, ["watch", "start", "--daemon", "--json"])
     assert result.exit_code == 0, result.output
 
     payload = json.loads(state_file.read_text(encoding="utf8"))
-    assert payload["status"] == "starting"
+    assert payload["status"] == "running"
     assert payload["running"] is True
+    assert payload["ready"] is True
+    assert payload["ready_at"] == ready_at
     assert payload["failed"] == 0
     assert payload["error_count"] == 0
     assert payload["failed_reasons"] == {}
@@ -1165,6 +1222,7 @@ def test_watch_start_json_reports_structured_post_init_daemon_exit(
         "gloggur.cli.main.subprocess.Popen",
         lambda *args, **kwargs: PostInitExitProcess(),
     )
+    _install_never_ready_watch_daemon(monkeypatch)
 
     result = runner.invoke(cli, ["watch", "start", "--daemon", "--json"])
 
@@ -1244,6 +1302,7 @@ def test_watch_start_json_ignores_cleanup_failures_after_post_init_daemon_exit(
         "gloggur.cli.main.subprocess.Popen",
         lambda *args, **kwargs: PostInitExitProcess(),
     )
+    _install_never_ready_watch_daemon(monkeypatch)
     monkeypatch.setattr(
         "gloggur.cli.main._remove_file",
         lambda _path: (_ for _ in ()).throw(cleanup_error("delete watch runtime file", pid_file)),
@@ -1264,6 +1323,76 @@ def test_watch_start_json_ignores_cleanup_failures_after_post_init_daemon_exit(
     assert error["operation"] == "verify watch daemon startup"
     assert str(error["path"]) == str(log_file)
     assert "exited early with code 3" in str(error["detail"]).lower()
+
+
+def test_watch_start_json_reports_structured_daemon_readiness_timeout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pid_file = tmp_path / "watch.pid"
+    state_file = tmp_path / "watch_state.json"
+    log_file = tmp_path / "logs" / "watch.log"
+    config = GloggurConfig(
+        watch_path=str(repo),
+        watch_mode="daemon",
+        watch_pid_file=str(pid_file),
+        watch_state_file=str(state_file),
+        watch_log_file=str(log_file),
+    )
+
+    class RunningProcess:
+        pid = 6795
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    kill_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_runtime",
+        lambda **_kwargs: (config, object(), object()),
+    )
+    monkeypatch.setattr("gloggur.cli.main._read_pid_file", lambda _path: None)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: False)
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_embedding_provider_for_command",
+        lambda _cfg: None,
+    )
+    monkeypatch.setattr(
+        "gloggur.cli.main._create_watch_service",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr("gloggur.cli.main.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "gloggur.cli.main.subprocess.Popen",
+        lambda *args, **kwargs: RunningProcess(),
+    )
+    monkeypatch.setattr(
+        "gloggur.cli.main.os.kill",
+        lambda pid, sig: kill_calls.append((pid, sig)),
+    )
+    _install_never_ready_watch_daemon(monkeypatch)
+
+    result = runner.invoke(cli, ["watch", "start", "--daemon", "--json"])
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["type"] == "io_failure"
+    assert error["operation"] == "verify watch daemon startup"
+    assert str(error["path"]) == str(log_file)
+    assert "did not report a ready state" in str(error["detail"]).lower()
+    assert kill_calls == [(6795, signal.SIGTERM)]
+    state_payload = json.loads(state_file.read_text(encoding="utf8"))
+    assert state_payload["running"] is False
+    assert state_payload["ready"] is False
+    assert state_payload["ready_at"] is None
+    assert state_payload["status"] == "failed_startup"
 
 
 def test_watch_stop_json_reports_structured_signal_failure(
@@ -1375,6 +1504,43 @@ def test_watch_status_json_reports_malformed_state_file(
     assert str(error["path"]) == str(state_file)
     assert "jsondecodeerror" in str(error["detail"]).lower()
     assert "Traceback (most recent call last)" not in result.output
+
+
+def test_watch_status_json_exposes_starting_ready_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = CliRunner()
+    pid_file = tmp_path / "watch.pid"
+    state_file = tmp_path / "watch_state.json"
+    pid_file.write_text("4242\n", encoding="utf8")
+    state_file.write_text(
+        json.dumps(
+            {
+                "status": "starting",
+                "running": True,
+                "ready": False,
+                "ready_at": None,
+                "pid": 4242,
+            }
+        ),
+        encoding="utf8",
+    )
+    config = GloggurConfig(
+        watch_pid_file=str(pid_file),
+        watch_state_file=str(state_file),
+    )
+    monkeypatch.setattr("gloggur.cli.main._load_config", lambda _path: config)
+    monkeypatch.setattr("gloggur.cli.main.is_process_running", lambda _pid: True)
+
+    result = runner.invoke(cli, ["watch", "status", "--json"])
+
+    assert result.exit_code == 0
+    payload = _parse_json_output(result.output)
+    assert payload["running"] is True
+    assert payload["ready"] is False
+    assert payload["ready_at"] is None
+    assert payload["status"] == "starting"
 
 
 def test_watch_status_json_synthesizes_inconsistent_failure_contract(

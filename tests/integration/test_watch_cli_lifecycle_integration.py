@@ -105,24 +105,10 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
         assert started_payload["started"] is True
         started_pid = int(started_payload["pid"])
         assert started_pid > 0
-
-        running_payload: dict[str, object] | None = None
-        for _ in range(50):
-            status = _run_cli(
-                ["watch", "status", "--config", str(config_path), "--json"],
-                env,
-                timeout=30,
-            )
-            assert status.returncode == 0, f"{status.stderr}\n{status.stdout}"
-            payload = _parse_json_payload(status.stdout)
-            if payload.get("running") is True:
-                running_payload = payload
-                break
-            time.sleep(0.1)
-        assert running_payload is not None, "watch daemon never reached running state"
-        assert running_payload["state_file"] == str(state_file)
-        assert running_payload["log_file"] == str(log_file)
-        assert Path(str(running_payload["state_file"])).exists()
+        assert started_payload["ready"] is True
+        assert started_payload.get("ready_at")
+        assert started_payload["log_file"] == str(log_file)
+        assert state_file.exists()
         assert pid_file.exists()
 
         updated_phrase = "after watch lifecycle update phrase"
@@ -146,8 +132,13 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
             status_again_payload = _parse_json_payload(status_again.stdout)
             last_status_again_payload = status_again_payload
             assert status_again_payload.get("running") is True
+            assert status_again_payload.get("ready") is True
             assert int(status_again_payload.get("pid", 0)) == started_pid
-            search = _run_cli(["search", updated_phrase, "--json", "--top-k", "5"], env, timeout=30)
+            search = _run_cli(
+                ["search", updated_phrase, "--config", str(config_path), "--json", "--top-k", "5"],
+                env,
+                timeout=30,
+            )
             search_payload = _parse_json_payload(search.stdout)
             last_search_payload = search_payload
             if search.returncode != 0:
