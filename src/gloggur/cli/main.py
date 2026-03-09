@@ -1718,10 +1718,13 @@ def _build_search_health_snapshot(
 
 
 def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManager) -> None:
-    """Persist last-success resume fingerprint/timestamp when index state is reusable."""
+    """Persist last-success markers when index success proves the cache is reusable."""
     metadata = cache.get_index_metadata()
     if metadata is None:
         return
+    stored_fingerprint = cache.get_last_success_resume_fingerprint()
+    stored_resume_at = cache.get_last_success_resume_at()
+    stored_tool_version = cache.get_last_success_tool_version()
     resume_contract = _build_resume_contract(
         metadata=metadata,
         build_state=None,
@@ -1730,21 +1733,27 @@ def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManage
         cached_profile=cache.get_index_profile(),
         reset_reason=cache.last_reset_reason,
         needs_reindex=False,
-        last_success_resume_fingerprint=cache.get_last_success_resume_fingerprint(),
-        last_success_resume_at=cache.get_last_success_resume_at(),
+        last_success_resume_fingerprint=stored_fingerprint,
+        last_success_resume_at=stored_resume_at,
         tool_version=GLOGGUR_VERSION,
-        last_success_tool_version=cache.get_last_success_tool_version(),
+        last_success_tool_version=stored_tool_version,
     )
-    if resume_contract["resume_decision"] != "resume_ok":
+    reason_codes = resume_contract.get("resume_reason_codes")
+    if not isinstance(reason_codes, list):
+        return
+    pure_tool_version_drift = reason_codes == ["tool_version_changed"]
+    if resume_contract["resume_decision"] != "resume_ok" and not pure_tool_version_drift:
         return
     fingerprint = resume_contract["expected_resume_fingerprint"]
     if not isinstance(fingerprint, str):
         return
-    # Skip all writes when the fingerprint is unchanged — an unchanged re-index must not
-    # advance last_success_resume_at (or any other stored state), because doing so would
-    # change observable session state even when no indexed content has changed.
-    if fingerprint == cache.get_last_success_resume_fingerprint():
+    if fingerprint == stored_fingerprint:
+        if stored_tool_version == GLOGGUR_VERSION:
+            return
+        cache.set_last_success_tool_version(GLOGGUR_VERSION)
         return
+    # Preserve unchanged re-index idempotence: if the fingerprint already matches, only
+    # repair the tool-version marker and avoid advancing the last-success timestamp.
     cache.set_last_success_resume_fingerprint(fingerprint)
     cache.set_last_success_resume_at(metadata.last_updated.isoformat())
     cache.set_last_success_tool_version(GLOGGUR_VERSION)

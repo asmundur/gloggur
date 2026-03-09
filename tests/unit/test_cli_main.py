@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1518,6 +1519,160 @@ def test_persist_last_success_resume_state_no_change_reindex_is_idempotent() -> 
     ), f"Unchanged re-index must not rewrite any stored state, got writes: {writes}"
     assert cache._fingerprint == first_fp, "expected_resume_fingerprint must be stable"
     assert cache._at == first_at, "last_success_resume_at must not advance on unchanged re-index"
+
+
+def test_persist_last_success_resume_state_repairs_only_tool_version_marker() -> None:
+    """Pure tool-version drift with a matching fingerprint should update only the version marker."""
+
+    writes: list[tuple[str, str]] = []
+    metadata = IndexMetadata(
+        version="1",
+        total_symbols=5,
+        indexed_files=2,
+        last_updated=datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc),
+    )
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir="/tmp/cache",
+    )
+    expected_fingerprint = _build_resume_contract(
+        metadata=metadata,
+        build_state=None,
+        schema_version="2",
+        expected_profile=config.embedding_profile(),
+        cached_profile=config.embedding_profile(),
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+        tool_version=cli_main.GLOGGUR_VERSION,
+    )["expected_resume_fingerprint"]
+    assert isinstance(expected_fingerprint, str)
+    original_resume_at = "2026-03-01T00:00:00+00:00"
+
+    class FakeCache:
+        last_reset_reason = None
+        _fingerprint = expected_fingerprint
+        _at = original_resume_at
+        _tool_version = "0.0.1"
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return metadata
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return config.embedding_profile()
+
+        def get_last_success_resume_fingerprint(self) -> str:
+            return self._fingerprint
+
+        def set_last_success_resume_fingerprint(self, fp: str) -> None:
+            writes.append(("fingerprint", fp))
+            self._fingerprint = fp
+
+        def get_last_success_resume_at(self) -> str:
+            return self._at
+
+        def set_last_success_resume_at(self, ts: str) -> None:
+            writes.append(("at", ts))
+            self._at = ts
+
+        def get_last_success_tool_version(self) -> str:
+            return self._tool_version
+
+        def set_last_success_tool_version(self, v: str) -> None:
+            writes.append(("tool_version", v))
+            self._tool_version = v
+
+    cache = FakeCache()
+
+    _persist_last_success_resume_state(config, cache)
+
+    assert writes == [("tool_version", cli_main.GLOGGUR_VERSION)]
+    assert cache._fingerprint == expected_fingerprint
+    assert cache._at == original_resume_at
+
+
+def test_persist_last_success_resume_state_repairs_tool_version_drift_with_stale_fingerprint() -> None:
+    """Pure tool-version drift with stale/missing last-success state should repair all markers."""
+
+    writes: list[tuple[str, str]] = []
+    metadata = IndexMetadata(
+        version="1",
+        total_symbols=5,
+        indexed_files=2,
+        last_updated=datetime(2026, 3, 9, 12, 0, tzinfo=timezone.utc),
+    )
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir="/tmp/cache",
+    )
+    expected_fingerprint = _build_resume_contract(
+        metadata=metadata,
+        build_state=None,
+        schema_version="2",
+        expected_profile=config.embedding_profile(),
+        cached_profile=config.embedding_profile(),
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+        tool_version=cli_main.GLOGGUR_VERSION,
+    )["expected_resume_fingerprint"]
+    assert isinstance(expected_fingerprint, str)
+
+    class FakeCache:
+        last_reset_reason = None
+        _fingerprint = "stale-fingerprint"
+        _at = "2026-03-01T00:00:00+00:00"
+        _tool_version = "0.0.1"
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return metadata
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return config.embedding_profile()
+
+        def get_last_success_resume_fingerprint(self) -> str:
+            return self._fingerprint
+
+        def set_last_success_resume_fingerprint(self, fp: str) -> None:
+            writes.append(("fingerprint", fp))
+            self._fingerprint = fp
+
+        def get_last_success_resume_at(self) -> str:
+            return self._at
+
+        def set_last_success_resume_at(self, ts: str) -> None:
+            writes.append(("at", ts))
+            self._at = ts
+
+        def get_last_success_tool_version(self) -> str:
+            return self._tool_version
+
+        def set_last_success_tool_version(self, v: str) -> None:
+            writes.append(("tool_version", v))
+            self._tool_version = v
+
+    cache = FakeCache()
+
+    _persist_last_success_resume_state(config, cache)
+
+    assert writes == [
+        ("fingerprint", expected_fingerprint),
+        ("at", metadata.last_updated.isoformat()),
+        ("tool_version", cli_main.GLOGGUR_VERSION),
+    ]
+    assert cache._fingerprint == expected_fingerprint
+    assert cache._at == metadata.last_updated.isoformat()
+    assert cache._tool_version == cli_main.GLOGGUR_VERSION
 
 
 def test_build_status_payload_requires_reindex_on_tool_version_drift() -> None:

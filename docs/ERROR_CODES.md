@@ -452,8 +452,8 @@ Fields:
 - `tool_version_changed`
   - Command(s): `status`, `search`.
   - Meaning: current CLI/tool version differs from the last successful indexed version.
-  - Retryability: retry after rebuilding with the current tool version.
-  - Operator action: run a full reindex before trusting cached retrieval.
+  - Retryability: retry after a successful `gloggur index . --json` run with the current tool version.
+  - Operator action: rerun `gloggur index . --json` successfully, then recheck `status --json`.
 - `tool_version_changed_override`
   - Command(s): `status`, `search`.
   - Meaning: tool-version drift override is active and resume was allowed explicitly.

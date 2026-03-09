@@ -269,6 +269,74 @@ def test_resume_requires_reindex_when_last_success_tool_version_is_tampered() ->
         assert metadata["resume_decision"] == "reindex_required"
 
 
+def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_marker_drifts() -> None:
+    """A successful no-op reindex should repair marker-only tool-version drift."""
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        first_index_run = _run_cli(["index", str(repo), "--json"], env)
+        assert first_index_run.returncode == 0, f"{first_index_run.stderr}\n{first_index_run.stdout}"
+
+        status_before_run = _run_cli(["status", "--json"], env)
+        assert status_before_run.returncode == 0, (
+            f"{status_before_run.stderr}\n{status_before_run.stdout}"
+        )
+        status_before_payload = _parse_json_payload(status_before_run.stdout)
+        assert status_before_payload["resume_decision"] == "resume_ok"
+        assert status_before_payload["resume_reason_codes"] == []
+        first_fingerprint = status_before_payload["last_success_resume_fingerprint"]
+        first_resume_at = status_before_payload["last_success_resume_at"]
+        assert isinstance(first_fingerprint, str)
+        assert isinstance(first_resume_at, str)
+
+        _set_cache_meta(cache_dir, "last_success_tool_version", "tampered-version")
+
+        status_drift_run = _run_cli(["status", "--json"], env)
+        assert status_drift_run.returncode == 0, (
+            f"{status_drift_run.stderr}\n{status_drift_run.stdout}"
+        )
+        status_drift_payload = _parse_json_payload(status_drift_run.stdout)
+        assert status_drift_payload["resume_decision"] == "reindex_required"
+        assert status_drift_payload["resume_reason_codes"] == ["tool_version_changed"]
+        assert status_drift_payload["last_success_resume_fingerprint"] == first_fingerprint
+        assert status_drift_payload["last_success_resume_at"] == first_resume_at
+        assert status_drift_payload["last_success_tool_version_match"] is False
+
+        second_index_run = _run_cli(["index", str(repo), "--json"], env)
+        assert second_index_run.returncode == 0, (
+            f"{second_index_run.stderr}\n{second_index_run.stdout}"
+        )
+        second_index_payload = _parse_json_payload(second_index_run.stdout)
+        assert int(second_index_payload["indexed_files"]) == 0
+        assert int(second_index_payload["skipped_files"]) == 1
+        assert int(second_index_payload["failed"]) == 0
+
+        status_after_run = _run_cli(["status", "--json"], env)
+        assert status_after_run.returncode == 0, (
+            f"{status_after_run.stderr}\n{status_after_run.stdout}"
+        )
+        status_after_payload = _parse_json_payload(status_after_run.stdout)
+        assert status_after_payload["resume_decision"] == "resume_ok"
+        assert status_after_payload["resume_reason_codes"] == []
+        assert status_after_payload["resume_fingerprint_match"] is True
+        assert status_after_payload["last_success_resume_fingerprint_match"] is True
+        assert status_after_payload["last_success_resume_fingerprint"] == first_fingerprint
+        assert status_after_payload["expected_resume_fingerprint"] == first_fingerprint
+        assert status_after_payload["last_success_resume_at"] == first_resume_at
+        assert status_after_payload["last_success_tool_version"] == status_after_payload[
+            "tool_version"
+        ]
+        assert status_after_payload["last_success_tool_version_match"] is True
+
+
 def test_resume_allows_explicit_tool_version_drift_override() -> None:
     """Explicit override should allow resume/search while keeping drift diagnostics machine-readable."""
     source = TestFixtures.create_sample_python_file()
