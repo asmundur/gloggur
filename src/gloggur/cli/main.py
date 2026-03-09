@@ -4064,6 +4064,8 @@ def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) 
     """Resolve router repo root from indexed symbol paths with cwd fallback."""
     try:
         file_paths = metadata_store.sample_symbol_file_paths(limit=64)
+    except StorageIOError:
+        raise
     except Exception:
         return fallback
     if not file_paths:
@@ -4091,6 +4093,80 @@ def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) 
     if all(Path(item) == common for item in normalized_paths):
         common = common.parent
     return common if str(common).strip() else fallback
+
+
+def _build_lazy_searcher_factory(
+    *,
+    config: GloggurConfig,
+    vector_store: VectorStore,
+    metadata_store: MetadataStore,
+    cache: CacheManager,
+    allow_tool_version_drift: bool,
+) -> Callable[[], tuple[HybridSearch | None, str | None]]:
+    """Build a cached searcher loader so semantic init only happens on demand."""
+    state: dict[str, object] = {
+        "initialized": False,
+        "searcher": None,
+        "error": None,
+    }
+
+    def _factory() -> tuple[HybridSearch | None, str | None]:
+        """Initialize HybridSearch once and memoize the result for semantic fallback."""
+        if bool(state["initialized"]):
+            return (
+                state["searcher"] if isinstance(state["searcher"], HybridSearch) else None,
+                state["error"] if isinstance(state["error"], str) else None,
+            )
+
+        state["initialized"] = True
+        try:
+            embedding = _create_embedding_provider_for_command(
+                config,
+                require_provider=False,
+            )
+        except EmbeddingProviderError as exc:
+            state["error"] = format_embedding_error_message(exc)
+            return None, state["error"]
+
+        if embedding is None:
+            return None, None
+
+        searcher = HybridSearch(
+            embedding,
+            vector_store,
+            metadata_store,
+            health_evaluator=lambda: _build_search_health_snapshot(
+                config,
+                cache,
+                entrypoint="hybrid_search_legacy",
+                contract_version="legacy",
+                allow_tool_version_drift=allow_tool_version_drift,
+            ),
+        )
+        state["searcher"] = searcher
+        return searcher, None
+
+    return _factory
+
+
+def _apply_search_compact_mode(payload: dict[str, object]) -> None:
+    """Trim search output for agent-oriented compact JSON mode."""
+    hits = payload.get("hits")
+    if isinstance(hits, list):
+        compact_hits: list[object] = []
+        for item in hits[:8]:
+            if isinstance(item, dict):
+                compact_item = dict(item)
+                snippet = compact_item.get("snippet")
+                if isinstance(snippet, str) and len(snippet) > 160:
+                    compact_item["snippet"] = snippet[:160].rstrip() + " ..."
+                compact_hits.append(compact_item)
+                continue
+            compact_hits.append(item)
+        payload["hits"] = compact_hits
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            summary["hits"] = len(compact_hits)
 
 
 def _resolve_search_path_filter_for_routing(*, repo_root: Path, raw_path: str | None) -> str | None:
@@ -4375,6 +4451,12 @@ def _search_with_bounded_retry(
     default=False,
     help="Include debug payload with backend timings/scores/thresholds.",
 )
+@click.option(
+    "--compact",
+    is_flag=True,
+    default=False,
+    help="Emit compact agent-oriented JSON with shorter hits and less summary metadata.",
+)
 @click.option("--kind", type=str, default=None)
 @click.option("--file", "file_path", type=str, default=None)
 @click.option(
@@ -4473,6 +4555,7 @@ def search(
     max_snippets: int | None,
     time_budget_ms: int | None,
     debug_router: bool,
+    compact: bool,
     kind: str | None,
     file_path: str | None,
     search_mode: str,
@@ -4557,30 +4640,6 @@ def search(
         raise click.exceptions.Exit(1)
 
     metadata_store = _create_metadata_store(config)
-    searcher: HybridSearch | None = None
-    semantic_init_error: str | None = None
-    try:
-        embedding = _create_embedding_provider_for_command(
-            config,
-            require_provider=False,
-        )
-    except EmbeddingProviderError as exc:
-        embedding = None
-        semantic_init_error = format_embedding_error_message(exc)
-    if embedding is not None:
-        searcher = HybridSearch(
-            embedding,
-            vector_store,
-            metadata_store,
-            health_evaluator=lambda: _build_search_health_snapshot(
-                config,
-                cache,
-                entrypoint="hybrid_search_legacy",
-                contract_version="legacy",
-                allow_tool_version_drift=allow_tool_version_drift,
-            ),
-        )
-
     router_repo_root = _resolve_router_repo_root(
         metadata_store=metadata_store,
         fallback=Path.cwd(),
@@ -4592,10 +4651,17 @@ def search(
     router_config = load_search_router_config(router_repo_root)
     router = SearchRouter(
         repo_root=router_repo_root,
-        searcher=searcher,
+        searcher=None,
         metadata_store=metadata_store,
         symbol_store=symbol_store,
         config=router_config,
+        searcher_factory=_build_lazy_searcher_factory(
+            config=config,
+            vector_store=vector_store,
+            metadata_store=metadata_store,
+            cache=cache,
+            allow_tool_version_drift=allow_tool_version_drift,
+        ),
     )
     routing_path_prefix = _resolve_search_path_filter_for_routing(
         repo_root=router_repo_root,
@@ -4627,29 +4693,30 @@ def search(
         for code in health["warning_codes"]:
             if isinstance(code, str) and code and code not in merged_warning_codes:
                 merged_warning_codes.append(code)
-        summary_payload.setdefault("query_mode", query_mode)
-        summary_payload.setdefault("search_mode", normalized_search_mode)
-        summary_payload.setdefault("needs_reindex", health["needs_reindex"])
-        summary_payload.setdefault("reindex_reason", reindex_reason)
-        summary_payload.setdefault("expected_index_profile", health["expected_index_profile"])
-        summary_payload.setdefault("cached_index_profile", health["cached_index_profile"])
-        summary_payload.setdefault("entrypoint", health["entrypoint"])
-        summary_payload.setdefault("contract_version", health["contract_version"])
         summary_payload["warning_codes"] = merged_warning_codes
-        summary_payload.setdefault("semantic_search_allowed", health["semantic_search_allowed"])
-        summary_payload.setdefault("search_integrity", health["search_integrity"])
-        # Preserve legacy option observability as non-routing summary fields.
-        summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
-        summary_payload.setdefault("legacy_kind_filter", kind)
-        summary_payload.setdefault("legacy_context_radius", context_radius)
-        summary_payload.setdefault("legacy_top_k", top_k)
-        summary_payload.setdefault("legacy_confidence_threshold", confidence_threshold)
-        summary_payload.setdefault("legacy_max_requery_attempts", max_requery_attempts)
-        summary_payload.setdefault("legacy_retry_enabled", not disable_bounded_requery)
-        summary_payload.setdefault("file_filter", resolved_path_prefix)
-        summary_payload.setdefault("tool_version", GLOGGUR_VERSION)
-        for key, value in resume_contract.items():
-            summary_payload.setdefault(str(key), value)
+        if not compact or debug_router:
+            summary_payload.setdefault("query_mode", query_mode)
+            summary_payload.setdefault("search_mode", normalized_search_mode)
+            summary_payload.setdefault("needs_reindex", health["needs_reindex"])
+            summary_payload.setdefault("reindex_reason", reindex_reason)
+            summary_payload.setdefault("expected_index_profile", health["expected_index_profile"])
+            summary_payload.setdefault("cached_index_profile", health["cached_index_profile"])
+            summary_payload.setdefault("entrypoint", health["entrypoint"])
+            summary_payload.setdefault("contract_version", health["contract_version"])
+            summary_payload.setdefault("semantic_search_allowed", health["semantic_search_allowed"])
+            summary_payload.setdefault("search_integrity", health["search_integrity"])
+            # Preserve legacy option observability as non-routing summary fields.
+            summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
+            summary_payload.setdefault("legacy_kind_filter", kind)
+            summary_payload.setdefault("legacy_context_radius", context_radius)
+            summary_payload.setdefault("legacy_top_k", top_k)
+            summary_payload.setdefault("legacy_confidence_threshold", confidence_threshold)
+            summary_payload.setdefault("legacy_max_requery_attempts", max_requery_attempts)
+            summary_payload.setdefault("legacy_retry_enabled", not disable_bounded_requery)
+            summary_payload.setdefault("file_filter", resolved_path_prefix)
+            summary_payload.setdefault("tool_version", GLOGGUR_VERSION)
+            for key, value in resume_contract.items():
+                summary_payload.setdefault(str(key), value)
 
     if debug_router:
         debug_payload = payload.get("debug")
@@ -4659,12 +4726,6 @@ def search(
         debug_payload["resume_contract"] = resume_contract
         debug_payload["search_health"] = health
         debug_payload["tool_version"] = GLOGGUR_VERSION
-        if semantic_init_error is not None:
-            backend_errors = debug_payload.get("backend_errors")
-            if not isinstance(backend_errors, dict):
-                backend_errors = {}
-                debug_payload["backend_errors"] = backend_errors
-            backend_errors.setdefault("semantic_init", semantic_init_error)
 
     debug_info = pack.debug or {}
     backend_scores = debug_info.get("backend_scores")
@@ -4680,6 +4741,9 @@ def search(
             "Search router backends failed to return usable evidence.",
             error_code="search_router_backends_failed",
         )
+
+    if compact:
+        _apply_search_compact_mode(payload)
 
     if stream and as_json:
         hits_payload = payload.get("hits")

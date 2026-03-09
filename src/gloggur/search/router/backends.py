@@ -21,6 +21,32 @@ from gloggur.search.router.types import (
 from gloggur.symbol_index.models import SymbolOccurrence
 from gloggur.symbol_index.store import SymbolIndexStore
 
+_SOURCE_CODE_EXTENSIONS = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".h",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".m",
+    ".php",
+    ".py",
+    ".rb",
+    ".rs",
+    ".swift",
+    ".ts",
+    ".tsx",
+}
+_DOC_NAME_MARKERS = ("readme", "changelog", "changes", "history", "news", "release-notes")
+_DEFINITION_LINE_RE = re.compile(
+    r"^\s*(?:async\s+def|def|class|function|func|interface|struct|trait|enum)\b"
+)
+
 
 def _normalize_path(path: str) -> str:
     return path.replace("\\", "/").rstrip("/")
@@ -157,6 +183,59 @@ def _path_allowed(
     if _matches_exclude_globs(path, execution_hints.exclude_globs, repo_root=repo_root):
         return False
     return True
+
+
+def _is_source_code_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    return Path(lowered).suffix in _SOURCE_CODE_EXTENSIONS
+
+
+def _is_docs_or_changelog_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    basename = Path(lowered).name
+    stem = Path(lowered).stem
+    if "/docs/" in lowered or "/doc/" in lowered:
+        return True
+    if basename.endswith((".md", ".rst", ".txt")) and stem in _DOC_NAME_MARKERS:
+        return True
+    return any(marker in stem for marker in _DOC_NAME_MARKERS)
+
+
+def _is_test_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    basename = Path(lowered).name
+    return (
+        "/test/" in lowered
+        or "/tests/" in lowered
+        or basename.startswith("test_")
+        or basename.endswith("_test.py")
+        or ".spec." in basename
+    )
+
+
+def _exact_ranking_adjustment(path: str, matched_line: str) -> float:
+    adjustment = 0.0
+    if _DEFINITION_LINE_RE.search(matched_line):
+        adjustment += 0.10
+    if _is_source_code_path(path):
+        adjustment += 0.08
+    if _is_docs_or_changelog_path(path):
+        adjustment -= 0.08
+    if _is_test_path(path):
+        adjustment -= 0.05
+    return adjustment
+
+
+def _sorted_exact_hits(
+    hit_map: dict[tuple[str, int, int], BackendHit],
+    top_k: int,
+) -> tuple[BackendHit, ...]:
+    return tuple(
+        sorted(
+            hit_map.values(),
+            key=lambda item: (-item.raw_score, item.path, item.start_line),
+        )[:top_k]
+    )
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -350,7 +429,13 @@ def _run_exact_backend_fallback_scan(
                     max_chars=config.max_snippet_chars,
                 )
                 bonus = 0.05 if pattern in hints.literals else 0.0
-                score = max(0.0, min(1.0, base_score + bonus))
+                score = max(
+                    0.0,
+                    min(
+                        1.0,
+                        base_score + bonus + _exact_ranking_adjustment(absolute_path, source_line),
+                    ),
+                )
                 existing = hit_map.get(key)
                 byte_span = _line_byte_span(
                     byte_span_cache,
@@ -372,12 +457,7 @@ def _run_exact_backend_fallback_scan(
                 if existing is None or candidate.raw_score > existing.raw_score:
                     hit_map[key] = candidate
                 break
-    return tuple(
-        sorted(
-            hit_map.values(),
-            key=lambda item: (-item.raw_score, item.path, item.start_line),
-        )[:top_k]
-    )
+    return _sorted_exact_hits(hit_map, top_k)
 
 
 def run_exact_backend(
@@ -521,7 +601,13 @@ def run_exact_backend(
                 max_chars=config.max_snippet_chars,
             )
             bonus = 0.05 if pattern in hints.literals else 0.0
-            score = max(0.0, min(1.0, base_score + bonus))
+            score = max(
+                0.0,
+                min(
+                    1.0,
+                    base_score + bonus + _exact_ranking_adjustment(absolute_path, parts[2].strip()),
+                ),
+            )
             existing = hit_map.get(key)
             byte_span = _line_byte_span(
                 byte_span_cache,
@@ -564,12 +650,7 @@ def run_exact_backend(
                 commands=tuple(cmd_fragments),
             )
 
-    hits = tuple(
-        sorted(
-            hit_map.values(),
-            key=lambda item: (-item.raw_score, item.path, item.start_line),
-        )[:top_k]
-    )
+    hits = _sorted_exact_hits(hit_map, top_k)
     return BackendResult(
         name="exact",
         hits=hits,

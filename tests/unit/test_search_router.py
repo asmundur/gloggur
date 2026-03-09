@@ -28,6 +28,29 @@ def test_extract_query_hints_keeps_short_quoted_identifiers() -> None:
     assert "id" in hints.identifier_tokens
 
 
+def test_extract_query_hints_strips_declaration_prefixes() -> None:
+    hints = extract_query_hints("def escape_leading_slashes")
+
+    assert hints.declaration_terms == ("def",)
+    assert hints.query_kind == "declaration"
+    assert "escape_leading_slashes" in hints.symbols
+    assert "def" not in hints.symbols
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_kind"),
+    [
+        ("Session.mount", "identifier"),
+        ("url_has_allowed_host_and_scheme", "identifier"),
+        ("after_request order", "mixed"),
+    ],
+)
+def test_extract_query_hints_classifies_query_kinds(query: str, expected_kind: str) -> None:
+    hints = extract_query_hints(query)
+
+    assert hints.query_kind == expected_kind
+
+
 def test_search_router_auto_prefers_exact_on_quality_tie(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -87,6 +110,212 @@ def test_search_router_auto_prefers_exact_on_quality_tie(
     assert pack.summary["strategy"] == "exact"
     assert pack.hits
     assert pack.hits[0].path == "src/exact.py"
+
+
+def test_search_router_identifier_queries_stay_on_non_semantic_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    call_order: list[str] = []
+
+    def _exact_backend(**kwargs):
+        call_order.append("exact")
+        execution_hints = kwargs["execution_hints"]
+        assert execution_hints.fixed_string is True
+        return BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/session.py",
+                    start_line=12,
+                    end_line=12,
+                    snippet="def mount(self, prefix, adapter):",
+                    raw_score=0.97,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        )
+
+    def _symbol_backend(**_kwargs):
+        call_order.append("symbol")
+        return BackendResult(name="symbol", hits=(), timing_ms=3)
+
+    def _semantic_backend(**_kwargs):
+        raise AssertionError("semantic fallback should not run for decisive identifier queries")
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
+    monkeypatch.setattr("gloggur.search.router.engine.run_symbol_backend", _symbol_backend)
+    monkeypatch.setattr("gloggur.search.router.engine.run_semantic_backend", _semantic_backend)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.95 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(query="Session.mount", mode="auto")
+
+    assert call_order == ["exact", "symbol"]
+    assert pack.summary["query_kind"] == "identifier"
+    assert pack.summary["strategy"] == "exact"
+    assert pack.summary["decisive"] is True
+    assert pack.summary["next_action"] == "open_hit_1"
+
+
+def test_search_router_declaration_queries_can_choose_symbol_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(name="exact", hits=(), timing_ms=3),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(
+            name="symbol",
+            hits=(
+                BackendHit(
+                    backend="symbol",
+                    path="src/django/utils/http.py",
+                    start_line=42,
+                    end_line=42,
+                    snippet="def escape_leading_slashes(url):",
+                    raw_score=0.99,
+                    tags=("symbol_def",),
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.97 if result.name == "symbol" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(query="def escape_leading_slashes", mode="auto")
+
+    assert pack.summary["query_kind"] == "declaration"
+    assert pack.summary["strategy"] == "symbol"
+    assert pack.summary["decisive"] is True
+    assert pack.summary["next_action"] == "open_hit_1"
+
+
+def test_search_router_mixed_query_suggests_path_narrowing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/flask/app.py",
+                    start_line=110,
+                    end_line=110,
+                    snippet="ctx._after_request_functions.append(func)",
+                    raw_score=0.90,
+                    tags=("literal_match",),
+                ),
+                BackendHit(
+                    backend="exact",
+                    path="src/flask/app.py",
+                    start_line=144,
+                    end_line=144,
+                    snippet="for func in ctx._after_request_functions:",
+                    raw_score=0.88,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=5,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=2),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.92 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(query="after_request order", mode="auto")
+
+    assert pack.summary["query_kind"] == "mixed"
+    assert pack.summary["strategy"] == "exact"
+    assert pack.summary["decisive"] is False
+    assert pack.summary["next_action"] == "narrow_by_path"
+    assert pack.summary["suggested_path_prefix"] == "src/flask/app.py"
+
+
+def test_search_router_skips_semantic_factory_for_decisive_identifier_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    semantic_factory_calls: list[str] = []
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/django/http.py",
+                    start_line=21,
+                    end_line=21,
+                    snippet="def url_has_allowed_host_and_scheme(url, allowed_hosts):",
+                    raw_score=0.97,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=3),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.96 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+        searcher_factory=lambda: (semantic_factory_calls.append("semantic") or object(), None),
+    )
+    pack = router.search(query="url_has_allowed_host_and_scheme", mode="auto")
+
+    assert semantic_factory_calls == []
+    assert pack.summary["query_kind"] == "identifier"
+    assert pack.summary["next_action"] == "open_hit_1"
 
 
 def test_search_router_hybrid_merges_when_threshold_not_met(

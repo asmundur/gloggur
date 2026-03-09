@@ -11,7 +11,6 @@ from click.testing import CliRunner
 
 from gloggur.cli import main as cli_main
 from gloggur.config import GloggurConfig
-from gloggur.embeddings.errors import EmbeddingProviderError
 from gloggur.io_failures import StorageIOError
 from gloggur.models import IndexMetadata, Symbol
 
@@ -237,7 +236,7 @@ def test_search_json_needs_reindex_debug_router_emits_debug_contract(
     assert debug["bounded_retry_enabled"] is True
 
 
-def test_search_json_debug_router_normalizes_debug_payload_and_semantic_init_error(
+def test_search_json_debug_router_normalizes_debug_payload_without_eager_semantic_init(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -278,12 +277,7 @@ def test_search_json_debug_router_normalizes_debug_payload_and_semantic_init_err
         cli_main,
         "_create_embedding_provider_for_command",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            EmbeddingProviderError(
-                provider="local",
-                operation="load model",
-                detail="RuntimeError: model bootstrap failed",
-                remediation=["install local model"],
-            )
+            AssertionError("semantic init should remain lazy in debug mode")
         ),
     )
     monkeypatch.setattr(
@@ -303,10 +297,113 @@ def test_search_json_debug_router_normalizes_debug_payload_and_semantic_init_err
     assert isinstance(debug, dict)
     assert debug["resume_contract"] == {}
     assert debug["search_health"]["needs_reindex"] is False
-    backend_errors = debug["backend_errors"]
-    assert isinstance(backend_errors, dict)
-    assert "semantic_init" in backend_errors
-    assert "model bootstrap failed" in str(backend_errors["semantic_init"])
+    assert "backend_errors" not in debug
+
+
+def test_search_json_compact_mode_trims_hits_and_summary_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    config = GloggurConfig(cache_dir=str(tmp_path / "cache"), embedding_provider="test")
+    long_snippet = "x" * 220
+
+    class FakePack:
+        debug = None
+        hits = []
+
+        def to_dict(self, include_debug: bool = False) -> dict[str, object]:
+            _ = include_debug
+            return {
+                "schema_version": 2,
+                "query": "def escape_leading_slashes",
+                "summary": {
+                    "strategy": "exact",
+                    "reason": "quality_threshold_met",
+                    "winner": "exact",
+                    "hits": 12,
+                    "warning_codes": ["identifier_query_high_top_k"],
+                    "backend_thresholds": {
+                        "exact": {
+                            "top_hit_score": 0.97,
+                            "quality_score": 0.97,
+                            "threshold": 0.7,
+                            "threshold_met": True,
+                            "evidence_kind": "lexical",
+                        }
+                    },
+                    "query_kind": "declaration",
+                    "decisive": True,
+                    "next_action": "open_hit_1",
+                },
+                "hits": [
+                    {
+                        "path": f"src/file_{index}.py",
+                        "span": {"start_line": index + 1, "end_line": index + 1},
+                        "snippet": long_snippet,
+                        "score": 0.9,
+                        "tags": ["literal_match"],
+                    }
+                    for index in range(12)
+                ],
+            }
+
+    class FakeRouter:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def search(self, **_kwargs: object) -> FakePack:
+            return FakePack()
+
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, object(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_build_search_health_snapshot",
+        lambda *args, **kwargs: _ready_health(
+            warning_codes=["legacy_search_surface"],
+            resume_contract={"resume_decision": "resume_ok"},
+        ),
+    )
+    monkeypatch.setattr(cli_main, "_create_metadata_store", lambda _config: object())
+    monkeypatch.setattr(
+        cli_main,
+        "_resolve_router_repo_root",
+        lambda metadata_store, fallback: tmp_path,
+    )
+    monkeypatch.setattr(cli_main, "SymbolIndexStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli_main, "load_search_router_config", lambda repo_root: object())
+    monkeypatch.setattr(cli_main, "SearchRouter", FakeRouter)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["search", "def escape_leading_slashes", "--json", "--compact", "--top-k", "12"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert sorted(payload.keys()) == ["hits", "query", "schema_version", "summary"]
+    summary = payload["summary"]
+    assert isinstance(summary, dict)
+    assert summary["query_kind"] == "declaration"
+    assert summary["decisive"] is True
+    assert summary["next_action"] == "open_hit_1"
+    assert summary["hits"] == 8
+    assert "query_mode" not in summary
+    assert "needs_reindex" not in summary
+    assert "legacy_top_k" not in summary
+    assert "resume_decision" not in summary
+    warning_codes = summary["warning_codes"]
+    assert isinstance(warning_codes, list)
+    assert "identifier_query_high_top_k" in warning_codes
+    assert "legacy_search_surface" in warning_codes
+    hits = payload["hits"]
+    assert isinstance(hits, list)
+    assert len(hits) == 8
+    assert all(len(str(hit["snippet"])) <= 164 for hit in hits if isinstance(hit, dict))
 
 
 def test_search_json_stream_emits_hit_lines(

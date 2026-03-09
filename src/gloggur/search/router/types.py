@@ -116,6 +116,8 @@ class QueryHints:
     path_hints: tuple[str, ...] = ()
     stack_locations: tuple[tuple[str, int], ...] = ()
     identifier_tokens: tuple[str, ...] = ()
+    declaration_terms: tuple[str, ...] = ()
+    query_kind: str = "natural_language"
 
 
 @dataclass(frozen=True)

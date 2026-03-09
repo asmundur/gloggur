@@ -216,6 +216,55 @@ def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
         assert all("start_byte" in hit and "end_byte" in hit for hit in hits if isinstance(hit, dict))
 
 
+def test_cli_search_auto_declaration_query_finds_definition_without_exact_mode() -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/http.py": (
+                    "def escape_leading_slashes(url: str) -> str:\n"
+                    "    return url.lstrip('/')\n"
+                ),
+                "src/views.py": (
+                    "from src.http import escape_leading_slashes\n\n"
+                    "def normalize(url: str) -> str:\n"
+                    "    return escape_leading_slashes(url)\n"
+                ),
+                "docs/changelog.md": (
+                    "escape_leading_slashes now removes duplicated leading slashes.\n"
+                ),
+                "tests/test_http.py": (
+                    "def test_escape_leading_slashes() -> None:\n"
+                    "    assert escape_leading_slashes('//x') == 'x'\n"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            ["search", "def escape_leading_slashes", "--json", "--top-k", "5"],
+            env=env,
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        summary = payload["summary"]
+        assert summary["query_kind"] == "declaration"
+        assert summary["strategy"] in {"exact", "symbol"}
+        assert summary["next_action"] == "open_hit_1"
+        hits = payload["hits"]
+        assert isinstance(hits, list)
+        assert hits
+        assert hits[0]["path"] == "src/http.py"
+
+
 def test_cli_search_json_is_clean_under_local_bootstrap_stdout_noise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from pathlib import Path
@@ -561,6 +562,87 @@ def _adaptive_fusion_selection(
     )
 
 
+def _suggested_path_prefix(hits: tuple[ContextHit, ...]) -> str | None:
+    top_hits = hits[:4]
+    if len(top_hits) < 2:
+        return None
+
+    path_counts: dict[str, int] = {}
+    for hit in top_hits:
+        path_counts[hit.path] = path_counts.get(hit.path, 0) + 1
+    path, path_count = sorted(
+        path_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[0]
+    if path_count >= 2:
+        return path
+
+    dir_counts: dict[str, int] = {}
+    for hit in top_hits:
+        parent = str(Path(hit.path).parent)
+        if parent in {"", "."}:
+            continue
+        dir_counts[parent] = dir_counts.get(parent, 0) + 1
+    if not dir_counts:
+        return None
+    parent, parent_count = sorted(
+        dir_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[0]
+    if parent_count >= 2:
+        return parent
+    return None
+
+
+def _decisive_non_semantic_result(
+    *,
+    hits: tuple[ContextHit, ...],
+    outcome: RouterOutcome,
+    backend_thresholds: dict[str, dict[str, object]],
+    query_kind: str,
+) -> bool:
+    if outcome.strategy not in {"exact", "symbol"} or not hits:
+        return False
+    winner_status = backend_thresholds.get(outcome.strategy, {})
+    if not bool(winner_status.get("threshold_met")):
+        return False
+
+    top_score = hits[0].score
+    if len(hits) == 1:
+        return top_score >= 0.80
+
+    second_score = hits[1].score
+    if hits[0].path == hits[1].path and abs(top_score - second_score) < 0.05:
+        return False
+    if query_kind in {"identifier", "declaration"}:
+        return top_score >= 0.85 and (
+            top_score - second_score >= 0.05 or hits[0].path != hits[1].path
+        )
+    return top_score >= 0.90 and top_score - second_score >= 0.10
+
+
+def _resolve_next_action(
+    *,
+    hits: tuple[ContextHit, ...],
+    outcome: RouterOutcome,
+    backend_thresholds: dict[str, dict[str, object]],
+    query_kind: str,
+) -> tuple[bool, str, str | None]:
+    decisive = _decisive_non_semantic_result(
+        hits=hits,
+        outcome=outcome,
+        backend_thresholds=backend_thresholds,
+        query_kind=query_kind,
+    )
+    if decisive:
+        return True, "open_hit_1", None
+
+    suggested_path_prefix = _suggested_path_prefix(hits)
+    if suggested_path_prefix is not None:
+        return False, "narrow_by_path", suggested_path_prefix
+    return False, "refine_query", None
+
+
 def _pack_hits(
     hits: list[BackendHit],
     *,
@@ -681,18 +763,48 @@ class SearchRouter:
         metadata_store: MetadataStore | None,
         config: SearchRouterConfig,
         symbol_store: SymbolIndexStore | None = None,
+        searcher_factory: Callable[[], tuple[HybridSearch | None, str | None]] | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.searcher = searcher
         self.metadata_store = metadata_store
         self.symbol_store = symbol_store
         self.config = config
+        self._searcher_factory = searcher_factory
+        self._searcher_initialized = searcher is not None
+        self._semantic_init_error: str | None = None
+
+    def _semantic_backend_configured(self) -> bool:
+        return self.searcher is not None or self._searcher_factory is not None
+
+    def _get_searcher(self) -> tuple[HybridSearch | None, str | None]:
+        if self.searcher is not None:
+            return self.searcher, self._semantic_init_error
+        if self._searcher_initialized:
+            return None, self._semantic_init_error
+
+        self._searcher_initialized = True
+        if self._searcher_factory is None:
+            self._semantic_init_error = "semantic backend unavailable"
+            return None, self._semantic_init_error
+
+        try:
+            searcher, init_error = self._searcher_factory()
+        except Exception as exc:
+            self._semantic_init_error = str(exc)
+            return None, self._semantic_init_error
+
+        self.searcher = searcher
+        self._semantic_init_error = init_error
+        if self.searcher is None and self._semantic_init_error is None:
+            self._semantic_init_error = "semantic backend unavailable"
+        return self.searcher, self._semantic_init_error
 
     def _resolve_backends(self, mode: str) -> tuple[str, ...]:
         enabled = tuple(
             name for name in self.config.enabled_backends if name in {"exact", "semantic", "symbol"}
         )
-        if self.searcher is None:
+        if not self._semantic_backend_configured():
             enabled = tuple(name for name in enabled if name != "semantic")
         if self.symbol_store is None:
             enabled = tuple(name for name in enabled if name != "symbol")
@@ -703,7 +815,7 @@ class SearchRouter:
         if mode == "hybrid":
             pair = tuple(name for name in enabled if name in {"exact", "semantic"})
             return pair if pair else enabled
-        return enabled or ("exact", "semantic")
+        return enabled or ("exact",)
 
     def search(
         self,
@@ -774,6 +886,14 @@ class SearchRouter:
                 symbols=tuple(symbols),
                 identifier_tokens=tuple(identifier_tokens),
             )
+        explicit_regex_requested = (
+            parsed_query.source == "grep_compat"
+            and not parsed_query.fallback_used
+            and not parsed_query.fixed_string
+        )
+        backend_execution_hints = resolved_execution_hints
+        if hints.query_kind in {"identifier", "declaration"} and not explicit_regex_requested:
+            backend_execution_hints = replace(resolved_execution_hints, fixed_string=True)
         backend_names = self._resolve_backends(normalized_mode)
 
         def _run_backend(name: str) -> BackendResult:
@@ -783,23 +903,24 @@ class SearchRouter:
                     hints=hints,
                     repo_root=self.repo_root,
                     intent=resolved_intent,
-                    execution_hints=resolved_execution_hints,
+                    execution_hints=backend_execution_hints,
                     config=self.config,
                 )
             if name == "semantic":
-                if self.searcher is None:
+                searcher, semantic_init_error = self._get_searcher()
+                if searcher is None:
                     return BackendResult(
                         name="semantic",
                         hits=(),
                         timing_ms=0,
-                        error="semantic backend unavailable",
+                        error=semantic_init_error or "semantic backend unavailable",
                     )
                 return run_semantic_backend(
                     query=effective_query,
-                    searcher=self.searcher,
+                    searcher=searcher,
                     repo_root=self.repo_root,
                     intent=resolved_intent,
-                    execution_hints=resolved_execution_hints,
+                    execution_hints=backend_execution_hints,
                     config=self.config,
                 )
             if self.symbol_store is None:
@@ -815,23 +936,57 @@ class SearchRouter:
                 query=effective_query,
                 repo_root=self.repo_root,
                 intent=resolved_intent,
-                execution_hints=resolved_execution_hints,
+                execution_hints=backend_execution_hints,
                 config=self.config,
             )
 
         backend_results: list[BackendResult] = []
-        if len(backend_names) == 1:
-            backend_results.append(_run_backend(backend_names[0]))
+        if normalized_mode == "hybrid":
+            if len(backend_names) == 1:
+                backend_results.append(_run_backend(backend_names[0]))
+            else:
+                timeout_seconds = max((resolved_intent.time_budget_ms or 1) / 1000.0, 0.1)
+                with ThreadPoolExecutor(max_workers=len(backend_names)) as executor:
+                    futures = {executor.submit(_run_backend, name): name for name in backend_names}
+                    try:
+                        for future in as_completed(futures, timeout=timeout_seconds):
+                            backend_results.append(future.result())
+                    except TimeoutError:
+                        for future in futures:
+                            future.cancel()
+        elif normalized_mode in {"exact", "semantic"}:
+            backend_results.append(_run_backend(normalized_mode))
         else:
-            timeout_seconds = max((resolved_intent.time_budget_ms or 1) / 1000.0, 0.1)
-            with ThreadPoolExecutor(max_workers=len(backend_names)) as executor:
-                futures = {executor.submit(_run_backend, name): name for name in backend_names}
-                try:
-                    for future in as_completed(futures, timeout=timeout_seconds):
-                        backend_results.append(future.result())
-                except TimeoutError:
-                    for future in futures:
-                        future.cancel()
+            non_semantic_results: list[BackendResult] = []
+            for backend_name in ("exact", "symbol"):
+                if backend_name in backend_names:
+                    non_semantic_results.append(_run_backend(backend_name))
+            backend_results.extend(non_semantic_results)
+
+            preliminary_results = [
+                replace(
+                    result,
+                    quality_score=_compute_quality(
+                        result,
+                        hints=hints,
+                        intent=resolved_intent,
+                    ),
+                )
+                for result in non_semantic_results
+            ]
+            preliminary_outcome = _route_auto(preliminary_results, self.config)
+            has_non_semantic_hits = any(result.hits for result in non_semantic_results)
+            needs_semantic_fallback = False
+            if "semantic" in backend_names:
+                if hints.query_kind in {"identifier", "declaration"}:
+                    needs_semantic_fallback = not has_non_semantic_hits
+                else:
+                    needs_semantic_fallback = preliminary_outcome.strategy in {
+                        "hybrid",
+                        "suppressed",
+                    }
+            if needs_semantic_fallback:
+                backend_results.append(_run_backend("semantic"))
 
         enriched_results: list[BackendResult] = []
         for result in backend_results:
@@ -925,14 +1080,33 @@ class SearchRouter:
 
         total_ms = int((time.perf_counter() - started) * 1000)
         backend_thresholds = _backend_threshold_status(enriched_results, self.config)
+        warning_codes = list(outcome.warning_codes)
+        requested_snippets = resolved_intent.max_snippets or self.config.max_snippets
+        if (
+            hints.query_kind in {"identifier", "declaration"}
+            and requested_snippets > 8
+            and "identifier_query_high_top_k" not in warning_codes
+        ):
+            warning_codes.append("identifier_query_high_top_k")
+        decisive, next_action, suggested_path_prefix = _resolve_next_action(
+            hits=packed_hits,
+            outcome=outcome,
+            backend_thresholds=backend_thresholds,
+            query_kind=hints.query_kind,
+        )
         summary: dict[str, object] = {
             "strategy": outcome.strategy,
             "reason": outcome.reason,
             "winner": outcome.winner,
             "hits": len(packed_hits),
-            "warning_codes": list(outcome.warning_codes),
+            "warning_codes": warning_codes,
             "backend_thresholds": backend_thresholds,
+            "query_kind": hints.query_kind,
+            "decisive": decisive,
+            "next_action": next_action,
         }
+        if suggested_path_prefix is not None:
+            summary["suggested_path_prefix"] = suggested_path_prefix
 
         debug_payload: dict[str, object] = {
             "timings": {
@@ -966,13 +1140,15 @@ class SearchRouter:
                 "path_filters": list(resolved_intent.path_filters),
                 "include_globs": list(resolved_execution_hints.include_globs),
                 "exclude_globs": list(resolved_execution_hints.exclude_globs),
-                "case_mode": resolved_execution_hints.case_mode,
-                "word_match": resolved_execution_hints.word_match,
-                "fixed_string": resolved_execution_hints.fixed_string,
+                "case_mode": backend_execution_hints.case_mode,
+                "word_match": backend_execution_hints.word_match,
+                "fixed_string": backend_execution_hints.fixed_string,
                 "max_files": resolved_intent.max_files,
                 "max_snippets": resolved_intent.max_snippets,
                 "time_budget_ms": resolved_intent.time_budget_ms,
             },
+            "query_kind": hints.query_kind,
+            "declaration_terms": list(hints.declaration_terms),
             "parsed_query": parsed_query.to_debug_payload(),
         }
 
@@ -981,9 +1157,12 @@ class SearchRouter:
             repo_root=self.repo_root,
             query=query,
             payload={
+                "query_kind": hints.query_kind,
                 "strategy": outcome.strategy,
                 "winner": outcome.winner,
                 "reason": outcome.reason,
+                "next_action": next_action,
+                "decisive": decisive,
                 "backend_scores": {
                     result.name: result.quality_score for result in enriched_results
                 },

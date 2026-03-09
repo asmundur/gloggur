@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from gloggur.search.router.backends import run_exact_backend
@@ -83,3 +84,57 @@ def test_run_exact_backend_falls_back_when_ripgrep_is_unavailable(
     assert result.hits
     assert result.hits[0].path.endswith("sample.py")
     assert "python_fallback_exact_scan" in result.commands
+
+
+def test_run_exact_backend_ranks_source_definitions_above_docs_and_tests(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    src_file = tmp_path / "src" / "http.py"
+    src_file.parent.mkdir(parents=True, exist_ok=True)
+    src_file.write_text(
+        "def escape_leading_slashes(path: str) -> str:\n"
+        "    return path\n",
+        encoding="utf8",
+    )
+    docs_file = tmp_path / "docs" / "changelog.md"
+    docs_file.parent.mkdir(parents=True, exist_ok=True)
+    docs_file.write_text(
+        "escape_leading_slashes now handles more URL forms.\n",
+        encoding="utf8",
+    )
+    test_file = tmp_path / "tests" / "test_http.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text(
+        "def test_escape_leading_slashes() -> None:\n"
+        "    assert escape_leading_slashes('//x') == '/x'\n",
+        encoding="utf8",
+    )
+
+    def _run(_cmd, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "src/http.py:1:def escape_leading_slashes(path: str) -> str:\n"
+                "docs/changelog.md:1:escape_leading_slashes now handles more URL forms.\n"
+                "tests/test_http.py:2:    assert escape_leading_slashes('//x') == '/x'\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="escape_leading_slashes",
+        hints=extract_query_hints("escape_leading_slashes"),
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(fixed_string=True),
+        config=SearchRouterConfig(),
+    )
+
+    assert [Path(hit.path).as_posix() for hit in result.hits] == [
+        str(src_file).replace("\\", "/"),
+        str(test_file).replace("\\", "/"),
+        str(docs_file).replace("\\", "/"),
+    ]
