@@ -607,6 +607,7 @@ def test_cli_failure_catalog_includes_watch_preflight_codes() -> None:
         "watch_mode_conflict",
         "watch_path_missing",
         "watch_mode_invalid",
+        "repo_config_trust_env_invalid",
         "local_fallback_env_unsupported",
     ):
         assert code in CLI_FAILURE_REMEDIATION
@@ -656,6 +657,8 @@ def test_cli_failure_catalog_includes_artifact_restore_codes() -> None:
         "artifact_manifest_schema_unsupported",
         "artifact_manifest_file_mismatch",
         "artifact_manifest_totals_mismatch",
+        "artifact_manifest_provenance_missing",
+        "artifact_manifest_sha256_mismatch",
         "artifact_restore_destination_exists",
         "artifact_restore_destination_not_directory",
     ):
@@ -1714,6 +1717,80 @@ def test_status_json_rejects_invalid_tool_version_drift_env_var(
     assert isinstance(error, dict)
     assert error["code"] == "allow_tool_version_drift_env_invalid"
     assert payload["failure_codes"] == ["allow_tool_version_drift_env_invalid"]
+
+
+def test_status_json_rejects_invalid_repo_config_trust_env_var() -> None:
+    """status --json should fail closed on malformed repo trust env values."""
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["status", "--json"],
+        env={"GLOGGUR_REPO_CONFIG_TRUST": "sometimes"},
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "repo_config_trust_env_invalid"
+    assert payload["failure_codes"] == ["repo_config_trust_env_invalid"]
+
+
+def test_status_json_includes_untrusted_repo_config_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """status JSON should surface config source, trust mode, warnings, and remote host details."""
+    runner = CliRunner()
+    config_path = tmp_path / ".gloggur.yaml"
+    config_path.write_text(
+        "cache_dir: cache\n"
+        "embedding_provider: openai\n"
+        "openai_base_url: https://proxy.example.test/v1\n",
+        encoding="utf8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(cli_main.cli, ["status", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["config_source"] == "auto_discovered"
+    assert payload["config_trust_mode"] == "auto"
+    assert payload["remote_embedding"] == {
+        "provider": "openai",
+        "host": "proxy.example.test",
+    }
+    warning_codes = payload["security_warning_codes"]
+    assert isinstance(warning_codes, list)
+    assert "untrusted_repo_config" in warning_codes
+    assert "untrusted_remote_provider_requested" in warning_codes
+    assert "custom_embedding_endpoint_requested" in warning_codes
+
+
+def test_status_json_marks_explicit_config_as_trusted(tmp_path: Path) -> None:
+    """Explicit config paths should report explicit source and omit untrusted warning codes."""
+    runner = CliRunner()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "cache_dir: cache\n"
+        "embedding_provider: openai\n",
+        encoding="utf8",
+    )
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["status", "--json", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["config_source"] == "explicit"
+    assert payload["config_trust_mode"] == "auto"
+    warning_codes = payload["security_warning_codes"]
+    assert isinstance(warning_codes, list)
+    assert "untrusted_repo_config" not in warning_codes
 
 
 def test_status_supports_tilde_expanded_config_path(tmp_path: Path) -> None:

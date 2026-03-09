@@ -51,6 +51,11 @@ Fields:
   - Meaning: `GLOGGUR_ALLOW_TOOL_VERSION_DRIFT` has an unsupported value.
   - Retryability: retry after fixing or unsetting the env var.
   - Operator action: use `1/0`, `true/false`, `yes/no`, or `on/off`.
+- `repo_config_trust_env_invalid`
+  - Command(s): commands that load gloggur config (for example `status`, `index`, `search`, `inspect`, `artifact restore`).
+  - Meaning: `GLOGGUR_REPO_CONFIG_TRUST` has an unsupported value.
+  - Retryability: retry after fixing or unsetting the env var.
+  - Operator action: use `auto`, `trusted`, or `untrusted`.
 - `local_fallback_env_unsupported`
   - Command(s): commands that load gloggur config (for example `status`, `index`, `search`, `inspect`, `adapters list`).
   - Meaning: deprecated `GLOGGUR_LOCAL_FALLBACK` env is set to a non-empty value.
@@ -281,6 +286,16 @@ Fields:
   - Meaning: manifest aggregate totals do not match file entries.
   - Retryability: retry after republishing.
   - Operator action: regenerate the artifact from a healthy cache.
+- `artifact_manifest_provenance_missing`
+  - Command(s): `artifact restore`.
+  - Meaning: artifact manifest lacks the provenance block required for strict trust validation.
+  - Retryability: retry after republishing or relaxing strict provenance enforcement for legacy artifacts.
+  - Operator action: republish with a current CLI, or restore only after separate provenance verification.
+- `artifact_manifest_sha256_mismatch`
+  - Command(s): `artifact restore`.
+  - Meaning: supplied `--expected-manifest-sha256` digest does not match the archive manifest.
+  - Retryability: retry only after correcting the expected digest or artifact source.
+  - Operator action: verify the out-of-band digest and artifact origin before retrying.
 - `artifact_restore_destination_exists`
   - Command(s): `artifact restore`.
   - Meaning: destination directory already exists and overwrite is not allowed.

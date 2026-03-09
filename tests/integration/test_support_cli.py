@@ -157,12 +157,49 @@ def test_support_collect_include_cache_adds_cache_and_symbol_artifacts(
 
         assert result.exit_code == 0, result.output
         payload = _parse_json_output(result.output)
+        assert payload["bundle_sensitivity"] == "sensitive"
+        assert payload["includes_cache_artifacts"] is True
+        assert payload["sensitive_data_acknowledged"] is False
         bundle_path = Path(str(payload["bundle_path"]))
         with tarfile.open(bundle_path, "r:gz") as archive:
             names = set(archive.getnames())
+            manifest_member = archive.extractfile("manifest.json")
+            assert manifest_member is not None
+            manifest = json.loads(manifest_member.read().decode("utf8"))
         session_id = str(payload["session_id"])
         assert f"support/{session_id}/artifacts/.gloggur-cache/index.db" in names
         assert f"support/{session_id}/artifacts/.gloggur/index/symbols.db" in names
+        assert manifest["bundle_sensitivity"] == "sensitive"
+        assert manifest["includes_cache_artifacts"] is True
+        assert manifest["sensitive_data_acknowledged"] is False
+
+
+def test_support_collect_allow_sensitive_data_sets_acknowledgement_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        (repo / ".git").mkdir(exist_ok=True)
+        cache_dir = tmp_path / "cache"
+        env = _test_env(cache_dir)
+        monkeypatch.chdir(repo)
+
+        index_result = runner.invoke(cli, ["index", ".", "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            ["support", "collect", "--json", "--include-cache", "--allow-sensitive-data"],
+            env=env,
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert payload["bundle_sensitivity"] == "sensitive"
+        assert payload["includes_cache_artifacts"] is True
+        assert payload["sensitive_data_acknowledged"] is True
 
 
 def test_support_collect_destination_collision_fails_closed(

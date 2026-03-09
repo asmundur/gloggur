@@ -247,6 +247,7 @@ def test_openai_provider_uses_openrouter_base_url_override(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
     monkeypatch.setenv("GLOGGUR_OPENROUTER_BASE_URL", "https://router.custom/v1")
+    monkeypatch.setenv("GLOGGUR_ALLOW_CUSTOM_EMBEDDING_ENDPOINTS", "1")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setattr("gloggur.embeddings.openai.OpenAI", FakeOpenAI)
 
@@ -254,6 +255,18 @@ def test_openai_provider_uses_openrouter_base_url_override(
 
     assert captured_base_urls == ["https://router.custom/v1"]
     assert provider.base_url == "https://router.custom/v1"
+
+
+def test_openai_provider_rejects_custom_base_url_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom OpenAI-compatible endpoints should fail closed unless operator env opts in."""
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example.test/v1")
+    monkeypatch.delenv("GLOGGUR_ALLOW_CUSTOM_EMBEDDING_ENDPOINTS", raising=False)
+
+    with pytest.raises(ValueError, match="Custom embedding base URLs are disabled"):
+        OpenAIEmbeddingProvider(model="text-embedding-3-large")
 
 
 def test_openai_provider_sets_openrouter_optional_headers(
@@ -702,6 +715,35 @@ def test_gemini_embed_batch_rate_limit_multiple_retries_does_not_abort(
 
     assert len(result) == 1
     assert fail_count == max_fails
+    assert provider.retry_attempts_total == max_fails
+    assert provider.retry_wait_seconds_total > 0
+
+
+def test_gemini_embed_batch_rate_limit_exhaustion_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent Gemini rate-limit failures should terminate after a finite retry ceiling."""
+
+    class FakeModels:
+        def embed_content(self, model: str, contents: object):
+            _ = model, contents
+            raise RuntimeError("429 quota exceeded")
+
+    class FakeClient:
+        def __init__(self, api_key: str) -> None:
+            self.models = FakeModels()
+
+    _patch_genai(monkeypatch, FakeClient)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    provider = GeminiEmbeddingProvider(model="gemini-embedding-001", _chunk_size=10)
+
+    with pytest.raises(RuntimeError, match="exhausted rate-limit retries"):
+        provider.embed_batch(["a"])
+
+    assert provider.retry_attempts_total == 4
+    assert provider.retry_wait_seconds_total == pytest.approx(30.0)
 
 
 def test_gemini_embed_batch_prefers_single_large_request_when_supported(

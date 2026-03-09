@@ -7,9 +7,9 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from gloggur.adapters.registry import AdapterResolutionError
 from gloggur.cli import main as cli_main
 from gloggur.config import GloggurConfig
-from gloggur.adapters.registry import AdapterResolutionError
 
 
 def _payload(output: str) -> dict[str, object]:
@@ -124,12 +124,19 @@ def test_artifact_validate_and_restore_routes_emit_payloads(
     monkeypatch.setattr(
         cli_main,
         "_restore_artifact_archive",
-        lambda artifact_path, destination_dir, overwrite, verify_file_hashes: {
+        lambda artifact_path,
+        destination_dir,
+        overwrite,
+        verify_file_hashes,
+        require_provenance=False,
+        expected_manifest_sha256=None: {
             "restored": True,
             "artifact_path": artifact_path,
             "destination_dir": destination_dir,
             "overwrite": overwrite,
             "verify_file_hashes": verify_file_hashes,
+            "require_provenance": require_provenance,
+            "expected_manifest_sha256": expected_manifest_sha256,
         },
     )
     monkeypatch.setattr(

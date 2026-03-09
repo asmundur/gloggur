@@ -3,8 +3,62 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import yaml
+
+DEFAULT_REPO_CONFIG_TRUST_MODE = "auto"
+REPO_CONFIG_TRUST_MODES = frozenset({"auto", "trusted", "untrusted"})
+ALLOW_CUSTOM_EMBEDDING_ENDPOINTS_ENV = "GLOGGUR_ALLOW_CUSTOM_EMBEDDING_ENDPOINTS"
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+REMOTE_EMBEDDING_PROVIDER_IDS = frozenset({"openai", "gemini"})
+
+
+def _optional_string(value: str | None) -> str | None:
+    """Normalize optional strings by trimming whitespace and collapsing empty values."""
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def normalize_base_url(value: str | None) -> str | None:
+    """Return a normalized base URL without a trailing slash."""
+    normalized = _optional_string(value)
+    if normalized is None:
+        return None
+    return normalized.rstrip("/")
+
+
+def embedding_endpoint_host(value: str | None) -> str | None:
+    """Extract hostname from an endpoint URL when present."""
+    normalized = normalize_base_url(value)
+    if normalized is None:
+        return None
+    parsed = urlparse(normalized)
+    return parsed.hostname
+
+
+def custom_embedding_endpoints_allowed() -> bool:
+    """Return whether operator env explicitly allows custom embedding endpoints."""
+    raw_value = os.environ.get(ALLOW_CUSTOM_EMBEDDING_ENDPOINTS_ENV)
+    if raw_value is None:
+        return False
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_custom_embedding_endpoint(
+    value: str | None,
+    *,
+    allowed_defaults: tuple[str, ...],
+) -> bool:
+    """Return True when the endpoint differs from the built-in provider defaults."""
+    normalized = normalize_base_url(value)
+    if normalized is None:
+        return False
+    allowed = {normalize_base_url(item) for item in allowed_defaults}
+    return normalized not in allowed
 
 
 @dataclass
@@ -80,6 +134,10 @@ class GloggurConfig:
     index_version: str = "1"
     max_symbol_chunk_bytes: int = 12000
     max_symbol_chunk_tokens: int = 2000
+    config_source: str = "defaults"
+    config_source_path: str | None = None
+    config_trust_mode: str = DEFAULT_REPO_CONFIG_TRUST_MODE
+    security_warning_codes: list[str] = field(default_factory=list)
 
     def embedding_profile(self) -> str:
         """Return a stable profile string for the active embedding configuration."""
@@ -121,25 +179,103 @@ class GloggurConfig:
             return value.strip()
         return "python_local"
 
+    def is_remote_embedding_provider(self) -> bool:
+        """Return whether the active provider can send embeddings to a remote service."""
+        provider = _optional_string(self.embedding_provider)
+        return provider in REMOTE_EMBEDDING_PROVIDER_IDS
+
+    def resolved_openai_base_url(self) -> str:
+        """Return the effective base URL used by the OpenAI-compatible provider."""
+        resolved = normalize_base_url(self.openai_base_url)
+        if resolved:
+            return resolved
+        openrouter_key = _optional_string(self.openrouter_api_key)
+        if openrouter_key:
+            return normalize_base_url(self.openrouter_base_url) or OPENROUTER_DEFAULT_BASE_URL
+        return OPENAI_DEFAULT_BASE_URL
+
+    def remote_embedding_destination(self) -> dict[str, str] | None:
+        """Return remote embedding provider/host diagnostics when remote embeddings are active."""
+        provider = _optional_string(self.embedding_provider)
+        if provider == "openai":
+            base_url = self.resolved_openai_base_url()
+            host = embedding_endpoint_host(base_url) or "api.openai.com"
+            return {
+                "provider": provider,
+                "host": host,
+            }
+        if provider == "gemini":
+            return {
+                "provider": provider,
+                "host": "gemini.googleapis.com",
+            }
+        return None
+
+    def requests_custom_embedding_endpoint(self) -> bool:
+        """Return whether the active remote embedding provider points at a non-default endpoint."""
+        provider = _optional_string(self.embedding_provider)
+        if provider != "openai":
+            return False
+        return is_custom_embedding_endpoint(
+            self.resolved_openai_base_url(),
+            allowed_defaults=(OPENAI_DEFAULT_BASE_URL, OPENROUTER_DEFAULT_BASE_URL),
+        )
+
     @classmethod
     def load(
         cls,
         path: str | None = None,
         overrides: dict[str, object] | None = None,
+        trust_mode: str = DEFAULT_REPO_CONFIG_TRUST_MODE,
     ) -> GloggurConfig:
         """Load config from file/env (yaml/json) and apply overrides."""
-        data: dict[str, object] = {}
-        if path:
-            data.update(cls._load_file(path))
-        else:
+        if trust_mode not in REPO_CONFIG_TRUST_MODES:
+            raise ValueError(f"Unsupported repo config trust mode: {trust_mode}")
+
+        resolved_path = path
+        config_source = "explicit" if path else "defaults"
+        if resolved_path is None:
             for candidate in (".gloggur.yaml", ".gloggur.yml", ".gloggur.json"):
                 if os.path.exists(candidate):
-                    data.update(cls._load_file(candidate))
+                    resolved_path = candidate
+                    config_source = "auto_discovered"
                     break
-        data.update(cls._load_env())
+
+        file_data: dict[str, object] = {}
+        if resolved_path:
+            file_data.update(cls._load_file(resolved_path))
+
+        dotenv_values = cls._load_dotenv()
+        env_data = cls._extract_env_config(dict(os.environ))
+        merged_env_values = dict(dotenv_values)
+        merged_env_values.update(os.environ)
+        effective_env_data = cls._extract_env_config(merged_env_values)
+        effective_dotenv_data = {
+            key: value for key, value in effective_env_data.items() if key not in env_data
+        }
+        data: dict[str, object] = {}
+        data.update(file_data)
+        data.update(effective_env_data)
         if overrides:
             data.update(overrides)
-        return cls(**data)
+        if config_source == "defaults" and effective_dotenv_data:
+            config_source = "repo_dotenv"
+
+        config = cls(**data)
+        config.config_source = config_source
+        config.config_source_path = os.path.abspath(resolved_path) if resolved_path else None
+        config.config_trust_mode = trust_mode
+        config.security_warning_codes = cls._compute_security_warning_codes(
+            config=config,
+            config_source=config_source,
+            trust_mode=trust_mode,
+            file_data=file_data,
+            dotenv_data=effective_dotenv_data,
+            env_data=env_data,
+            overrides=overrides or {},
+            config_path_present=resolved_path is not None,
+        )
+        return config
 
     @staticmethod
     def _load_file(path: str) -> dict[str, object]:
@@ -177,9 +313,14 @@ class GloggurConfig:
     @staticmethod
     def _load_env() -> dict[str, object]:
         """Load config values from GLOGGUR_* environment variables."""
-        data: dict[str, object] = {}
         env_values: dict[str, str] = GloggurConfig._load_dotenv()
         env_values.update(os.environ)
+        return GloggurConfig._extract_env_config(env_values)
+
+    @staticmethod
+    def _extract_env_config(env_values: dict[str, str]) -> dict[str, object]:
+        """Map merged environment values into config keys."""
+        data: dict[str, object] = {}
 
         def _env_value(name: str) -> str | None:
             """Return a non-empty environment value or None when unset/blank."""
@@ -271,3 +412,62 @@ class GloggurConfig:
             except ValueError:
                 pass
         return data
+
+    @staticmethod
+    def _compute_security_warning_codes(
+        *,
+        config: GloggurConfig,
+        config_source: str,
+        trust_mode: str,
+        file_data: dict[str, object],
+        dotenv_data: dict[str, object],
+        env_data: dict[str, object],
+        overrides: dict[str, object],
+        config_path_present: bool,
+    ) -> list[str]:
+        """Compute stable security warning codes from resolved config provenance."""
+
+        def _final_source_for_key(key: str) -> str:
+            """Return the highest-precedence source category for one resolved config key."""
+            if key in overrides:
+                return "override"
+            if key in env_data:
+                return "env"
+            if key in dotenv_data:
+                return "dotenv"
+            if key in file_data:
+                return "config"
+            return "default"
+
+        def _has_adapter_overrides(adapter_map: object) -> bool:
+            """Return True when the adapters mapping includes any explicit module override."""
+            if not isinstance(adapter_map, dict):
+                return False
+            for category_map in adapter_map.values():
+                if not isinstance(category_map, dict):
+                    continue
+                for value in category_map.values():
+                    if isinstance(value, str) and value.strip():
+                        return True
+            return False
+
+        warning_codes: set[str] = set()
+        untrusted_repo_config = False
+        if trust_mode != "trusted":
+            if config_source in {"auto_discovered", "repo_dotenv"}:
+                untrusted_repo_config = True
+            elif trust_mode == "untrusted" and (config_path_present or dotenv_data):
+                untrusted_repo_config = True
+        if untrusted_repo_config:
+            warning_codes.add("untrusted_repo_config")
+        if untrusted_repo_config and _has_adapter_overrides(file_data.get("adapters")):
+            warning_codes.add("untrusted_adapter_override_requested")
+        if (
+            untrusted_repo_config
+            and config.is_remote_embedding_provider()
+            and _final_source_for_key("embedding_provider") in {"config", "dotenv"}
+        ):
+            warning_codes.add("untrusted_remote_provider_requested")
+        if config.requests_custom_embedding_endpoint():
+            warning_codes.add("custom_embedding_endpoint_requested")
+        return sorted(warning_codes)

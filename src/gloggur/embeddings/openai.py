@@ -6,9 +6,16 @@ from collections.abc import Iterable, Sequence
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from gloggur.config import (
+    ALLOW_CUSTOM_EMBEDDING_ENDPOINTS_ENV,
+    OPENAI_DEFAULT_BASE_URL,
+    OPENROUTER_DEFAULT_BASE_URL,
+    custom_embedding_endpoints_allowed,
+    embedding_endpoint_host,
+    is_custom_embedding_endpoint,
+    normalize_base_url,
+)
 from gloggur.embeddings.base import EmbeddingProvider
-
-_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 def _optional_string(value: str | None) -> str | None:
@@ -24,6 +31,21 @@ def _is_openrouter_endpoint(base_url: str | None) -> bool:
     if not base_url:
         return False
     return "openrouter.ai" in base_url.lower()
+
+
+def _enforce_allowed_base_url(base_url: str | None) -> None:
+    """Reject non-default OpenAI-compatible endpoints unless operator env opts in."""
+    if not is_custom_embedding_endpoint(
+        base_url,
+        allowed_defaults=(OPENAI_DEFAULT_BASE_URL, OPENROUTER_DEFAULT_BASE_URL),
+    ):
+        return
+    if custom_embedding_endpoints_allowed():
+        return
+    raise ValueError(
+        "Custom embedding base URLs are disabled by default; "
+        f"set {ALLOW_CUSTOM_EMBEDDING_ENDPOINTS_ENV}=1 to allow non-default endpoints."
+    )
 
 
 def _normalize_vector(vector: object, *, model: str, context: str) -> list[float]:
@@ -84,10 +106,13 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                 os.getenv("GLOGGUR_OPENROUTER_BASE_URL")
             )
             if not resolved_base_url:
-                resolved_base_url = _OPENROUTER_DEFAULT_BASE_URL
+                resolved_base_url = OPENROUTER_DEFAULT_BASE_URL
+
+        normalized_base_url = normalize_base_url(resolved_base_url)
+        _enforce_allowed_base_url(normalized_base_url)
 
         headers: dict[str, str] = {}
-        if openrouter_key or _is_openrouter_endpoint(resolved_base_url):
+        if openrouter_key or _is_openrouter_endpoint(normalized_base_url):
             site_url = _optional_string(openrouter_site_url) or _optional_string(
                 os.getenv("GLOGGUR_OPENROUTER_SITE_URL")
             )
@@ -101,11 +126,15 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
         self.model = model
         self.credential_source = credential_source
-        self.base_url = resolved_base_url
+        self.base_url = normalized_base_url
+        endpoint_base_url = normalized_base_url or (
+            OPENROUTER_DEFAULT_BASE_URL if openrouter_key else OPENAI_DEFAULT_BASE_URL
+        )
+        self.endpoint_host = embedding_endpoint_host(endpoint_base_url) or "api.openai.com"
         self.default_headers = dict(headers)
         self.client = OpenAI(
             api_key=api_key,
-            base_url=resolved_base_url,
+            base_url=normalized_base_url,
             default_headers=headers or None,
         )
         self._dimension: int | None = None

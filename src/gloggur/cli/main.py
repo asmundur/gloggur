@@ -48,7 +48,11 @@ from gloggur.byte_spans import (
     is_path_absolute,
     resolve_repo_relative_path,
 )
-from gloggur.config import GloggurConfig
+from gloggur.config import (
+    DEFAULT_REPO_CONFIG_TRUST_MODE,
+    REPO_CONFIG_TRUST_MODES,
+    GloggurConfig,
+)
 from gloggur.coverage_importers import (
     CoverageImportError,
     create_coverage_importer,
@@ -115,6 +119,10 @@ from gloggur.watch.service import (
 @click.group()
 def cli() -> None:
     """Gloggur CLI for indexing, search, coverage, and docstring inspection."""
+
+
+_ACTIVE_JSON_CONFIG: GloggurConfig | None = None
+_ACTIVE_JSON_EMBEDDING: EmbeddingProvider | None = None
 
 
 @cli.group()
@@ -242,6 +250,10 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
         "Set GLOGGUR_ALLOW_TOOL_VERSION_DRIFT to one of: 1, true, yes, on, 0, false, no, off.",
         "Or unset GLOGGUR_ALLOW_TOOL_VERSION_DRIFT to rely on CLI flags only.",
     ],
+    "repo_config_trust_env_invalid": [
+        "Set GLOGGUR_REPO_CONFIG_TRUST to one of: auto, trusted, untrusted.",
+        "Or unset GLOGGUR_REPO_CONFIG_TRUST to use the default auto classification.",
+    ],
     "local_fallback_env_unsupported": [
         "Unset GLOGGUR_LOCAL_FALLBACK; deterministic local fallback embeddings "
         "are no longer supported.",
@@ -332,6 +344,15 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "artifact_manifest_totals_mismatch": [
         "Manifest aggregate totals do not match file entries; "
         "republish artifact from source cache.",
+    ],
+    "artifact_manifest_provenance_missing": [
+        "Treat restored artifacts as untrusted unless provenance is present "
+        "or verified out of band.",
+        "Republish with a current gloggur CLI or omit strict provenance "
+        "enforcement for legacy artifacts.",
+    ],
+    "artifact_manifest_sha256_mismatch": [
+        "Verify the expected manifest digest and artifact source before restoring the cache.",
     ],
     "artifact_restore_destination_exists": [
         "Choose a new restore destination or pass --overwrite "
@@ -627,15 +648,100 @@ def _json_error_envelope(
 
 def _emit_json_error(payload: dict[str, object]) -> None:
     """Emit a single-line JSON error payload."""
-    click.echo(json.dumps(payload, separators=(",", ":"), ensure_ascii=True))
+    click.echo(
+        json.dumps(
+            _decorate_payload_with_security_metadata(payload),
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+    )
 
 
 def _emit(payload: dict[str, object], as_json: bool) -> None:
     """Print payload as JSON or raw text."""
     if as_json:
-        click.echo(json.dumps(payload, indent=2))
+        click.echo(json.dumps(_decorate_payload_with_security_metadata(payload), indent=2))
     else:
         click.echo(payload)
+
+
+def _merge_string_codes(*values: object) -> list[str]:
+    """Return stable deduplicated string code list from arbitrary inputs."""
+    merged: list[str] = []
+    for value in values:
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if not isinstance(item, str) or not item:
+                continue
+            if item not in merged:
+                merged.append(item)
+    return sorted(merged)
+
+
+def _remote_embedding_diagnostics(
+    *,
+    config: GloggurConfig,
+    embedding: EmbeddingProvider | None = None,
+) -> dict[str, object] | None:
+    """Build remote-provider diagnostics from the live provider when available."""
+    if embedding is not None:
+        provider_name = getattr(embedding, "provider", None)
+        if isinstance(provider_name, str) and provider_name in {"openai", "gemini"}:
+            payload: dict[str, object] = {"provider": provider_name}
+            host = getattr(embedding, "endpoint_host", None)
+            if isinstance(host, str) and host:
+                payload["host"] = host
+            else:
+                inferred = config.remote_embedding_destination()
+                if inferred is not None:
+                    payload["host"] = inferred["host"]
+            retry_attempts = getattr(embedding, "retry_attempts_total", None)
+            retry_wait_seconds = getattr(embedding, "retry_wait_seconds_total", None)
+            if isinstance(retry_attempts, int):
+                payload["retry_attempts"] = retry_attempts
+            if isinstance(retry_wait_seconds, (int, float)):
+                payload["retry_wait_seconds"] = round(float(retry_wait_seconds), 3)
+            return payload
+    return config.remote_embedding_destination()
+
+
+def _decorate_payload_with_security_metadata(
+    payload: dict[str, object],
+    *,
+    config: GloggurConfig | None = None,
+    embedding: EmbeddingProvider | None = None,
+) -> dict[str, object]:
+    """Attach config trust/source metadata to JSON payloads."""
+    active_config = config or _ACTIVE_JSON_CONFIG
+    if active_config is None:
+        return payload
+
+    payload["config_source"] = active_config.config_source
+    payload["config_trust_mode"] = active_config.config_trust_mode
+    payload["security_warning_codes"] = _merge_string_codes(
+        payload.get("security_warning_codes"),
+        active_config.security_warning_codes,
+    )
+    remote_embedding = _remote_embedding_diagnostics(
+        config=active_config,
+        embedding=embedding or _ACTIVE_JSON_EMBEDDING,
+    )
+    if remote_embedding is not None:
+        payload["remote_embedding"] = remote_embedding
+    for section_name in ("summary", "debug"):
+        section = payload.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        section["config_source"] = active_config.config_source
+        section["config_trust_mode"] = active_config.config_trust_mode
+        section["security_warning_codes"] = _merge_string_codes(
+            section.get("security_warning_codes"),
+            active_config.security_warning_codes,
+        )
+        if remote_embedding is not None:
+            section["remote_embedding"] = dict(remote_embedding)
+    return payload
 
 
 def _resolve_as_json(kwargs: dict[str, object]) -> bool:
@@ -656,7 +762,12 @@ def _with_io_failure_handling(
     @wraps(callback)
     def _wrapped(*args: object, **kwargs: object) -> Any:
         """Normalize CLI/runtime failures into deterministic non-zero command exits."""
+        global _ACTIVE_JSON_CONFIG, _ACTIVE_JSON_EMBEDDING
         as_json = _resolve_as_json(kwargs)
+        previous_config = _ACTIVE_JSON_CONFIG
+        previous_embedding = _ACTIVE_JSON_EMBEDDING
+        _ACTIVE_JSON_CONFIG = None
+        _ACTIVE_JSON_EMBEDDING = None
         try:
             return callback(*args, **kwargs)
         except CLIContractError as exc:
@@ -700,12 +811,16 @@ def _with_io_failure_handling(
             else:
                 click.echo(format_embedding_error_message(exc), err=True)
             raise click.exceptions.Exit(1) from exc
+        finally:
+            _ACTIVE_JSON_CONFIG = previous_config
+            _ACTIVE_JSON_EMBEDDING = previous_embedding
 
     return _wrapped
 
 
 def _load_config(config_path: str | None) -> GloggurConfig:
     """Load configuration from file/env."""
+    global _ACTIVE_JSON_CONFIG
     load_path = _normalize_config_path(config_path)
     error_path = "<auto-discovery>"
     if load_path:
@@ -716,9 +831,12 @@ def _load_config(config_path: str | None) -> GloggurConfig:
                 error_path = os.path.abspath(candidate)
                 break
     _validate_legacy_local_fallback_env()
+    trust_mode = _resolve_repo_config_trust_mode()
     try:
-        config = GloggurConfig.load(path=load_path)
-        return _validate_extension_policy(config=config, config_path=error_path)
+        config = GloggurConfig.load(path=load_path, trust_mode=trust_mode)
+        config = _validate_extension_policy(config=config, config_path=error_path)
+        _ACTIVE_JSON_CONFIG = config
+        return config
     except OSError as exc:
         raise wrap_io_error(
             exc,
@@ -2428,7 +2546,7 @@ def _build_status_payload(
     total_symbols = (
         raw_total_symbols if resume_contract.get("resume_decision") == "resume_ok" else 0
     )
-    return {
+    payload = {
         "cache_dir": config.cache_dir,
         "metadata": metadata.model_dump(mode="json") if metadata else None,
         "schema_version": cache.get_schema_version(),
@@ -2448,6 +2566,7 @@ def _build_status_payload(
         "total_symbols": total_symbols,
         **resume_contract,
     }
+    return _decorate_payload_with_security_metadata(payload, config=config)
 
 
 def _cache_total_symbols(cache: CacheManager) -> int:
@@ -2490,7 +2609,7 @@ def _create_watch_status_payload(config: GloggurConfig) -> dict[str, object]:
     payload.update(_build_watch_failure_contract(payload))
     payload["running"] = running
     payload["status"] = _normalize_watch_status(running=running, state=payload)
-    return payload
+    return _decorate_payload_with_security_metadata(payload, config=config)
 
 
 def _load_support_config(config_path: str | None = None) -> tuple[GloggurConfig, str | None]:
@@ -2506,6 +2625,7 @@ def _create_embedding_provider_for_command(
     require_provider: bool = False,
 ) -> EmbeddingProvider | None:
     """Create embedding provider with deterministic error mapping."""
+    global _ACTIVE_JSON_EMBEDDING
     if not config.embedding_provider:
         if require_provider:
             raise wrap_embedding_error(
@@ -2515,7 +2635,9 @@ def _create_embedding_provider_for_command(
             )
         return None
     try:
-        return create_embedding_provider(config)
+        provider = create_embedding_provider(config)
+        _ACTIVE_JSON_EMBEDDING = provider
+        return provider
     except Exception as exc:
         raise wrap_embedding_error(
             exc,
@@ -2604,6 +2726,7 @@ def _build_artifact_manifest(
         "manifest_schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "tool_version": GLOGGUR_VERSION,
+        "provenance": _build_artifact_provenance(),
         "cache": {
             "source_dir": source_dir,
             "schema_version": cache.get_schema_version(),
@@ -2617,6 +2740,64 @@ def _build_artifact_manifest(
         "bytes_total": sum(int(item["bytes"]) for item in file_entries),
         "files": file_entries,
     }
+
+
+def _build_artifact_provenance() -> dict[str, object]:
+    """Build lightweight provenance metadata for published artifacts."""
+    provenance: dict[str, object] = {
+        "tool_version": GLOGGUR_VERSION,
+        "creation_context": (
+            "ci" if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS") else "local"
+        ),
+    }
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        git_commit = completed.stdout.strip()
+        if git_commit:
+            provenance["git_commit"] = git_commit
+    ci_fields = {
+        "repository": os.environ.get("GITHUB_REPOSITORY"),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "ref": os.environ.get("GITHUB_REF"),
+        "sha": os.environ.get("GITHUB_SHA"),
+    }
+    ci_payload = {
+        key: value for key, value in ci_fields.items() if isinstance(value, str) and value.strip()
+    }
+    if ci_payload:
+        provenance["ci"] = ci_payload
+    return provenance
+
+
+def _artifact_provenance_warning_codes(
+    manifest_payload: dict[str, object],
+    *,
+    require_provenance: bool,
+) -> list[str]:
+    """Validate manifest provenance block and return warning codes for soft failures."""
+    provenance = manifest_payload.get("provenance")
+    if provenance is None:
+        if require_provenance:
+            raise CLIContractError(
+                "Artifact manifest is missing provenance metadata.",
+                error_code="artifact_manifest_provenance_missing",
+            )
+        return ["artifact_manifest_provenance_missing"]
+    if not isinstance(provenance, dict):
+        raise CLIContractError(
+            "Artifact manifest.provenance must be an object when present.",
+            error_code="artifact_manifest_invalid",
+        )
+    return []
 
 
 def _resolve_artifact_destination(destination: str, *, default_filename: str) -> str:
@@ -2879,6 +3060,8 @@ def _validate_artifact_archive(
     artifact_path: str,
     *,
     verify_file_hashes: bool = True,
+    require_provenance: bool = False,
+    expected_manifest_sha256: str | None = None,
 ) -> dict[str, object]:
     """Validate a published artifact archive and return deterministic metadata."""
     normalized_artifact_path = os.path.abspath(os.path.expanduser(artifact_path))
@@ -2931,6 +3114,21 @@ def _validate_artifact_archive(
                 raise CLIContractError(
                     "Artifact manifest.json must be a JSON object",
                     error_code="artifact_manifest_invalid",
+                )
+            manifest_sha256 = _sha256_bytes(manifest_bytes)
+            normalized_expected_manifest_sha256 = (
+                expected_manifest_sha256.strip().lower()
+                if isinstance(expected_manifest_sha256, str) and expected_manifest_sha256.strip()
+                else None
+            )
+            if (
+                normalized_expected_manifest_sha256 is not None
+                and manifest_sha256 != normalized_expected_manifest_sha256
+            ):
+                raise CLIContractError(
+                    "Artifact manifest SHA-256 does not match the expected digest "
+                    f"(expected={normalized_expected_manifest_sha256}, actual={manifest_sha256})",
+                    error_code="artifact_manifest_sha256_mismatch",
                 )
 
             schema_version = manifest_payload.get("manifest_schema_version")
@@ -3032,6 +3230,10 @@ def _validate_artifact_archive(
                     f"bytes_total={manifest_bytes_total}, expected_bytes={computed_bytes_total})",
                     error_code="artifact_manifest_totals_mismatch",
                 )
+            warning_codes = _artifact_provenance_warning_codes(
+                manifest_payload,
+                require_provenance=require_provenance,
+            )
     except CLIContractError:
         raise
     except tarfile.TarError as exc:
@@ -3052,9 +3254,10 @@ def _validate_artifact_archive(
         "artifact_uri": Path(normalized_artifact_path).resolve().as_uri(),
         "archive_sha256": archive_sha256,
         "archive_bytes": archive_bytes,
-        "manifest_sha256": _sha256_bytes(manifest_bytes),
+        "manifest_sha256": manifest_sha256,
         "manifest_path": "manifest.json",
         "manifest": manifest_payload,
+        "warning_codes": warning_codes,
         "file_hash_verification": {
             "enabled": verify_file_hashes,
             "checked_files": verified_files if verify_file_hashes else 0,
@@ -3093,11 +3296,15 @@ def _restore_artifact_archive(
     destination_dir: str,
     overwrite: bool = False,
     verify_file_hashes: bool = True,
+    require_provenance: bool = False,
+    expected_manifest_sha256: str | None = None,
 ) -> dict[str, object]:
     """Restore a validated cache artifact into a destination directory."""
     validation_payload = _validate_artifact_archive(
         artifact_path,
         verify_file_hashes=verify_file_hashes,
+        require_provenance=require_provenance,
+        expected_manifest_sha256=expected_manifest_sha256,
     )
     manifest = validation_payload["manifest"]
     if not isinstance(manifest, dict):
@@ -3238,6 +3445,7 @@ def _restore_artifact_archive(
         "restored_files": restored_files,
         "restored_bytes": restored_bytes,
         "overwrite_applied": overwrite,
+        "warning_codes": validation_payload.get("warning_codes", []),
         "file_hash_verification": validation_payload["file_hash_verification"],
     }
 
@@ -4277,6 +4485,21 @@ def _resolve_allow_tool_version_drift(
             error_code="allow_tool_version_drift_env_invalid",
         )
     return cli_flag_enabled or env_enabled
+
+
+def _resolve_repo_config_trust_mode() -> str:
+    """Resolve repo trust mode from operator environment with strict validation."""
+    raw_value = os.environ.get("GLOGGUR_REPO_CONFIG_TRUST")
+    if raw_value is None or raw_value.strip() == "":
+        return DEFAULT_REPO_CONFIG_TRUST_MODE
+    normalized = raw_value.strip().lower()
+    if normalized not in REPO_CONFIG_TRUST_MODES:
+        allowed = ", ".join(sorted(REPO_CONFIG_TRUST_MODES))
+        raise CLIContractError(
+            f"GLOGGUR_REPO_CONFIG_TRUST must be one of: {allowed}.",
+            error_code="repo_config_trust_env_invalid",
+        )
+    return normalized
 
 
 def _merged_env_values() -> dict[str, str]:
@@ -5529,6 +5752,18 @@ def artifact_validate(as_json: bool, artifact_path: str, skip_file_hash_check: b
     default=False,
     help="Validate manifest shape/totals before restore without hashing every archived cache file.",
 )
+@click.option(
+    "--require-provenance",
+    is_flag=True,
+    default=False,
+    help="Fail closed when the artifact manifest is missing provenance metadata.",
+)
+@click.option(
+    "--expected-manifest-sha256",
+    type=str,
+    default=None,
+    help="Expected manifest.json SHA-256 digest for trusted out-of-band verification.",
+)
 @_with_io_failure_handling
 def artifact_restore(
     config_path: str | None,
@@ -5537,6 +5772,8 @@ def artifact_restore(
     destination_dir: str | None,
     overwrite: bool,
     skip_file_hash_check: bool,
+    require_provenance: bool,
+    expected_manifest_sha256: str | None,
 ) -> None:
     """Restore a validated cache artifact into a destination cache directory."""
     config = _load_config(config_path)
@@ -5545,6 +5782,8 @@ def artifact_restore(
         destination_dir=destination_dir or config.cache_dir,
         overwrite=overwrite,
         verify_file_hashes=not skip_file_hash_check,
+        require_provenance=require_provenance,
+        expected_manifest_sha256=expected_manifest_sha256,
     )
     _emit(payload, as_json)
 
@@ -5625,6 +5864,12 @@ def support_run(
     default=False,
     help="Include raw cache/index artifacts.",
 )
+@click.option(
+    "--allow-sensitive-data",
+    is_flag=True,
+    default=False,
+    help="Acknowledge that cache artifacts may contain sensitive source and metadata.",
+)
 @click.option("--note", type=str, default=None, help="Optional tester note saved into notes.txt.")
 @click.option("--overwrite", is_flag=True, default=False, help="Overwrite an existing bundle path.")
 @_with_io_failure_handling
@@ -5633,6 +5878,7 @@ def support_collect(
     session_id: str | None,
     destination: str | None,
     include_cache: bool,
+    allow_sensitive_data: bool,
     note: str | None,
     overwrite: bool,
 ) -> None:
@@ -5643,6 +5889,7 @@ def support_collect(
             note=note,
             destination=destination,
             include_cache=include_cache,
+            allow_sensitive_data=allow_sensitive_data,
             overwrite=overwrite,
             callbacks=_support_callbacks(),
         )

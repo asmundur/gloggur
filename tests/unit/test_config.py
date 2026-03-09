@@ -37,6 +37,54 @@ def test_load_auto_detect_json_and_overrides(tmp_path, monkeypatch) -> None:
     assert config.embedding_provider == "local"
 
 
+def test_load_auto_detected_repo_config_is_untrusted_by_default(tmp_path, monkeypatch) -> None:
+    """Auto-discovered repo config should be classified as untrusted in auto mode."""
+    config_path = tmp_path / ".gloggur.yaml"
+    config_path.write_text("embedding_provider: openai\n", encoding="utf8")
+    monkeypatch.chdir(tmp_path)
+
+    config = GloggurConfig.load()
+
+    assert config.config_source == "auto_discovered"
+    assert config.config_trust_mode == "auto"
+    assert "untrusted_repo_config" in config.security_warning_codes
+    assert "untrusted_remote_provider_requested" in config.security_warning_codes
+
+
+def test_load_explicit_config_is_trusted_in_auto_mode(tmp_path, monkeypatch) -> None:
+    """Explicit config paths should stay trusted under the default auto trust mode."""
+    config_path = tmp_path / "trusted.yaml"
+    config_path.write_text("embedding_provider: openai\n", encoding="utf8")
+    monkeypatch.chdir(tmp_path)
+
+    config = GloggurConfig.load(path=str(config_path))
+
+    assert config.config_source == "explicit"
+    assert config.config_trust_mode == "auto"
+    assert "untrusted_repo_config" not in config.security_warning_codes
+    assert "untrusted_remote_provider_requested" not in config.security_warning_codes
+
+
+def test_load_explicit_config_can_be_forced_untrusted(tmp_path, monkeypatch) -> None:
+    """Operator trust override should classify explicit config as untrusted when requested."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "embedding_provider: openai\n"
+        "adapters:\n"
+        "  runtime:\n"
+        "    python_local: attacker:factory\n",
+        encoding="utf8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    config = GloggurConfig.load(path=str(config_path), trust_mode="untrusted")
+
+    assert config.config_source == "explicit"
+    assert config.config_trust_mode == "untrusted"
+    assert "untrusted_repo_config" in config.security_warning_codes
+    assert "untrusted_adapter_override_requested" in config.security_warning_codes
+
+
 def test_load_env_values(monkeypatch) -> None:
     """Config loads values from environment variables."""
     monkeypatch.setenv("GLOGGUR_EMBEDDING_PROVIDER", "openai")
@@ -209,3 +257,32 @@ def test_dotenv_empty_values_do_not_override(tmp_path, monkeypatch) -> None:
     assert config.embedding_provider == "local"
     assert config.gemini_embedding_model == "gemini-embedding-001"
     assert config.gemini_api_key is None
+
+
+def test_load_repo_dotenv_is_classified_untrusted(tmp_path, monkeypatch) -> None:
+    """Repo-local dotenv-only config should still be classified as untrusted in auto mode."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n"
+        "GLOGGUR_GEMINI_API_KEY=dotenv-gemini-key\n",
+        encoding="utf8",
+    )
+    monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("GLOGGUR_GEMINI_API_KEY", raising=False)
+
+    config = GloggurConfig.load()
+
+    assert config.config_source == "repo_dotenv"
+    assert config.config_trust_mode == "auto"
+    assert "untrusted_repo_config" in config.security_warning_codes
+    assert "untrusted_remote_provider_requested" in config.security_warning_codes
+
+
+def test_load_marks_custom_embedding_endpoints(monkeypatch) -> None:
+    """Resolved configs should surface a warning when a non-default embedding endpoint is requested."""
+    monkeypatch.setenv("GLOGGUR_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example.test/v1")
+
+    config = GloggurConfig.load()
+
+    assert "custom_embedding_endpoint_requested" in config.security_warning_codes

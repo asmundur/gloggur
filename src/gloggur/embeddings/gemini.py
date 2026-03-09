@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Iterable, Sequence
 
-from tenacity import retry, retry_if_exception_type, wait_exponential
-
 from gloggur.embeddings.base import EmbeddingProvider
+
+_GEMINI_RATE_LIMIT_MAX_ATTEMPTS = 5
+_GEMINI_RATE_LIMIT_MIN_WAIT_SECONDS = 2.0
+_GEMINI_RATE_LIMIT_MAX_WAIT_SECONDS = 60.0
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
@@ -20,10 +23,6 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
         or "ratelimit" in type_name
         or "quotaexceeded" in type_name
     )
-
-
-class _RateLimitError(Exception):
-    """Sentinel re-raised when a Gemini call hits a rate-limit / quota error."""
 
 
 def _normalize_vector(vector: object, *, model: str, context: str) -> list[float]:
@@ -78,9 +77,12 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         except ImportError as exc:
             raise RuntimeError("google-genai is required for Gemini embeddings") from exc
         self._client = genai.Client(api_key=self.api_key)
+        self.endpoint_host = "gemini.googleapis.com"
         self._dimension: int | None = None
         self._chunk_size = _chunk_size
         self._batch_first = _batch_first
+        self.retry_attempts_total = 0
+        self.retry_wait_seconds_total = 0.0
 
     def embed_text(self, text: str) -> list[float]:
         """Embed a single text string."""
@@ -113,20 +115,24 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return results
 
     def _embed_chunk_with_retry(self, chunk: list[str]) -> list[list[float]]:
-        """Call the Gemini API for one chunk, retrying indefinitely on rate-limit errors."""
-
-        @retry(
-            retry=retry_if_exception_type(_RateLimitError),
-            wait=wait_exponential(multiplier=1, min=2, max=60),
-            reraise=True,
-        )
-        def _call() -> list[list[float]]:
-            """Execute one Gemini batch request and remap rate-limit/runtime failures."""
+        """Call the Gemini API for one chunk with bounded retry on rate-limit errors."""
+        last_error: Exception | None = None
+        for attempt in range(1, _GEMINI_RATE_LIMIT_MAX_ATTEMPTS + 1):
             try:
                 response = self._client.models.embed_content(model=self.model, contents=chunk)
             except Exception as exc:
                 if _is_rate_limit_error(exc):
-                    raise _RateLimitError(str(exc)) from exc
+                    last_error = exc
+                    if attempt >= _GEMINI_RATE_LIMIT_MAX_ATTEMPTS:
+                        break
+                    wait_seconds = min(
+                        _GEMINI_RATE_LIMIT_MAX_WAIT_SECONDS,
+                        _GEMINI_RATE_LIMIT_MIN_WAIT_SECONDS * (2 ** (attempt - 1)),
+                    )
+                    self.retry_attempts_total += 1
+                    self.retry_wait_seconds_total += wait_seconds
+                    time.sleep(wait_seconds)
+                    continue
                 raise RuntimeError(
                     f"Gemini embedding request failed for model '{self.model}': {exc}"
                 ) from exc
@@ -137,8 +143,15 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 context="batch embedding",
             )
             return vectors
-
-        return _call()
+        attempts = self.retry_attempts_total or (_GEMINI_RATE_LIMIT_MAX_ATTEMPTS - 1)
+        total_wait = self.retry_wait_seconds_total
+        detail = (
+            f"Gemini embedding request exhausted rate-limit retries for model '{self.model}' "
+            f"after {attempts} retries and {total_wait:.1f}s total backoff"
+        )
+        if last_error is not None:
+            detail = f"{detail}: {last_error}"
+        raise RuntimeError(detail) from last_error
 
     def get_dimension(self) -> int:
         """Return the embedding dimension (probe if unknown)."""

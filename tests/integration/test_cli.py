@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.error
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,37 @@ def _parse_json_output(output: str) -> dict[str, object]:
     if isinstance(payload, dict):
         return attach_legacy_search_contract(payload)
     return payload
+
+
+def _rewrite_artifact_manifest(
+    artifact_path: Path,
+    *,
+    transform: Callable[[dict[str, object]], dict[str, object]],
+    destination_name: str,
+) -> Path:
+    """Rewrite only manifest.json inside an existing artifact archive."""
+    rewritten_path = artifact_path.parent / destination_name
+    with tarfile.open(artifact_path, "r:gz") as source_archive:
+        with tarfile.open(rewritten_path, "w:gz") as target_archive:
+            for member in source_archive.getmembers():
+                extracted = source_archive.extractfile(member) if member.isfile() else None
+                if member.name == "manifest.json":
+                    assert extracted is not None
+                    manifest = json.loads(extracted.read().decode("utf8"))
+                    manifest = transform(manifest)
+                    manifest_bytes = (
+                        json.dumps(manifest, sort_keys=True, indent=2).encode("utf8") + b"\n"
+                    )
+                    manifest_info = tarfile.TarInfo("manifest.json")
+                    manifest_info.size = len(manifest_bytes)
+                    manifest_info.mode = member.mode
+                    manifest_info.mtime = member.mtime
+                    target_archive.addfile(manifest_info, io.BytesIO(manifest_bytes))
+                    continue
+                if extracted is None:
+                    continue
+                target_archive.addfile(member, extracted)
+    return rewritten_path
 
 
 def _tamper_vector_id_map_drop_one_symbol(cache_dir: str) -> None:
@@ -1667,6 +1699,10 @@ def test_cli_artifact_publish_packages_cache_with_manifest() -> None:
         manifest = payload["manifest"]
         assert isinstance(manifest, dict)
         assert manifest["manifest_schema_version"] == "1"
+        provenance = manifest["provenance"]
+        assert isinstance(provenance, dict)
+        assert provenance["tool_version"] == payload["manifest"]["tool_version"]
+        assert provenance["creation_context"] in {"local", "ci"}
         assert int(manifest["files_total"]) > 0
         manifest_payload = json.dumps(manifest, sort_keys=True, indent=2).encode("utf8") + b"\n"
         assert payload["manifest_sha256"] == hashlib.sha256(manifest_payload).hexdigest()
@@ -2118,6 +2154,9 @@ def test_cli_artifact_restore_restores_cache_for_downstream_search() -> None:
                 str(artifact_path),
                 "--destination",
                 str(restore_dir),
+                "--require-provenance",
+                "--expected-manifest-sha256",
+                str(publish_payload["manifest_sha256"]),
             ],
         )
         assert restore_result.exit_code == 0, restore_result.output
@@ -2142,6 +2181,106 @@ def test_cli_artifact_restore_restores_cache_for_downstream_search() -> None:
         assert search_result.exit_code == 0, search_result.output
         search_payload = _parse_json_output(search_result.output)
         assert int(search_payload["metadata"]["total_results"]) > 0
+
+
+def test_cli_artifact_restore_rejects_missing_provenance_in_enforce_mode() -> None:
+    """Strict restore mode should reject legacy artifacts that do not carry provenance."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        source_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-source-")
+        _write_fallback_marker(source_cache_dir)
+        artifacts_dir = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-"))
+        source_env = {"GLOGGUR_CACHE_DIR": source_cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=source_env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            ["artifact", "publish", "--json", "--destination", str(artifacts_dir)],
+            env=source_env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        publish_payload = _parse_json_output(publish_result.output)
+        artifact_path = Path(str(publish_payload["artifact_path"]))
+        legacy_artifact = _rewrite_artifact_manifest(
+            artifact_path,
+            destination_name="legacy-no-provenance.tar.gz",
+            transform=lambda manifest: {
+                key: value for key, value in manifest.items() if key != "provenance"
+            },
+        )
+        restore_dir = Path(tempfile.mkdtemp(prefix="gloggur-restored-parent-")) / "restored-cache"
+
+        restore_result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "restore",
+                "--json",
+                "--artifact",
+                str(legacy_artifact),
+                "--destination",
+                str(restore_dir),
+                "--require-provenance",
+            ],
+        )
+
+        assert restore_result.exit_code == 1, restore_result.output
+        payload = _parse_json_output(restore_result.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "artifact_manifest_provenance_missing"
+        assert payload["failure_codes"] == ["artifact_manifest_provenance_missing"]
+
+
+def test_cli_artifact_restore_rejects_manifest_sha256_mismatch() -> None:
+    """Restore should fail closed when out-of-band manifest digest verification does not match."""
+    runner = CliRunner()
+    source = TestFixtures.create_sample_python_file()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        source_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-source-")
+        _write_fallback_marker(source_cache_dir)
+        artifacts_dir = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-"))
+        source_env = {"GLOGGUR_CACHE_DIR": source_cache_dir}
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=source_env)
+        assert index_result.exit_code == 0, index_result.output
+
+        publish_result = runner.invoke(
+            cli,
+            ["artifact", "publish", "--json", "--destination", str(artifacts_dir)],
+            env=source_env,
+        )
+        assert publish_result.exit_code == 0, publish_result.output
+        publish_payload = _parse_json_output(publish_result.output)
+        artifact_path = Path(str(publish_payload["artifact_path"]))
+        restore_dir = Path(tempfile.mkdtemp(prefix="gloggur-restored-parent-")) / "restored-cache"
+
+        restore_result = runner.invoke(
+            cli,
+            [
+                "artifact",
+                "restore",
+                "--json",
+                "--artifact",
+                str(artifact_path),
+                "--destination",
+                str(restore_dir),
+                "--expected-manifest-sha256",
+                "deadbeef",
+            ],
+        )
+
+        assert restore_result.exit_code == 1, restore_result.output
+        payload = _parse_json_output(restore_result.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "artifact_manifest_sha256_mismatch"
+        assert payload["failure_codes"] == ["artifact_manifest_sha256_mismatch"]
 
 
 def test_cli_artifact_restore_fails_closed_when_destination_exists_without_overwrite() -> None:

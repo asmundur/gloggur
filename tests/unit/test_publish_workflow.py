@@ -121,3 +121,29 @@ def test_publish_workflow_includes_resolution_summary_step() -> None:
     assert "steps.resolve_version.outputs.highest_known_version" in run_script
     assert "steps.resolve_version.outputs.version" in run_script
     assert "steps.resolve_version.outputs.resolution_mode" in run_script
+
+
+def test_publish_workflow_uses_protected_release_environment() -> None:
+    """Publish job should run behind a dedicated protected release environment."""
+    publish = _publish_job()
+    environment = publish.get("environment")
+    assert isinstance(environment, dict)
+    assert environment.get("name") == "pypi-release"
+
+
+def test_publish_workflow_keeps_oidc_and_attestation_permissions() -> None:
+    """Publish job should keep both OIDC and artifact attestation permissions enabled."""
+    publish = _publish_job()
+    permissions = publish.get("permissions")
+    assert isinstance(permissions, dict)
+    assert permissions.get("id-token") == "write"
+    assert permissions.get("attestations") == "write"
+
+
+def test_publish_workflow_attests_built_distributions_before_publish() -> None:
+    """Publish workflow should generate build provenance for the dist artifacts."""
+    attest_step = _publish_step("Attest build provenance")
+    assert attest_step.get("uses") == "actions/attest-build-provenance@v2"
+    with_payload = attest_step.get("with")
+    assert isinstance(with_payload, dict)
+    assert with_payload.get("subject-path") == "dist/*"
