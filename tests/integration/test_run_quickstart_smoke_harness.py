@@ -25,6 +25,8 @@ def test_run_quickstart_smoke_harness_passes_on_fixture_repo() -> None:
     assert payload["ok"] is True
     summary = payload["summary"]
     assert summary["created_fixture"] is True
+    assert summary["embedding_provider"] == "test"
+    assert summary["local_provider_bootstrap_validated"] is False
     stage_names = summary["stage_names"]
     assert stage_names == [
         "index",

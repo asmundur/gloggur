@@ -103,6 +103,13 @@ When the cache is not reusable, `search --json` exits non-zero with:
 - `error.category: cache_not_ready`
 - top-level `metadata` including resume fields, `build_state`, and `search_integrity`
 
+## Current gotchas
+
+- `scripts/gloggur inspect . --json` focuses on source paths by default; add `--include-tests` and `--include-scripts` when you want a broader repo audit.
+- Parser support is baseline rather than uniform. Run `scripts/gloggur parsers check --json` before depending on symbol fidelity for JavaScript/TypeScript arrow assignments, TypeScript type aliases or enums, named Go types, Rust impl methods, or Java records/enums.
+- After `scripts/gloggur watch init . --json`, later commands may include `security_warning_codes: ["untrusted_repo_config"]` because the repo-local config is auto-discovered and treated as untrusted by default.
+- This repo's `scripts/run_quickstart_smoke.py` harness and most deterministic CI checks use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.
+
 ## If Something Goes Wrong
 
 Use the support tool when a field tester needs to send you enough trace data to reproduce a Glöggur failure.

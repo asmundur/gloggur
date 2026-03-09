@@ -5407,12 +5407,14 @@ def _emit_find_success(
     "--with-evidence-trace",
     is_flag=True,
     default=False,
+    hidden=True,
     help="Include evidence trace payload tied to returned symbols in JSON output.",
 )
 @click.option(
     "--validate-grounding",
     is_flag=True,
     default=False,
+    hidden=True,
     help="Run default grounding validator over evidence trace and emit pass/fail metadata.",
 )
 @click.option(
@@ -5420,6 +5422,7 @@ def _emit_find_success(
     type=float,
     default=DEFAULT_EVIDENCE_MIN_CONFIDENCE,
     show_default=True,
+    hidden=True,
     help="Minimum per-evidence confidence contribution for grounding pass criteria.",
 )
 @click.option(
@@ -5427,12 +5430,14 @@ def _emit_find_success(
     type=int,
     default=DEFAULT_EVIDENCE_MIN_ITEMS,
     show_default=True,
+    hidden=True,
     help="Minimum number of evidence items required at/above confidence threshold.",
 )
 @click.option(
     "--fail-on-ungrounded",
     is_flag=True,
     default=False,
+    hidden=True,
     help="Exit non-zero when grounding validation fails.",
 )
 @click.option("--stream", is_flag=True, default=False)
@@ -5609,12 +5614,14 @@ def search(
     "--with-evidence-trace",
     is_flag=True,
     default=False,
+    hidden=True,
     help="Include evidence trace payload tied to returned symbols in JSON output.",
 )
 @click.option(
     "--validate-grounding",
     is_flag=True,
     default=False,
+    hidden=True,
     help="Run default grounding validator over evidence trace and emit pass/fail metadata.",
 )
 @click.option(
@@ -5622,6 +5629,7 @@ def search(
     type=float,
     default=DEFAULT_EVIDENCE_MIN_CONFIDENCE,
     show_default=True,
+    hidden=True,
     help="Minimum per-evidence confidence contribution for grounding pass criteria.",
 )
 @click.option(
@@ -5629,12 +5637,14 @@ def search(
     type=int,
     default=DEFAULT_EVIDENCE_MIN_ITEMS,
     show_default=True,
+    hidden=True,
     help="Minimum number of evidence items required at/above confidence threshold.",
 )
 @click.option(
     "--fail-on-ungrounded",
     is_flag=True,
     default=False,
+    hidden=True,
     help="Exit non-zero when grounding validation fails.",
 )
 @click.option("--stream", is_flag=True, default=False)

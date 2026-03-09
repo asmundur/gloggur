@@ -297,6 +297,138 @@ def test_cli_search_auto_declaration_query_finds_definition_without_exact_mode()
         assert hits[0]["path"] == "src/http.py"
 
 
+def test_cli_find_declaration_query_reports_decisive_local_open_status() -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/requests/sessions.py": (
+                    "class Session:\n"
+                    "    def mount(self, prefix, adapter):\n"
+                    "        self.adapters[prefix] = adapter\n"
+                ),
+                "src/client.py": (
+                    "from src.requests.sessions import Session\n\n"
+                    "def configure(session: Session, adapter) -> None:\n"
+                    '    session.mount("https://", adapter)\n'
+                ),
+            }
+        )
+        router_config_dir = repo / ".gloggur"
+        router_config_dir.mkdir(exist_ok=True)
+        (router_config_dir / "config.toml").write_text(
+            "[search_router]\n"
+            'enabled_backends = ["exact", "symbol"]\n'
+            "telemetry_enabled = false\n",
+            encoding="utf8",
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        previous_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            index_result = runner.invoke(cli, ["index", ".", "--json"], env=env)
+            assert index_result.exit_code == 0, index_result.output
+
+            result = runner.invoke(cli, ["find", "def mount(self, prefix, adapter)"], env=env)
+
+            assert result.exit_code == 0, result.output
+            first_line = result.output.splitlines()[0]
+            assert "status=decisive" in first_line
+            assert "query_kind=declaration" in first_line
+            assert "next=open_hit_1" in first_line
+            assert "sessions.py" in result.output
+        finally:
+            os.chdir(previous_cwd)
+
+
+def test_cli_search_followup_queries_reuse_anchor_and_force_local_collapse() -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/requests/sessions.py": (
+                    "class Session:\n"
+                    "    def mount(self, prefix, adapter):\n"
+                    "        keys_to_move = [k for k in self.adapters if len(k) < len(prefix)]\n"
+                    "        return keys_to_move\n"
+                ),
+                "tests/test_sessions.py": (
+                    "def test_headers() -> None:\n"
+                    '    assert {"X-Test": "1"}["X-Test"] == "1"\n'
+                ),
+                "docs/reference.md": "X-Test is documented here.\n",
+            }
+        )
+        router_config_dir = repo / ".gloggur"
+        router_config_dir.mkdir(exist_ok=True)
+        (router_config_dir / "config.toml").write_text(
+            "[search_router]\n"
+            'enabled_backends = ["exact", "symbol"]\n'
+            "telemetry_enabled = false\n",
+            encoding="utf8",
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        previous_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            index_result = runner.invoke(cli, ["index", ".", "--json"], env=env)
+            assert index_result.exit_code == 0, index_result.output
+
+            seed_result = runner.invoke(
+                cli,
+                ["search", "def mount(self, prefix, adapter)", "--json", "--debug-router"],
+                env=env,
+            )
+            assert seed_result.exit_code == 0, seed_result.output
+            seed_payload = _parse_json_output(seed_result.output)
+            assert seed_payload["summary"]["locality_mode"] == "derived"
+            assert seed_payload["summary"]["anchor_path"] == "src/requests/sessions.py"
+
+            follow_up = runner.invoke(
+                cli,
+                ["search", "X-Test", "--json", "--debug-router"],
+                env=env,
+            )
+            assert follow_up.exit_code == 0, follow_up.output
+            follow_up_payload = _parse_json_output(follow_up.output)
+            assert follow_up_payload["summary"]["locality_mode"] == "reused"
+            assert follow_up_payload["summary"]["anchor_path"] == "src/requests/sessions.py"
+            assert follow_up_payload["hits"][0]["path"] == "src/requests/sessions.py"
+            assert "locality_mode_active" in follow_up_payload["summary"]["warning_codes"]
+            locality_debug = follow_up_payload["debug"]["locality"]
+            assert locality_debug["origin"] == "persisted"
+            assert "tests/test_sessions.py" in locality_debug["candidate_test_paths"]
+
+            collapsed = runner.invoke(
+                cli,
+                ["search", "X-Test", "--json", "--debug-router"],
+                env=env,
+            )
+            assert collapsed.exit_code == 0, collapsed.output
+            collapsed_payload = _parse_json_output(collapsed.output)
+            assert collapsed_payload["summary"]["next_action"] == "open_hit_1"
+            assert "confirmation_query_downranked" in collapsed_payload["summary"]["warning_codes"]
+            assert "ambiguous_followup_detected" in collapsed_payload["summary"]["warning_codes"]
+            collapsed_debug = collapsed_payload["debug"]["locality"]
+            assert collapsed_debug["ambiguity_streak"] == 2
+            assert collapsed_debug["forced_local_only"] is True
+            assert {
+                hit["path"] for hit in collapsed_payload["hits"] if isinstance(hit, dict)
+            }.issubset({"src/requests/sessions.py", "tests/test_sessions.py"})
+        finally:
+            os.chdir(previous_cwd)
+
+
 def test_cli_search_json_is_clean_under_local_bootstrap_stdout_noise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

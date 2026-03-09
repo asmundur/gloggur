@@ -110,7 +110,7 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    scripts/gloggur watch init . --json
    scripts/gloggur watch start --daemon --json
    ```
-2. **Locate relevant code** with semantic search:
+2. **Locate relevant code** with `find` or `search`:
    ```bash
    scripts/gloggur find "<query>"
    scripts/gloggur find "<query>" --json
@@ -139,7 +139,9 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```bash
    scripts/gloggur inspect . --json
    ```
-   Inspection skips unchanged files by default; add `--force` to reinspect everything.
+   Directory inspections focus on source paths by default; add `--include-tests`
+   and `--include-scripts` when you need full repo coverage. Inspection skips
+   unchanged files by default; add `--force` to reinspect everything.
    To diagnose unsupported extension skips explicitly:
    ```bash
    scripts/gloggur inspect . --json --warn-on-skipped-extensions
@@ -149,6 +151,8 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```bash
    scripts/gloggur parsers check --json
    ```
+   This reports the live support contract plus confirmed known gaps, which is
+   useful before relying on JS/TS/TSX/Go/Rust/Java symbol fidelity for a task.
 
 ## Support Bundles
 
@@ -225,19 +229,15 @@ scripts/gloggur extract sample.py 0 42 --json
 - `extract` rejects absolute or escaping paths and does not require a fresh index if you
   already have a valid path/span.
 
-Grounded retrieve -> validate -> emit/repair flow (recommended for agent outputs):
+Grounding note for agent outputs:
 
-```bash
-scripts/gloggur search "<query>" --json \
-  --with-evidence-trace \
-  --validate-grounding \
-  --evidence-min-confidence 0.6 \
-  --evidence-min-items 1
-```
-
-- If `validation.passed` is `true`: emit response and cite `evidence_trace` items.
-- If `validation.passed` is `false`: repair by broadening query and/or increasing `--top-k`.
-- To hard-block ungrounded responses in automation, add `--fail-on-ungrounded` and branch on non-zero exit plus `error.code=search_grounding_validation_failed`.
+- Legacy `search` grounding flags from the pre-ContextPack flow were removed.
+  `--with-evidence-trace`, `--validate-grounding`, and `--fail-on-ungrounded`
+  now fail closed with `error.code=search_contract_v1_removed`.
+- For caller-side grounding today, branch on `summary.strategy`,
+  `summary.reason`, `summary.next_action`, and hit count. When you need router
+  confidence detail, rerun with `--debug-router` and inspect backend thresholds
+  in the returned payload before deciding whether to emit, repair, or block.
 
 Minimal reference loop/eval harness:
 

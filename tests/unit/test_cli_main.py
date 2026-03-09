@@ -3582,6 +3582,40 @@ def test_search_json_rejects_stream_with_grounding_contract_options() -> None:
     assert error["code"] == "search_contract_v1_removed"
 
 
+def test_search_help_hides_legacy_grounding_flags() -> None:
+    """Removed grounding flags should stay accepted but absent from public help."""
+    runner = CliRunner()
+
+    result = runner.invoke(cli_main.cli, ["search", "--help"])
+
+    assert result.exit_code == 0
+    for flag in (
+        "--with-evidence-trace",
+        "--validate-grounding",
+        "--evidence-min-confidence",
+        "--evidence-min-items",
+        "--fail-on-ungrounded",
+    ):
+        assert flag not in result.output
+
+
+def test_find_help_hides_legacy_grounding_flags() -> None:
+    """find help should not advertise removed grounding options either."""
+    runner = CliRunner()
+
+    result = runner.invoke(cli_main.cli, ["find", "--help"])
+
+    assert result.exit_code == 0
+    for flag in (
+        "--with-evidence-trace",
+        "--validate-grounding",
+        "--evidence-min-confidence",
+        "--evidence-min-items",
+        "--fail-on-ungrounded",
+    ):
+        assert flag not in result.output
+
+
 def test_search_json_opt_in_evidence_trace_and_validation_pass(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

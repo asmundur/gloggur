@@ -14,9 +14,10 @@ The verification workflow also includes non-pytest required gates on Python `3.1
 - `python scripts/run_artifact_smoke.py --format json`
 - `python scripts/run_edge_bench.py --benchmark-only --baseline-file benchmarks/performance_baseline.json --format json`
 
-Verification harness scripts in this repository force
-`GLOGGUR_EMBEDDING_PROVIDER=test` for deterministic offline behavior.
-Deprecated `GLOGGUR_LOCAL_FALLBACK` now fails closed with
+The quickstart smoke harness and most deterministic verification in this
+repository use `GLOGGUR_EMBEDDING_PROVIDER=test` for offline stability.
+Those checks do not validate first-run local-provider bootstrap. Deprecated
+`GLOGGUR_LOCAL_FALLBACK` now fails closed with
 `local_fallback_env_unsupported`.
 
 The workflow also includes a lane-policy audit gate:
@@ -91,6 +92,7 @@ python scripts/check_quickstart_contract.py --format json
 python scripts/check_error_code_catalog.py --format json
 
 # Run the documented quickstart sequence on a fixture repository
+# (forces GLOGGUR_EMBEDDING_PROVIDER=test and does not cover local bootstrap)
 python scripts/run_quickstart_smoke.py --format json
 
 # Audit downloaded lane-report artifacts locally

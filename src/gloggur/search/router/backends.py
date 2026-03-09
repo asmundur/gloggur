@@ -433,7 +433,13 @@ def _run_exact_backend_fallback_scan(
                     0.0,
                     min(
                         1.0,
-                        base_score + bonus + _exact_ranking_adjustment(absolute_path, source_line),
+                        base_score
+                        + bonus
+                        + _exact_ranking_adjustment(absolute_path, source_line)
+                        + _mixed_query_coverage_bonus(
+                            text=f"{absolute_path}\n{snippet}",
+                            hints=hints,
+                        ),
                     ),
                 )
                 existing = hit_map.get(key)
@@ -477,6 +483,17 @@ def run_exact_backend(
         patterns.append((literal, ("literal_match",), 1.0))
     for symbol in hints.symbols:
         patterns.append((symbol, ("symbol_match", "literal_match"), 0.9))
+    if hints.query_kind == "mixed":
+        mixed_terms = sorted(
+            {
+                token
+                for token in hints.identifier_tokens
+                if len(token) >= 4 and token.isidentifier()
+            },
+            key=lambda item: (-len(item), item),
+        )
+        for token in mixed_terms[:3]:
+            patterns.append((token, ("token_match",), 0.55))
     if not patterns:
         patterns.append((query.strip(), ("literal_match",), 0.7))
 
@@ -605,7 +622,13 @@ def run_exact_backend(
                 0.0,
                 min(
                     1.0,
-                    base_score + bonus + _exact_ranking_adjustment(absolute_path, parts[2].strip()),
+                    base_score
+                    + bonus
+                    + _exact_ranking_adjustment(absolute_path, parts[2].strip())
+                    + _mixed_query_coverage_bonus(
+                        text=f"{absolute_path}\n{snippet}",
+                        hints=hints,
+                    ),
                 ),
             )
             existing = hit_map.get(key)
@@ -774,6 +797,28 @@ def _usage_intent(query: str) -> bool:
     return "who calls" in lowered or bool(_USAGE_INTENT_RE.search(query))
 
 
+def _mixed_query_coverage_bonus(*, text: str, hints: QueryHints) -> float:
+    """Reward exact hits that satisfy multiple salient mixed-query terms."""
+    if hints.query_kind != "mixed":
+        return 0.0
+    lowered = text.lower()
+    terms: list[str] = []
+    for token in hints.identifier_tokens:
+        normalized = token.strip().lower()
+        if len(normalized) < 4:
+            continue
+        if normalized in {"with", "from", "this", "that", "where"}:
+            continue
+        if normalized not in terms:
+            terms.append(normalized)
+    if not terms:
+        return 0.0
+    matched = sum(1 for term in terms if term in lowered)
+    if matched <= 1:
+        return 0.0
+    return min(0.16, 0.04 * (matched - 1))
+
+
 def _resolve_case_sensitive(
     *,
     symbol_candidates: tuple[str, ...],
@@ -784,6 +829,20 @@ def _resolve_case_sensitive(
     if execution_hints.case_mode == "smart":
         return any(any(char.isupper() for char in candidate) for candidate in symbol_candidates)
     return False
+
+
+def _symbol_path_bonus(path: str, *, occurrence_kind: str) -> float:
+    bonus = 0.0
+    if _is_source_code_path(path):
+        bonus += 0.08
+    if _is_docs_or_changelog_path(path):
+        bonus -= 0.10
+    if _is_test_path(path):
+        bonus -= 0.08
+    basename = Path(path).name.lower()
+    if basename == "__init__.py" and occurrence_kind != "def":
+        bonus -= 0.14
+    return bonus
 
 
 def _symbol_match_score(
@@ -825,7 +884,7 @@ def _symbol_match_score(
 def _kind_bonus(*, occurrence_kind: str, usage_intent: bool) -> float:
     if usage_intent:
         return 0.08 if occurrence_kind == "ref" else -0.12
-    return 0.08 if occurrence_kind == "def" else 0.0
+    return 0.08 if occurrence_kind == "def" else -0.16
 
 
 def run_symbol_backend(
@@ -897,7 +956,7 @@ def run_symbol_backend(
     usage_intent = _usage_intent(query)
 
     hits: list[BackendHit] = []
-    file_hit_counts: dict[str, int] = {}
+    kind_hit_counts: dict[tuple[str, str], int] = {}
     scored_occurrences: list[tuple[float, SymbolOccurrence, str]] = []
     for occurrence in occurrences:
         path = occurrence.path
@@ -926,14 +985,17 @@ def run_symbol_backend(
             0.0,
             min(
                 1.0,
-                score + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent),
+                score
+                + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent)
+                + _symbol_path_bonus(path, occurrence_kind=occurrence.kind),
             ),
         )
         scored_occurrences.append((score, occurrence, path))
-        file_hit_counts[path] = file_hit_counts.get(path, 0) + 1
+        count_key = (path, occurrence.kind)
+        kind_hit_counts[count_key] = kind_hit_counts.get(count_key, 0) + 1
 
     for base_score, occurrence, path in scored_occurrences:
-        group_count = file_hit_counts.get(path, 1)
+        group_count = kind_hit_counts.get((path, occurrence.kind), 1)
         group_bonus = min(0.06, 0.02 * (group_count - 1))
         score = max(0.0, min(1.0, base_score + group_bonus))
         snippet = _load_snippet(

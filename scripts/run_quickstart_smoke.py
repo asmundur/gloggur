@@ -76,7 +76,7 @@ def _base_env(repo_root: Path) -> Dict[str, str]:
     env["PYTHONPATH"] = (
         str(source_root) if not existing_path else f"{source_root}{os.pathsep}{existing_path}"
     )
-    env.setdefault("GLOGGUR_EMBEDDING_PROVIDER", "test")
+    env["GLOGGUR_EMBEDDING_PROVIDER"] = "test"
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
@@ -288,6 +288,8 @@ def run_quickstart_smoke(
             "summary": {
                 "repo": str(workspace_repo),
                 "created_fixture": created_fixture_root is not None,
+                "embedding_provider": "test",
+                "local_provider_bootstrap_validated": False,
                 "total_stages": len(stage_results),
                 "stage_names": [str(stage.get("name")) for stage in stage_results],
             },

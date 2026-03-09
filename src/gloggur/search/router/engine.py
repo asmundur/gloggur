@@ -5,7 +5,7 @@ import re
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from gloggur.byte_spans import to_repo_relative_path
@@ -17,6 +17,16 @@ from gloggur.search.router.backends import (
 )
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
+from gloggur.search.router.locality import (
+    LocalityAnchor,
+    LocalityState,
+    build_anchor_hit,
+    derive_candidate_test_paths,
+    is_source_path,
+    is_test_path,
+    load_locality_state,
+    persist_locality_state,
+)
 from gloggur.search.router.query_compat import ParsedQueryCompat, parse_query_compat
 from gloggur.search.router.telemetry import log_router_event
 from gloggur.search.router.types import (
@@ -41,6 +51,22 @@ _BACKEND_TIE_PRIORITY = {
     "semantic": 2,
 }
 _RANK_FUSION_K = 60
+_LOCALITY_NEARBY_RADIUS = 24
+_LOCALITY_STRONG_SCORE = 0.9
+
+
+@dataclass(frozen=True)
+class LocalityOutcome:
+    """Resolved locality behavior for one router search."""
+
+    mode: str = "none"
+    origin: str | None = None
+    anchor: LocalityAnchor | None = None
+    ambiguity_streak: int = 0
+    candidate_test_paths: tuple[str, ...] = ()
+    local_hit_counts: dict[str, int] | None = None
+    confirmation_suppressed: bool = False
+    forced_local_only: bool = False
 
 
 def _normalize_string_tuple(values: object) -> tuple[str, ...]:
@@ -600,6 +626,8 @@ def _decisive_non_semantic_result(
     outcome: RouterOutcome,
     backend_thresholds: dict[str, dict[str, object]],
     query_kind: str,
+    locality: LocalityOutcome,
+    repo_root: Path,
 ) -> bool:
     if outcome.strategy not in {"exact", "symbol"} or not hits:
         return False
@@ -607,12 +635,24 @@ def _decisive_non_semantic_result(
     if not bool(winner_status.get("threshold_met")):
         return False
 
+    if (
+        locality.anchor is not None
+        and locality.mode == "reused"
+        and hits[0].path == to_repo_relative_path(repo_root, locality.anchor.path)
+    ):
+        if locality.forced_local_only or locality.local_hit_counts is None:
+            return True
+        if int(locality.local_hit_counts.get("nonlocal", 0)) <= 0:
+            return True
+
     top_score = hits[0].score
     if len(hits) == 1:
         return top_score >= 0.80
 
     second_score = hits[1].score
     if hits[0].path == hits[1].path and abs(top_score - second_score) < 0.05:
+        if query_kind in {"identifier", "declaration"} and _hit_has_definition_signal(hits[0].tags):
+            return True
         return False
     if query_kind in {"identifier", "declaration"}:
         return top_score >= 0.85 and (
@@ -627,15 +667,24 @@ def _resolve_next_action(
     outcome: RouterOutcome,
     backend_thresholds: dict[str, dict[str, object]],
     query_kind: str,
+    locality: LocalityOutcome,
+    repo_root: Path,
 ) -> tuple[bool, str, str | None]:
     decisive = _decisive_non_semantic_result(
         hits=hits,
         outcome=outcome,
         backend_thresholds=backend_thresholds,
         query_kind=query_kind,
+        locality=locality,
+        repo_root=repo_root,
     )
-    if decisive:
+    if decisive and not (locality.mode == "derived" and query_kind == "mixed"):
         return True, "open_hit_1", None
+
+    if locality.anchor is not None and locality.mode in {"derived", "reused"} and hits:
+        anchor_path = to_repo_relative_path(repo_root, locality.anchor.path)
+        if hits[0].path == anchor_path and locality.forced_local_only:
+            return True, "open_hit_1", None
 
     suggested_path_prefix = _suggested_path_prefix(hits)
     if suggested_path_prefix is not None:
@@ -750,6 +799,270 @@ def _pack_hits(
         )
 
     return tuple(context_hits)
+
+
+def _hit_has_definition_signal(tags: tuple[str, ...]) -> bool:
+    return any(
+        tag in tags for tag in ("symbol_def", "literal_match", "symbol_match", "locality_anchor")
+    )
+
+
+def _derive_locality_anchor(
+    *,
+    hits: list[BackendHit],
+    outcome: RouterOutcome,
+    query_kind: str,
+) -> LocalityAnchor | None:
+    if not hits or outcome.strategy not in {"exact", "symbol"}:
+        return None
+
+    scored_candidates: list[tuple[float, BackendHit]] = []
+    for hit in hits:
+        if not is_source_path(hit.path):
+            continue
+        score = hit.raw_score
+        if _hit_has_definition_signal(hit.tags):
+            score += 0.12
+        if hit.backend in {"exact", "symbol"}:
+            score += 0.06
+        if query_kind in {"identifier", "declaration"}:
+            score += 0.04
+        scored_candidates.append((score, hit))
+    if not scored_candidates:
+        return None
+
+    anchor_score, anchor_hit = sorted(
+        scored_candidates,
+        key=lambda item: (-item[0], item[1].path, item[1].start_line, item[1].end_line),
+    )[0]
+    minimum_score = 0.74 if query_kind in {"identifier", "declaration"} else 0.80
+    if anchor_score < minimum_score:
+        return None
+    return LocalityAnchor(
+        path=anchor_hit.path,
+        start_line=anchor_hit.start_line,
+        end_line=anchor_hit.end_line,
+        score=max(0.0, min(1.0, anchor_hit.raw_score)),
+        backend=anchor_hit.backend,
+        tags=anchor_hit.tags,
+    )
+
+
+def _same_span(hit: BackendHit, anchor: LocalityAnchor) -> bool:
+    return (
+        hit.path == anchor.path
+        and hit.start_line == anchor.start_line
+        and hit.end_line == anchor.end_line
+    )
+
+
+def _same_file(hit: BackendHit, anchor: LocalityAnchor) -> bool:
+    return hit.path == anchor.path
+
+
+def _span_distance(hit: BackendHit, anchor: LocalityAnchor) -> int:
+    if hit.path != anchor.path:
+        return 1_000_000
+    if hit.end_line < anchor.start_line:
+        return anchor.start_line - hit.end_line
+    if anchor.end_line < hit.start_line:
+        return hit.start_line - anchor.end_line
+    return 0
+
+
+def _is_near_anchor(hit: BackendHit, anchor: LocalityAnchor) -> bool:
+    return _same_file(hit, anchor) and _span_distance(hit, anchor) <= _LOCALITY_NEARBY_RADIUS
+
+
+def _is_local_neighborhood_hit(
+    hit: BackendHit,
+    *,
+    anchor: LocalityAnchor,
+    candidate_test_paths: tuple[str, ...],
+) -> bool:
+    normalized_tests = {path.replace("\\", "/") for path in candidate_test_paths}
+    hit_path = hit.path.replace("\\", "/")
+    return (
+        _same_file(hit, anchor)
+        or _is_near_anchor(hit, anchor)
+        or (is_test_path(hit.path) and hit_path in normalized_tests)
+    )
+
+
+def _locality_adjusted_score(
+    hit: BackendHit,
+    *,
+    anchor: LocalityAnchor,
+    candidate_test_paths: tuple[str, ...],
+    confirmation_penalty: bool,
+) -> float:
+    score = hit.raw_score
+    if _same_file(hit, anchor):
+        score += 0.35
+    if _is_near_anchor(hit, anchor):
+        score += 0.12
+    if is_test_path(hit.path) and hit.path.replace("\\", "/") in {
+        path.replace("\\", "/") for path in candidate_test_paths
+    }:
+        score += 0.18
+    elif is_test_path(hit.path):
+        score -= 0.04
+    if confirmation_penalty and not _is_local_neighborhood_hit(
+        hit,
+        anchor=anchor,
+        candidate_test_paths=candidate_test_paths,
+    ):
+        score -= 0.38
+    return score
+
+
+def _has_local_non_semantic_hits(
+    results: list[BackendResult],
+    *,
+    anchor: LocalityAnchor | None,
+) -> bool:
+    if anchor is None:
+        return False
+    for result in results:
+        if result.name not in {"exact", "symbol"}:
+            continue
+        for hit in result.hits:
+            if _same_file(hit, anchor) or is_test_path(hit.path):
+                return True
+    return False
+
+
+def _apply_locality_mode(
+    *,
+    selected_hits: list[BackendHit],
+    enriched_results: list[BackendResult],
+    hints: QueryHints,
+    outcome: RouterOutcome,
+    repo_root: Path,
+    config: SearchRouterConfig,
+    persisted_anchor: LocalityAnchor | None,
+    persisted_ambiguity_streak: int,
+    allow_reuse: bool,
+) -> tuple[list[BackendHit], LocalityOutcome]:
+    all_hits: list[BackendHit] = []
+    for result in enriched_results:
+        all_hits.extend(result.hits)
+
+    derived_anchor = _derive_locality_anchor(
+        hits=selected_hits or all_hits,
+        outcome=outcome,
+        query_kind=hints.query_kind,
+    )
+    anchor = derived_anchor
+    locality_mode = "derived" if derived_anchor is not None else "none"
+    locality_origin = "current_query" if derived_anchor is not None else None
+    ambiguity_streak = 0
+    if anchor is None and allow_reuse and persisted_anchor is not None:
+        anchor = persisted_anchor
+        locality_mode = "reused"
+        locality_origin = "persisted"
+        ambiguity_streak = max(0, persisted_ambiguity_streak)
+    if anchor is None:
+        return selected_hits, LocalityOutcome()
+
+    observed_test_paths = tuple(
+        sorted({hit.path.replace("\\", "/") for hit in all_hits if is_test_path(hit.path)})
+    )
+    candidate_test_paths = derive_candidate_test_paths(
+        repo_root=repo_root,
+        anchor_path=anchor.path,
+        observed_test_paths=observed_test_paths,
+        query_tokens=hints.identifier_tokens,
+    )
+    anchor_hit = next(
+        (hit for hit in [*selected_hits, *all_hits] if _same_span(hit, anchor)),
+        None,
+    )
+    if anchor_hit is None:
+        anchor_hit = build_anchor_hit(anchor=anchor, repo_root=repo_root, config=config)
+
+    seen_keys: set[tuple[str, int, int, str]] = set()
+    candidates: list[BackendHit] = []
+    for hit in [anchor_hit, *selected_hits, *all_hits]:
+        key = (hit.path, hit.start_line, hit.end_line, hit.backend)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        candidates.append(hit)
+
+    selected_nonlocal = any(
+        not _is_local_neighborhood_hit(
+            hit,
+            anchor=anchor,
+            candidate_test_paths=candidate_test_paths,
+        )
+        for hit in selected_hits[:4]
+    )
+    if locality_mode == "reused" and selected_nonlocal:
+        ambiguity_streak += 1
+    elif locality_mode == "reused":
+        ambiguity_streak = 0
+
+    confirmation_suppressed = locality_mode == "reused" and selected_nonlocal
+    forced_local_only = confirmation_suppressed and ambiguity_streak >= 2
+
+    ranked = sorted(
+        candidates,
+        key=lambda hit: (
+            -_locality_adjusted_score(
+                hit,
+                anchor=anchor,
+                candidate_test_paths=candidate_test_paths,
+                confirmation_penalty=confirmation_suppressed,
+            ),
+            hit.path,
+            hit.start_line,
+            hit.end_line,
+        ),
+    )
+    if forced_local_only:
+        ranked = [
+            hit
+            for hit in ranked
+            if _is_local_neighborhood_hit(
+                hit,
+                anchor=anchor,
+                candidate_test_paths=candidate_test_paths,
+            )
+        ]
+        if not ranked:
+            ranked = [anchor_hit]
+
+    local_counts = {
+        "same_file": sum(1 for hit in ranked if _same_file(hit, anchor)),
+        "nearby_same_file": sum(1 for hit in ranked if _is_near_anchor(hit, anchor)),
+        "candidate_tests": sum(
+            1
+            for hit in ranked
+            if is_test_path(hit.path)
+            and hit.path.replace("\\", "/")
+            in {path.replace("\\", "/") for path in candidate_test_paths}
+        ),
+        "nonlocal": sum(
+            1
+            for hit in ranked
+            if not _is_local_neighborhood_hit(
+                hit,
+                anchor=anchor,
+                candidate_test_paths=candidate_test_paths,
+            )
+        ),
+    }
+    return ranked, LocalityOutcome(
+        mode=locality_mode,
+        origin=locality_origin,
+        anchor=anchor,
+        ambiguity_streak=ambiguity_streak,
+        candidate_test_paths=candidate_test_paths,
+        local_hit_counts=local_counts,
+        confirmation_suppressed=confirmation_suppressed,
+        forced_local_only=forced_local_only,
+    )
 
 
 class SearchRouter:
@@ -895,6 +1208,16 @@ class SearchRouter:
         if hints.query_kind in {"identifier", "declaration"} and not explicit_regex_requested:
             backend_execution_hints = replace(resolved_execution_hints, fixed_string=True)
         backend_names = self._resolve_backends(normalized_mode)
+        reuse_locality_allowed = (
+            normalized_mode == "auto"
+            and not resolved_intent.path_prefix
+            and not resolved_intent.path_filters
+        )
+        persisted_locality_state = (
+            load_locality_state(repo_root=self.repo_root, config=self.config)
+            if reuse_locality_allowed
+            else None
+        )
 
         def _run_backend(name: str) -> BackendResult:
             if name == "exact":
@@ -985,6 +1308,15 @@ class SearchRouter:
                         "hybrid",
                         "suppressed",
                     }
+                    if needs_semantic_fallback and _has_local_non_semantic_hits(
+                        non_semantic_results,
+                        anchor=(
+                            persisted_locality_state.anchor
+                            if persisted_locality_state is not None
+                            else None
+                        ),
+                    ):
+                        needs_semantic_fallback = False
             if needs_semantic_fallback:
                 backend_results.append(_run_backend("semantic"))
 
@@ -1070,6 +1402,34 @@ class SearchRouter:
                 winner_result = results_by_name.get(outcome.strategy)
                 selected_hits = list(winner_result.hits if winner_result is not None else ())
 
+        selected_hits, locality = _apply_locality_mode(
+            selected_hits=selected_hits,
+            enriched_results=enriched_results,
+            hints=hints,
+            outcome=outcome,
+            repo_root=self.repo_root,
+            config=self.config,
+            persisted_anchor=(
+                persisted_locality_state.anchor if persisted_locality_state is not None else None
+            ),
+            persisted_ambiguity_streak=(
+                persisted_locality_state.ambiguity_streak
+                if persisted_locality_state is not None
+                else 0
+            ),
+            allow_reuse=reuse_locality_allowed,
+        )
+        if locality.anchor is not None:
+            persist_locality_state(
+                repo_root=self.repo_root,
+                config=self.config,
+                state=LocalityState(
+                    anchor=locality.anchor,
+                    updated_at_epoch=time.time(),
+                    ambiguity_streak=locality.ambiguity_streak,
+                ),
+            )
+
         packed_hits = _pack_hits(
             selected_hits,
             repo_root=self.repo_root,
@@ -1088,11 +1448,22 @@ class SearchRouter:
             and "identifier_query_high_top_k" not in warning_codes
         ):
             warning_codes.append("identifier_query_high_top_k")
+        if locality.mode in {"derived", "reused"} and "locality_mode_active" not in warning_codes:
+            warning_codes.append("locality_mode_active")
+        if (
+            locality.confirmation_suppressed
+            and "confirmation_query_downranked" not in warning_codes
+        ):
+            warning_codes.append("confirmation_query_downranked")
+        if locality.ambiguity_streak > 0 and "ambiguous_followup_detected" not in warning_codes:
+            warning_codes.append("ambiguous_followup_detected")
         decisive, next_action, suggested_path_prefix = _resolve_next_action(
             hits=packed_hits,
             outcome=outcome,
             backend_thresholds=backend_thresholds,
             query_kind=hints.query_kind,
+            locality=locality,
+            repo_root=self.repo_root,
         )
         summary: dict[str, object] = {
             "strategy": outcome.strategy,
@@ -1104,9 +1475,12 @@ class SearchRouter:
             "query_kind": hints.query_kind,
             "decisive": decisive,
             "next_action": next_action,
+            "locality_mode": locality.mode,
         }
         if suggested_path_prefix is not None:
             summary["suggested_path_prefix"] = suggested_path_prefix
+        if locality.anchor is not None:
+            summary["anchor_path"] = to_repo_relative_path(self.repo_root, locality.anchor.path)
 
         debug_payload: dict[str, object] = {
             "timings": {
@@ -1150,6 +1524,23 @@ class SearchRouter:
             "query_kind": hints.query_kind,
             "declaration_terms": list(hints.declaration_terms),
             "parsed_query": parsed_query.to_debug_payload(),
+            "locality": {
+                "mode": locality.mode,
+                "origin": locality.origin,
+                "ambiguity_streak": locality.ambiguity_streak,
+                "confirmation_suppressed": locality.confirmation_suppressed,
+                "forced_local_only": locality.forced_local_only,
+                "candidate_test_paths": [
+                    to_repo_relative_path(self.repo_root, path)
+                    for path in locality.candidate_test_paths
+                ],
+                "local_hit_counts": locality.local_hit_counts or {},
+                "anchor": (
+                    locality.anchor.to_payload(repo_root=self.repo_root)
+                    if locality.anchor is not None
+                    else None
+                ),
+            },
         }
 
         log_router_event(
@@ -1177,6 +1568,23 @@ class SearchRouter:
                     "hits": len(packed_hits),
                     "files": len({hit.path for hit in packed_hits}),
                     "chars": sum(len(hit.path) + len(hit.snippet) for hit in packed_hits),
+                },
+                "locality": {
+                    "mode": locality.mode,
+                    "origin": locality.origin,
+                    "ambiguity_streak": locality.ambiguity_streak,
+                    "confirmation_suppressed": locality.confirmation_suppressed,
+                    "forced_local_only": locality.forced_local_only,
+                    "anchor_path": (
+                        to_repo_relative_path(self.repo_root, locality.anchor.path)
+                        if locality.anchor is not None
+                        else None
+                    ),
+                    "candidate_test_paths": [
+                        to_repo_relative_path(self.repo_root, path)
+                        for path in locality.candidate_test_paths
+                    ],
+                    "local_hit_counts": locality.local_hit_counts or {},
                 },
                 "duration_ms": total_ms,
             },

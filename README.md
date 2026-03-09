@@ -1,6 +1,6 @@
 # Gloggur
 
-**Gloggur** is a self‑contained indexing and retrieval engine for codebases.  It is built as a *search, discovery and exploration* tool rather than a general agent framework.  Gloggur parses your repository into language‑agnostic symbols and chunks, builds a local metadata and vector store, and exposes a simple CLI that emits machine‑readable JSON for integration with agents or dashboards.
+**Gloggur** is a self-contained indexing and retrieval engine for codebases. It is built as a *search, discovery and exploration* tool rather than a general agent framework. Gloggur parses supported source files into language-agnostic symbols and chunks, builds a local metadata and vector store, and exposes a simple CLI that emits machine-readable JSON for integration with agents or dashboards.
 
 The current design emphasises **lexical candidate generation** backed by **semantic reranking**.  Gloggur still supports full vector search, but it treats grep/ripgrep queries and fully‑qualified names as first‑class citizens.  Search results are chunk‑aware, deterministic and enriched with parser metadata so that you can not only *find* code but also *explore* its relationships.
 
@@ -8,7 +8,7 @@ The current design emphasises **lexical candidate generation** backed by **seman
 
 ### Chunk‑first indexing
 
-Gloggur extracts symbols using Tree‑sitter parsers for Python (`.py`), JavaScript (`.js`, `.jsx`), TypeScript (`.ts`, `.tsx`), Rust (`.rs`), Go (`.go`), and Java (`.java`). Each symbol’s definition and docstring are split into one or more **chunks**, and each chunk is assigned a stable, hashed ID. The indexer persists symbols, chunks and edges into a local SQLite/FAISS cache. Incremental indexing updates only modified files, keeping search fast without reprocessing the entire project.
+Gloggur extracts baseline symbol coverage using Tree-sitter parsers for Python (`.py`), JavaScript (`.js`, `.jsx`), TypeScript (`.ts`, `.tsx`), Rust (`.rs`), Go (`.go`), and Java (`.java`). Each symbol's definition and docstring are split into one or more **chunks**, and each chunk is assigned a stable, hashed ID. The indexer persists symbols, chunks and edges into a local SQLite/FAISS cache. Incremental indexing updates only modified files, keeping search fast without reprocessing the entire project.
 
 ### Search & discovery
 
@@ -31,7 +31,7 @@ Regardless of mode, search produces a candidate set and optionally reranks it us
 
 Gloggur goes beyond search by providing a **reference graph**.  The `graph` command exposes:
 
-* `neighbors <symbol-id>` – get all outgoing edges for a symbol.
+* `neighbors <symbol-id>` – inspect incoming and outgoing edges for a symbol (bidirectional by default).
 * `incoming <symbol-id>` – list callers or importers.
 * `outgoing <symbol-id>` – list callees or referenced definitions.
 * `search <natural-language>` – retrieve symbols connected through graph edges that best match a description.
@@ -40,11 +40,11 @@ Edges have deterministic IDs and types (`CONTAINS`, `DEFINES`, `IMPORTS`, `CALLS
 
 ### Semantic reranking
 
-Embeddings are a core part of Gloggur.  They are used to rerank lexical results and power semantic search when appropriate.  The engine supports OpenAI, Gemini or any hugging‑face compatible local model via configuration.  If embeddings aren’t available, the system falls back to pure lexical ranking and still returns meaningful results.
+Embeddings are a core part of Gloggur. They are used to rerank lexical results and power semantic search when appropriate. The engine supports OpenAI, Gemini or any hugging-face compatible local model via configuration. The main `search` surface can degrade to lexical-only retrieval when semantic embeddings are unavailable; `graph search` still requires an embedding provider.
 
 ### Docstring audit
 
-The `inspect` command analyses docstrings and implementation to identify mismatches.  It flags missing descriptions, inaccurate parameter documentation and other quality issues.  Combined with search and graph, this helps ensure rewritten or refactored code preserves behaviour.
+The `inspect` command analyses docstrings and implementation to identify mismatches. It flags missing descriptions, inaccurate parameter documentation and other quality issues. Directory audits focus on source paths by default; add the include flags when you also want `tests/` or `scripts/`. Combined with search and graph, this helps ensure rewritten or refactored code preserves behaviour.
 
 ## Quickstart
 
@@ -181,6 +181,13 @@ gloggur index . --json --warn-on-skipped-extensions
 gloggur inspect . --json --warn-on-skipped-extensions
 ```
 
+## Current gotchas
+
+- Language support is baseline, not uniform. Current known construct gaps include JavaScript/TypeScript arrow or assigned function forms, TypeScript type aliases and enums, Go named struct/interface declarations, Rust impl/trait method forms, and Java record/enum declarations. Use `gloggur status --json` or `gloggur parsers check --json` when symbol fidelity matters for a workflow.
+- `gloggur inspect . --json` audits source paths by default. Add `--include-tests` and `--include-scripts` when you need a wider repo audit.
+- `gloggur watch init . --json` writes repo-local config. Later commands in that workspace may report `security_warning_codes=["untrusted_repo_config"]` because auto-discovered repo config is treated as untrusted by default.
+- This repo's quickstart smoke and most deterministic CI verification use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.
+
 ## Current status
 
-Gloggur’s chunk‑first architecture and graph retrieval surfaces landed in early March 2026.  The semantic reranking path is functional but the full‑corpus semantic search is still being tuned; hybrid search is the recommended mode until embedding pipelines are finalised.  Additional work on ranking heuristics and evaluation harnesses is underway, and future releases will continue to enhance search accuracy and exploration capabilities.
+Gloggur's chunk-first architecture and graph retrieval surfaces landed in early March 2026. The semantic reranking path is functional but the full-corpus semantic search is still being tuned; hybrid search is the recommended mode until embedding pipelines are finalised. Additional work on ranking heuristics and evaluation harnesses is underway, and future releases will continue to enhance search accuracy and exploration capabilities.
