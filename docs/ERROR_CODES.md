@@ -451,14 +451,14 @@ Fields:
   - Operator action: reindex using the current embedding profile.
 - `tool_version_changed`
   - Command(s): `status`, `search`.
-  - Meaning: current CLI/tool version differs from the last successful indexed version.
-  - Retryability: retry after a successful `gloggur index . --json` run with the current tool version.
-  - Operator action: rerun `gloggur index . --json` successfully, then recheck `status --json`.
+  - Meaning: current CLI/tool version differs from the last successful indexed version, but compatibility checks still passed so the cache remains reusable by default.
+  - Retryability: retry is allowed immediately; this code is advisory and should surface via `warning_codes`, not as a hard resume blocker by itself.
+  - Operator action: verify retrieval correctness and schedule `gloggur index . --json` when you want to refresh provenance under the current version.
 - `tool_version_changed_override`
   - Command(s): `status`, `search`.
-  - Meaning: tool-version drift override is active and resume was allowed explicitly.
-  - Retryability: retry is allowed, but only under deliberate operator override.
-  - Operator action: verify retrieval correctness and schedule a real reindex.
+  - Meaning: legacy compatibility code from the previous strict-drift policy. It is kept in the catalog for backward reference but is no longer emitted by current `status`/`search` flows.
+  - Retryability: not applicable for new runs.
+  - Operator action: update callers to rely on `tool_version_changed` warnings plus the standard resume fields.
 - `cache_corruption_recovered`
   - Command(s): `status`, `search`.
   - Meaning: cache corruption was detected and auto-recovery rebuilt the cache shell.

@@ -28,8 +28,7 @@ def _run_cli(args: list[str], env: dict[str, str]) -> subprocess.CompletedProces
     """Execute gloggur CLI in a fresh Python process."""
     return subprocess.run(
         [sys.executable, "-m", "gloggur.cli.main", *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
         timeout=60,
@@ -229,8 +228,8 @@ def test_resume_profile_alias_treats_hf_snapshot_and_short_name_as_compatible() 
         assert "embedding_profile_changed" not in set(metadata["resume_reason_codes"])
 
 
-def test_resume_requires_reindex_when_last_success_tool_version_is_tampered() -> None:
-    """Tampered last-success tool-version markers should fail closed with a machine-readable code."""
+def test_resume_warns_when_last_success_tool_version_is_tampered() -> None:
+    """Tampered last-success tool-version markers should remain reusable with a warning."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
@@ -250,26 +249,27 @@ def test_resume_requires_reindex_when_last_success_tool_version_is_tampered() ->
         status_run = _run_cli(["status", "--json"], env)
         assert status_run.returncode == 0, f"{status_run.stderr}\n{status_run.stdout}"
         payload = _parse_json_payload(status_run.stdout)
-        assert payload["resume_decision"] == "reindex_required"
-        assert payload["needs_reindex"] is True
-        assert "tool_version_changed" in set(payload["resume_reason_codes"])
+        assert payload["resume_decision"] == "resume_ok"
+        assert payload["needs_reindex"] is False
+        assert payload["resume_reason_codes"] == []
+        assert "tool_version_changed" in set(payload["warning_codes"])
         assert payload["last_success_tool_version_match"] is False
-        assert payload["resume_fingerprint_match"] is False
+        assert payload["resume_fingerprint_match"] is True
+        assert payload["last_success_resume_fingerprint_match"] is True
 
         search_run = _run_cli(["search", "add", "--json"], env)
-        assert search_run.returncode == 1, f"{search_run.stderr}\n{search_run.stdout}"
+        assert search_run.returncode == 0, f"{search_run.stderr}\n{search_run.stdout}"
         search_payload = _parse_json_payload(search_run.stdout)
-        error = search_payload["error"]
-        assert isinstance(error, dict)
-        assert error["code"] == "search_cache_not_ready"
         metadata = search_payload["metadata"]
         assert isinstance(metadata, dict)
-        assert metadata["needs_reindex"] is True
-        assert "tool_version_changed" in set(metadata["resume_reason_codes"])
-        assert metadata["resume_decision"] == "reindex_required"
+        assert metadata["needs_reindex"] is False
+        assert metadata["resume_reason_codes"] == []
+        assert "tool_version_changed" in set(metadata["warning_codes"])
+        assert metadata["resume_decision"] == "resume_ok"
 
 
-def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_marker_drifts() -> None:
+def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_marker_drifts(
+) -> None:
     """A successful no-op reindex should repair marker-only tool-version drift."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
@@ -283,7 +283,9 @@ def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_ma
         }
 
         first_index_run = _run_cli(["index", str(repo), "--json"], env)
-        assert first_index_run.returncode == 0, f"{first_index_run.stderr}\n{first_index_run.stdout}"
+        assert first_index_run.returncode == 0, (
+            f"{first_index_run.stderr}\n{first_index_run.stdout}"
+        )
 
         status_before_run = _run_cli(["status", "--json"], env)
         assert status_before_run.returncode == 0, (
@@ -304,8 +306,9 @@ def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_ma
             f"{status_drift_run.stderr}\n{status_drift_run.stdout}"
         )
         status_drift_payload = _parse_json_payload(status_drift_run.stdout)
-        assert status_drift_payload["resume_decision"] == "reindex_required"
-        assert status_drift_payload["resume_reason_codes"] == ["tool_version_changed"]
+        assert status_drift_payload["resume_decision"] == "resume_ok"
+        assert status_drift_payload["resume_reason_codes"] == []
+        assert "tool_version_changed" in set(status_drift_payload["warning_codes"])
         assert status_drift_payload["last_success_resume_fingerprint"] == first_fingerprint
         assert status_drift_payload["last_success_resume_at"] == first_resume_at
         assert status_drift_payload["last_success_tool_version_match"] is False
@@ -337,8 +340,8 @@ def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_ma
         assert status_after_payload["last_success_tool_version_match"] is True
 
 
-def test_resume_allows_explicit_tool_version_drift_override() -> None:
-    """Explicit override should allow resume/search while keeping drift diagnostics machine-readable."""
+def test_resume_accepts_explicit_tool_version_drift_override_input_as_noop() -> None:
+    """Explicit override input should not change the default advisory drift behavior."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
@@ -362,8 +365,9 @@ def test_resume_allows_explicit_tool_version_drift_override() -> None:
         assert payload["needs_reindex"] is False
         assert payload["allow_tool_version_drift"] is True
         assert payload["tool_version_drift_detected"] is True
-        assert payload["tool_version_drift_override_applied"] is True
-        assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+        assert payload["tool_version_drift_override_applied"] is False
+        assert payload["resume_reason_codes"] == []
+        assert "tool_version_changed" in set(payload["warning_codes"])
         assert payload["reindex_reason"] is None
 
         search_run = _run_cli(
@@ -381,12 +385,13 @@ def test_resume_allows_explicit_tool_version_drift_override() -> None:
         assert metadata["needs_reindex"] is False
         assert metadata["allow_tool_version_drift"] is True
         assert metadata["tool_version_drift_detected"] is True
-        assert metadata["tool_version_drift_override_applied"] is True
-        assert metadata["resume_reason_codes"] == ["tool_version_changed_override"]
+        assert metadata["tool_version_drift_override_applied"] is False
+        assert metadata["resume_reason_codes"] == []
+        assert "tool_version_changed" in set(metadata["warning_codes"])
 
 
-def test_resume_allows_tool_version_drift_override_from_env_var() -> None:
-    """Env override should enable tool-version drift resume behavior without CLI flag."""
+def test_resume_accepts_tool_version_drift_override_from_env_var_as_noop() -> None:
+    """Env override input should remain accepted without changing default drift behavior."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.py": source})
@@ -411,8 +416,9 @@ def test_resume_allows_tool_version_drift_override_from_env_var() -> None:
         assert payload["needs_reindex"] is False
         assert payload["allow_tool_version_drift"] is True
         assert payload["tool_version_drift_detected"] is True
-        assert payload["tool_version_drift_override_applied"] is True
-        assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+        assert payload["tool_version_drift_override_applied"] is False
+        assert payload["resume_reason_codes"] == []
+        assert "tool_version_changed" in set(payload["warning_codes"])
         assert payload["reindex_reason"] is None
 
         search_run = _run_cli(["search", "add", "--json"], env)
@@ -424,5 +430,6 @@ def test_resume_allows_tool_version_drift_override_from_env_var() -> None:
         assert metadata["needs_reindex"] is False
         assert metadata["allow_tool_version_drift"] is True
         assert metadata["tool_version_drift_detected"] is True
-        assert metadata["tool_version_drift_override_applied"] is True
-        assert metadata["resume_reason_codes"] == ["tool_version_changed_override"]
+        assert metadata["tool_version_drift_override_applied"] is False
+        assert metadata["resume_reason_codes"] == []
+        assert "tool_version_changed" in set(metadata["warning_codes"])

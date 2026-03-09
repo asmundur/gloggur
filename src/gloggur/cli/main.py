@@ -517,13 +517,12 @@ RESUME_REMEDIATION: dict[str, list[str]] = {
         "Run `gloggur index . --json` using the current embedding profile to refresh vectors.",
     ],
     "tool_version_changed": [
-        "Reindex with the current CLI/tool version before relying on cached retrieval.",
+        "Tool-version drift is advisory by default; verify retrieval correctness and "
+        "schedule a reindex if needed.",
     ],
     "tool_version_changed_override": [
-        "Override is active: verify retrieval correctness in "
-        "this runtime and schedule a full reindex "
-        "when possible.",
-        "Disable override and rerun `gloggur index . --json` before normal operations.",
+        "Legacy code: this override reason is no longer emitted now that tool-version drift "
+        "is advisory by default.",
     ],
     "cache_corruption_recovered": [
         "Rebuild the index after corruption recovery to restore full symbol coverage.",
@@ -1371,7 +1370,7 @@ def _tool_version_reindex_reason(
     last_success_tool_version: str | None,
     current_tool_version: str,
 ) -> str | None:
-    """Return reason when tool-version drift invalidates previously successful cache state."""
+    """Return a diagnostic string when tool-version drift is detected."""
     if last_success_tool_version is None:
         return None
     if last_success_tool_version == current_tool_version:
@@ -1396,6 +1395,26 @@ def _index_metadata_digest(metadata: IndexMetadata | None) -> str | None:
         "total_symbols": metadata.total_symbols,
         "indexed_files": metadata.indexed_files,
     }
+    return _stable_fingerprint(payload)
+
+
+def _resume_fingerprint(
+    *,
+    workspace_path_hash: str,
+    schema_version: str | None,
+    index_profile: str | None,
+    metadata_digest: str | None,
+    tool_version: str | None = None,
+) -> str:
+    """Return a deterministic resume fingerprint for compatibility or legacy matching."""
+    payload: dict[str, object] = {
+        "workspace_path_hash": workspace_path_hash,
+        "schema_version": schema_version,
+        "index_profile": index_profile,
+        "metadata_digest": metadata_digest,
+    }
+    if tool_version is not None:
+        payload["tool_version"] = tool_version
     return _stable_fingerprint(payload)
 
 
@@ -1449,7 +1468,7 @@ def _build_resume_contract(
         current_tool_version=tool_version,
     )
     tool_version_drift_detected = tool_version_reason is not None
-    tool_version_override_applied = allow_tool_version_drift and tool_version_drift_detected
+    tool_version_override_applied = False
     reset_signal = _reset_reindex_signal(reset_reason)
 
     reason_codes: list[str] = []
@@ -1469,43 +1488,35 @@ def _build_resume_contract(
         code = "missing_cached_profile" if cached_profile is None else "embedding_profile_changed"
         reason_codes.append(code)
         reason_details.append(profile_reason)
-    if tool_version_drift_detected:
-        if tool_version_override_applied:
-            reason_codes.append("tool_version_changed_override")
-            reason_details.append(
-                "tool version drift override enabled "
-                f"(cached={last_success_tool_version}, current={tool_version})"
-            )
-        else:
-            reason_codes.append("tool_version_changed")
-            reason_details.append(tool_version_reason)
     if reset_signal is not None:
         reason_codes.append(reset_signal[0])
         reason_details.append(reset_signal[1])
-    effective_needs_reindex = needs_reindex or (
-        tool_version_drift_detected and not allow_tool_version_drift
-    )
+    effective_needs_reindex = needs_reindex
 
     workspace_path_hash = _hash_content(os.path.abspath(os.getcwd()))
     metadata_digest = _index_metadata_digest(metadata)
-    cached_tool_version = last_success_tool_version or tool_version
-    expected_resume_fingerprint = _stable_fingerprint(
-        {
-            "workspace_path_hash": workspace_path_hash,
-            "schema_version": schema_version or CACHE_SCHEMA_VERSION,
-            "index_profile": normalized_expected_profile,
-            "metadata_digest": metadata_digest,
-            "tool_version": tool_version,
-        }
+    expected_resume_fingerprint = _resume_fingerprint(
+        workspace_path_hash=workspace_path_hash,
+        schema_version=schema_version or CACHE_SCHEMA_VERSION,
+        index_profile=normalized_expected_profile,
+        metadata_digest=metadata_digest,
     )
-    cached_resume_fingerprint = _stable_fingerprint(
-        {
-            "workspace_path_hash": workspace_path_hash,
-            "schema_version": schema_version,
-            "index_profile": normalized_cached_profile,
-            "metadata_digest": metadata_digest,
-            "tool_version": cached_tool_version,
-        }
+    cached_resume_fingerprint = _resume_fingerprint(
+        workspace_path_hash=workspace_path_hash,
+        schema_version=schema_version,
+        index_profile=normalized_cached_profile,
+        metadata_digest=metadata_digest,
+    )
+    legacy_expected_resume_fingerprint = (
+        _resume_fingerprint(
+            workspace_path_hash=workspace_path_hash,
+            schema_version=schema_version or CACHE_SCHEMA_VERSION,
+            index_profile=normalized_expected_profile,
+            metadata_digest=metadata_digest,
+            tool_version=last_success_tool_version,
+        )
+        if last_success_tool_version is not None
+        else None
     )
     resume_remediation = {
         code: RESUME_REMEDIATION.get(code, [DEFAULT_RESUME_REMEDIATION]) for code in reason_codes
@@ -1533,7 +1544,15 @@ def _build_resume_contract(
         "allow_tool_version_drift": allow_tool_version_drift,
         "tool_version_drift_override_applied": tool_version_override_applied,
         "last_success_resume_fingerprint_match": (
-            last_success_resume_fingerprint == expected_resume_fingerprint
+            last_success_resume_fingerprint
+            in {
+                fingerprint
+                for fingerprint in (
+                    expected_resume_fingerprint,
+                    legacy_expected_resume_fingerprint,
+                )
+                if fingerprint is not None
+            }
             if last_success_resume_fingerprint is not None
             else None
         ),
@@ -1640,10 +1659,7 @@ def _build_search_health_snapshot(
         last_success_tool_version=last_success_tool_version,
         current_tool_version=GLOGGUR_VERSION,
     )
-    effective_tool_version_reason = tool_version_reason
-    if allow_tool_version_drift and tool_version_reason is not None:
-        effective_tool_version_reason = None
-    reindex_reason = metadata_reason or profile_reason or effective_tool_version_reason
+    reindex_reason = metadata_reason or profile_reason
     if cache.last_reset_reason:
         reset_label = "cache schema rebuilt"
         if "cache corruption detected" in cache.last_reset_reason:
@@ -1675,6 +1691,8 @@ def _build_search_health_snapshot(
         warning_codes.append("legacy_search_surface")
     if needs_reindex:
         warning_codes.append("reindex_required")
+    if tool_version_reason is not None and "tool_version_changed" not in warning_codes:
+        warning_codes.append("tool_version_changed")
     if build_state is not None:
         state = str(build_state.get("state"))
         if stale_build_state and "stale_build_state" not in warning_codes:
@@ -1741,19 +1759,39 @@ def _persist_last_success_resume_state(config: GloggurConfig, cache: CacheManage
     reason_codes = resume_contract.get("resume_reason_codes")
     if not isinstance(reason_codes, list):
         return
-    pure_tool_version_drift = reason_codes == ["tool_version_changed"]
-    if resume_contract["resume_decision"] != "resume_ok" and not pure_tool_version_drift:
+    if resume_contract["resume_decision"] != "resume_ok":
         return
     fingerprint = resume_contract["expected_resume_fingerprint"]
     if not isinstance(fingerprint, str):
         return
+    workspace_path_hash = _hash_content(os.path.abspath(os.getcwd()))
+    metadata_digest = _index_metadata_digest(metadata)
+    normalized_expected_profile = (
+        _canonicalize_embedding_profile(config.embedding_profile()) or config.embedding_profile()
+    )
+    legacy_fingerprint = (
+        _resume_fingerprint(
+            workspace_path_hash=workspace_path_hash,
+            schema_version=cache.get_schema_version() or CACHE_SCHEMA_VERSION,
+            index_profile=normalized_expected_profile,
+            metadata_digest=metadata_digest,
+            tool_version=stored_tool_version,
+        )
+        if stored_tool_version is not None
+        else None
+    )
     if fingerprint == stored_fingerprint:
         if stored_tool_version == GLOGGUR_VERSION:
             return
         cache.set_last_success_tool_version(GLOGGUR_VERSION)
         return
-    # Preserve unchanged re-index idempotence: if the fingerprint already matches, only
-    # repair the tool-version marker and avoid advancing the last-success timestamp.
+    if legacy_fingerprint is not None and stored_fingerprint == legacy_fingerprint:
+        cache.set_last_success_resume_fingerprint(fingerprint)
+        if stored_tool_version != GLOGGUR_VERSION:
+            cache.set_last_success_tool_version(GLOGGUR_VERSION)
+        return
+    # Preserve unchanged re-index idempotence: if only the stored markers differ from the
+    # current canonical state, repair them without advancing the last-success timestamp.
     cache.set_last_success_resume_fingerprint(fingerprint)
     cache.set_last_success_resume_at(metadata.last_updated.isoformat())
     cache.set_last_success_tool_version(GLOGGUR_VERSION)
@@ -5402,7 +5440,10 @@ def _emit_find_success(
     "--allow-tool-version-drift",
     is_flag=True,
     default=False,
-    help="Allow search when only tool-version drift is detected in resume metadata.",
+    help=(
+        "Accepted for backward compatibility; search already allows "
+        "tool-version drift by default."
+    ),
 )
 @_with_io_failure_handling
 def search(
@@ -5601,7 +5642,10 @@ def search(
     "--allow-tool-version-drift",
     is_flag=True,
     default=False,
-    help="Allow search when only tool-version drift is detected in resume metadata.",
+    help=(
+        "Accepted for backward compatibility; search already allows "
+        "tool-version drift by default."
+    ),
 )
 @_with_io_failure_handling
 def find(
@@ -6915,7 +6959,10 @@ def watch_status(config_path: str | None, as_json: bool) -> None:
     "--allow-tool-version-drift",
     is_flag=True,
     default=False,
-    help="Allow status resume_ok when only tool-version drift is detected.",
+    help=(
+        "Accepted for backward compatibility; status already allows "
+        "tool-version drift by default."
+    ),
 )
 @_with_io_failure_handling
 def status(config_path: str | None, as_json: bool, allow_tool_version_drift: bool) -> None:

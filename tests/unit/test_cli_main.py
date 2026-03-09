@@ -1213,7 +1213,7 @@ def test_resume_contract_missing_metadata_has_machine_reason_code() -> None:
 
 
 def test_resume_contract_build_in_progress_has_dual_reason_codes() -> None:
-    """An active build without metadata should expose build_in_progress plus legacy fallback code."""
+    """An active build without metadata should expose build_in_progress plus a legacy code."""
     payload = _build_resume_contract(
         metadata=None,
         build_state={
@@ -1335,20 +1335,16 @@ def test_resume_contract_reports_last_success_fingerprint_match_signal() -> None
     assert mismatch_payload["last_success_resume_fingerprint_match"] is False
 
 
-def test_resume_contract_detects_tool_version_drift_since_last_success() -> None:
-    """Tool-version drift should be detectable without mislabeling profile drift."""
+def test_resume_contract_treats_tool_version_drift_as_warning_only() -> None:
+    """Tool-version drift should remain detectable without forcing reindex_required."""
     metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
-    old_fingerprint = _build_resume_contract(
-        metadata=metadata,
+    old_fingerprint = cli_main._resume_fingerprint(
+        workspace_path_hash=cli_main._hash_content(os.path.abspath(os.getcwd())),
         schema_version="2",
-        expected_profile="local:model-a",
-        cached_profile="local:model-a",
-        reset_reason=None,
-        needs_reindex=False,
-        last_success_resume_fingerprint=None,
-        last_success_resume_at=None,
+        index_profile="local:model-a",
+        metadata_digest=cli_main._index_metadata_digest(metadata),
         tool_version="0.1.0",
-    )["expected_resume_fingerprint"]
+    )
     assert isinstance(old_fingerprint, str)
     payload = _build_resume_contract(
         metadata=metadata,
@@ -1362,15 +1358,17 @@ def test_resume_contract_detects_tool_version_drift_since_last_success() -> None
         tool_version="0.2.0",
         last_success_tool_version="0.1.0",
     )
-    assert payload["resume_decision"] == "reindex_required"
-    assert payload["resume_reason_codes"] == ["tool_version_changed"]
-    assert payload["resume_fingerprint_match"] is False
+    assert payload["resume_decision"] == "resume_ok"
+    assert payload["resume_reason_codes"] == []
+    assert payload["resume_fingerprint_match"] is True
     assert payload["last_success_tool_version_match"] is False
-    assert payload["last_success_resume_fingerprint_match"] is False
+    assert payload["tool_version_drift_detected"] is True
+    assert payload["tool_version_drift_override_applied"] is False
+    assert payload["last_success_resume_fingerprint_match"] is True
 
 
-def test_resume_contract_tool_version_override_is_explicit_and_resume_ok() -> None:
-    """Explicit tool-version drift override should be machine-readable and not silent."""
+def test_resume_contract_tool_version_override_input_is_backward_compatible_noop() -> None:
+    """Explicit override input should not change the default advisory drift behavior."""
     metadata = IndexMetadata(version="1", total_symbols=2, indexed_files=1)
     payload = _build_resume_contract(
         metadata=metadata,
@@ -1387,19 +1385,15 @@ def test_resume_contract_tool_version_override_is_explicit_and_resume_ok() -> No
     )
 
     assert payload["resume_decision"] == "resume_ok"
-    assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+    assert payload["resume_reason_codes"] == []
     assert payload["tool_version_drift_detected"] is True
     assert payload["allow_tool_version_drift"] is True
-    assert payload["tool_version_drift_override_applied"] is True
-    remediation = payload["resume_remediation"]
-    assert isinstance(remediation, dict)
-    assert "tool_version_changed_override" in remediation
-    assert isinstance(remediation["tool_version_changed_override"], list)
-    assert remediation["tool_version_changed_override"]
+    assert payload["tool_version_drift_override_applied"] is False
+    assert payload["resume_remediation"] == {}
 
 
-def test_resume_contract_tool_version_override_does_not_bypass_missing_metadata() -> None:
-    """Tool-version override must not mask true missing-metadata reindex requirements."""
+def test_resume_contract_tool_version_override_input_does_not_bypass_missing_metadata() -> None:
+    """Override input must not mask true missing-metadata reindex requirements."""
     payload = _build_resume_contract(
         metadata=None,
         schema_version="2",
@@ -1416,9 +1410,8 @@ def test_resume_contract_tool_version_override_does_not_bypass_missing_metadata(
 
     assert payload["resume_decision"] == "reindex_required"
     assert payload["allow_tool_version_drift"] is True
-    assert payload["tool_version_drift_override_applied"] is True
+    assert payload["tool_version_drift_override_applied"] is False
     codes = set(payload["resume_reason_codes"])
-    assert "tool_version_changed_override" in codes
     assert "missing_index_metadata" in codes
     assert "index_interrupted" in codes
 
@@ -1596,7 +1589,95 @@ def test_persist_last_success_resume_state_repairs_only_tool_version_marker() ->
     assert cache._at == original_resume_at
 
 
-def test_persist_last_success_resume_state_repairs_tool_version_drift_with_stale_fingerprint() -> None:
+def test_persist_last_success_resume_state_rewrites_legacy_fingerprint_without_timestamp_bump(
+) -> None:
+    """Legacy tool-version-inclusive fingerprints should be rewritten in-place on no-op index."""
+
+    writes: list[tuple[str, str]] = []
+    metadata = IndexMetadata(
+        version="1",
+        total_symbols=5,
+        indexed_files=2,
+        last_updated=datetime(2026, 3, 9, 0, 0, tzinfo=timezone.utc),
+    )
+    config = cli_main.GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="microsoft/codebert-base",
+        cache_dir="/tmp/cache",
+    )
+    expected_fingerprint = _build_resume_contract(
+        metadata=metadata,
+        build_state=None,
+        schema_version="2",
+        expected_profile=config.embedding_profile(),
+        cached_profile=config.embedding_profile(),
+        reset_reason=None,
+        needs_reindex=False,
+        last_success_resume_fingerprint=None,
+        last_success_resume_at=None,
+        tool_version=cli_main.GLOGGUR_VERSION,
+    )["expected_resume_fingerprint"]
+    assert isinstance(expected_fingerprint, str)
+    legacy_fingerprint = cli_main._resume_fingerprint(
+        workspace_path_hash=cli_main._hash_content(os.path.abspath(os.getcwd())),
+        schema_version="2",
+        index_profile=config.embedding_profile(),
+        metadata_digest=cli_main._index_metadata_digest(metadata),
+        tool_version="0.0.1",
+    )
+    original_resume_at = "2026-03-01T00:00:00+00:00"
+
+    class FakeCache:
+        last_reset_reason = None
+        _fingerprint = legacy_fingerprint
+        _at = original_resume_at
+        _tool_version = "0.0.1"
+
+        def get_index_metadata(self) -> IndexMetadata:
+            return metadata
+
+        def get_schema_version(self) -> str:
+            return "2"
+
+        def get_index_profile(self) -> str:
+            return config.embedding_profile()
+
+        def get_last_success_resume_fingerprint(self) -> str:
+            return self._fingerprint
+
+        def set_last_success_resume_fingerprint(self, fp: str) -> None:
+            writes.append(("fingerprint", fp))
+            self._fingerprint = fp
+
+        def get_last_success_resume_at(self) -> str:
+            return self._at
+
+        def set_last_success_resume_at(self, ts: str) -> None:
+            writes.append(("at", ts))
+            self._at = ts
+
+        def get_last_success_tool_version(self) -> str:
+            return self._tool_version
+
+        def set_last_success_tool_version(self, v: str) -> None:
+            writes.append(("tool_version", v))
+            self._tool_version = v
+
+    cache = FakeCache()
+
+    _persist_last_success_resume_state(config, cache)
+
+    assert writes == [
+        ("fingerprint", expected_fingerprint),
+        ("tool_version", cli_main.GLOGGUR_VERSION),
+    ]
+    assert cache._fingerprint == expected_fingerprint
+    assert cache._at == original_resume_at
+    assert cache._tool_version == cli_main.GLOGGUR_VERSION
+
+
+def test_persist_last_success_resume_state_repairs_tool_version_drift_with_stale_fingerprint(
+) -> None:
     """Pure tool-version drift with stale/missing last-success state should repair all markers."""
 
     writes: list[tuple[str, str]] = []
@@ -1675,8 +1756,8 @@ def test_persist_last_success_resume_state_repairs_tool_version_drift_with_stale
     assert cache._tool_version == cli_main.GLOGGUR_VERSION
 
 
-def test_build_status_payload_requires_reindex_on_tool_version_drift() -> None:
-    """Status payload should fail closed when last-success tool version drifts."""
+def test_build_status_payload_warns_on_tool_version_drift_without_requiring_reindex() -> None:
+    """Status payload should treat tool-version drift as advisory by default."""
     config = cli_main.GloggurConfig(
         embedding_provider="local",
         local_embedding_model="microsoft/codebert-base",
@@ -1706,18 +1787,26 @@ def test_build_status_payload_requires_reindex_on_tool_version_drift() -> None:
 
         def list_symbols(self) -> list[object]:
             return [object(), object(), object()]
+
+        def get_search_integrity(self) -> dict[str, object]:
+            return {
+                "vector_cache": {"status": "passed", "reason_codes": []},
+                "chunk_span": {"status": "passed", "reason_codes": []},
+            }
 
     payload = cli_main._build_status_payload(config, FakeCache())
 
-    assert payload["needs_reindex"] is True
-    assert "tool version changed" in str(payload["reindex_reason"])
-    assert payload["resume_decision"] == "reindex_required"
-    assert payload["resume_reason_codes"] == ["tool_version_changed"]
-    assert payload["resume_fingerprint_match"] is False
+    assert payload["needs_reindex"] is False
+    assert payload["reindex_reason"] is None
+    assert payload["resume_decision"] == "resume_ok"
+    assert payload["resume_reason_codes"] == []
+    assert payload["resume_fingerprint_match"] is True
+    assert payload["warning_codes"] == ["tool_version_changed"]
+    assert payload["tool_version_drift_detected"] is True
 
 
-def test_build_status_payload_allows_explicit_tool_version_drift_override() -> None:
-    """Status payload should allow explicit tool-version drift override with explicit metadata."""
+def test_build_status_payload_accepts_tool_version_override_input_as_noop() -> None:
+    """Status payload should keep backward-compatible override input without changing behavior."""
     config = cli_main.GloggurConfig(
         embedding_provider="local",
         local_embedding_model="microsoft/codebert-base",
@@ -1747,6 +1836,12 @@ def test_build_status_payload_allows_explicit_tool_version_drift_override() -> N
 
         def list_symbols(self) -> list[object]:
             return [object(), object(), object()]
+
+        def get_search_integrity(self) -> dict[str, object]:
+            return {
+                "vector_cache": {"status": "passed", "reason_codes": []},
+                "chunk_span": {"status": "passed", "reason_codes": []},
+            }
 
     payload = cli_main._build_status_payload(
         config,
@@ -1757,10 +1852,11 @@ def test_build_status_payload_allows_explicit_tool_version_drift_override() -> N
     assert payload["needs_reindex"] is False
     assert payload["reindex_reason"] is None
     assert payload["resume_decision"] == "resume_ok"
-    assert payload["resume_reason_codes"] == ["tool_version_changed_override"]
+    assert payload["resume_reason_codes"] == []
+    assert payload["warning_codes"] == ["tool_version_changed"]
     assert payload["tool_version_drift_detected"] is True
     assert payload["allow_tool_version_drift"] is True
-    assert payload["tool_version_drift_override_applied"] is True
+    assert payload["tool_version_drift_override_applied"] is False
 
 
 def test_resolve_allow_tool_version_drift_combines_cli_flag_and_env(
@@ -2700,7 +2796,7 @@ def test_index_json_reports_missing_embedding_provider_configuration(
 def test_search_json_reports_missing_embedding_provider_configuration(
     tmp_path: Path,
 ) -> None:
-    """search --json should remain available via deterministic non-semantic backends when provider is unset."""
+    """search --json should stay available via deterministic non-semantic backends."""
     runner = CliRunner()
     cache_dir = tmp_path / "cache"
     config_path = tmp_path / ".gloggur.yaml"
@@ -2728,11 +2824,11 @@ def test_search_json_reports_missing_embedding_provider_configuration(
     assert "Traceback (most recent call last)" not in result.output
 
 
-def test_search_json_requires_reindex_on_tool_version_drift(
+def test_search_json_allows_tool_version_drift_by_default(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """search --json should fail closed when cached tool-version marker drifts."""
+    """search --json should allow pure tool-version drift and emit a warning."""
     runner = CliRunner()
 
     class FakeCache:
@@ -2756,6 +2852,45 @@ def test_search_json_requires_reindex_on_tool_version_drift(
         def get_last_success_tool_version(self) -> str:
             return "0.0.1"
 
+        def get_search_integrity(self) -> dict[str, object]:
+            return {
+                "vector_cache": {"status": "passed", "reason_codes": []},
+                "chunk_span": {"status": "passed", "reason_codes": []},
+            }
+
+    class FakeEmbedding:
+        provider = "local"
+
+    class FakeHybridSearch:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str],
+            top_k: int,
+            context_radius: int,
+        ) -> dict[str, object]:
+            _ = filters
+            _ = top_k
+            _ = context_radius
+            return {
+                "query": query,
+                "results": [
+                    {
+                        "symbol": "needle",
+                        "kind": "function",
+                        "file": "sample.py",
+                        "line": 1,
+                        "signature": "def needle() -> None",
+                        "similarity_score": 0.9,
+                    }
+                ],
+                "metadata": {"total_results": 1, "search_time_ms": 1},
+            }
+
     config = cli_main.GloggurConfig(
         embedding_provider="local",
         local_embedding_model="microsoft/codebert-base",
@@ -2766,23 +2901,27 @@ def test_search_json_requires_reindex_on_tool_version_drift(
         "_create_runtime",
         lambda **_kwargs: (config, FakeCache(), object()),
     )
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: FakeEmbedding(),
+    )
+    monkeypatch.setattr(cli_main, "MetadataStore", lambda _cfg: object())
+    monkeypatch.setattr(cli_main, "HybridSearch", FakeHybridSearch)
 
     result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
 
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 0, result.output
     payload = _parse_json_output(result.output)
-    assert payload["results"] == []
-    error = payload["error"]
-    assert isinstance(error, dict)
-    assert error["type"] == "search_unavailable"
-    assert error["code"] == "search_cache_not_ready"
-    assert error["category"] == "cache_not_ready"
+    assert payload["results"]
     metadata = payload["metadata"]
     assert isinstance(metadata, dict)
-    assert metadata["needs_reindex"] is True
-    assert "tool version changed" in str(metadata["reindex_reason"])
-    assert metadata["resume_decision"] == "reindex_required"
-    assert metadata["resume_reason_codes"] == ["tool_version_changed"]
+    assert metadata["needs_reindex"] is False
+    assert metadata["reindex_reason"] is None
+    assert metadata["resume_decision"] == "resume_ok"
+    assert metadata["resume_reason_codes"] == []
+    assert "tool_version_changed" in set(metadata["warning_codes"])
+    assert metadata["tool_version_drift_detected"] is True
 
 
 def test_search_json_requires_reindex_while_build_is_in_progress(
@@ -2936,11 +3075,11 @@ def test_search_json_reports_stale_build_state_for_dead_pid(
     assert "build_in_progress" not in warning_codes
 
 
-def test_search_json_allows_explicit_tool_version_drift_override(
+def test_search_json_accepts_tool_version_drift_override_input_as_noop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """search --json should proceed only when explicit tool-version drift override is set."""
+    """search --json should keep backward-compatible override input without changing behavior."""
     runner = CliRunner()
 
     class FakeCache:
@@ -2963,6 +3102,12 @@ def test_search_json_allows_explicit_tool_version_drift_override(
 
         def get_last_success_tool_version(self) -> str:
             return "0.0.1"
+
+        def get_search_integrity(self) -> dict[str, object]:
+            return {
+                "vector_cache": {"status": "passed", "reason_codes": []},
+                "chunk_span": {"status": "passed", "reason_codes": []},
+            }
 
     class FakeEmbedding:
         provider = "local"
@@ -3027,17 +3172,18 @@ def test_search_json_allows_explicit_tool_version_drift_override(
     assert isinstance(metadata, dict)
     assert metadata["resume_decision"] == "resume_ok"
     assert metadata["needs_reindex"] is False
-    assert metadata["resume_reason_codes"] == ["tool_version_changed_override"]
+    assert metadata["resume_reason_codes"] == []
+    assert "tool_version_changed" in set(metadata["warning_codes"])
     assert metadata["tool_version_drift_detected"] is True
     assert metadata["allow_tool_version_drift"] is True
-    assert metadata["tool_version_drift_override_applied"] is True
+    assert metadata["tool_version_drift_override_applied"] is False
 
 
 def test_search_json_retries_once_for_low_confidence_and_emits_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Low-confidence retrieval should remain single-pass under router v2 with explicit low-confidence metadata."""
+    """Low-confidence retrieval should stay single-pass with explicit metadata."""
     runner = CliRunner()
     search_top_k_calls: list[int] = []
 
@@ -3732,7 +3878,7 @@ def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """search --ranking-mode should be preserved in metadata while router applies deterministic backend defaults."""
+    """search --ranking-mode should be preserved while router applies backend defaults."""
     runner = CliRunner()
     captured_filters: dict[str, str] = {}
 
@@ -3835,7 +3981,7 @@ def test_search_json_context_radius_is_forwarded_and_reflected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """search --context-radius should be reflected in metadata while semantic backend uses router-default snippet radius."""
+    """search --context-radius should be reflected while the backend keeps its default radius."""
     runner = CliRunner()
     captured_context_radius: list[int] = []
 
@@ -4146,7 +4292,7 @@ def test_find_text_output_reports_decision_statuses(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """find should emit a terse first-line status for decisive/ambiguous/empty/suppressed results."""
+    """find should emit a terse first-line status across result-decision cases."""
     runner = CliRunner()
     cases = [
         (
