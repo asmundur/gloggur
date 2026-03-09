@@ -76,6 +76,7 @@ def test_error_catalog_contract_passes_when_required_headings_and_codes_exist(
                 "`search_evidence_trace_invalid`",
                 "`search_grounding_validation_failed`",
                 "`search_stream_contract_conflict`",
+                "`find_stream_contract_conflict`",
                 "## Index Failure Codes",
                 "`decode_error`",
                 "`read_error`",

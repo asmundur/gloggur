@@ -112,9 +112,14 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```
 2. **Locate relevant code** with semantic search:
    ```bash
+   scripts/gloggur find "<query>"
+   scripts/gloggur find "<query>" --json
    scripts/gloggur search "<query>" --top-k 5 --json
    scripts/gloggur search "rg -S -g '*.py' AuthToken" --json
    ```
+   Prefer `find` for the first retrieval pass in agent loops. Drop to `search --json`
+   when you need exact byte offsets, full router/debug metadata, or the full
+   ContextPack v2 contract.
    If the cache is not reusable, `search --json` exits non-zero with
    `error.code=search_cache_not_ready` and a top-level `metadata` object that
    includes resume/build-state details.
@@ -186,6 +191,9 @@ Pytest defaults for this repo:
 
 ## Tips for effective searches
 
+- Use `find` first when you want the shortest viable answer for an agent loop.
+- Use `find --json` or `find --stream` when you need a slim, low-token machine-readable result set with exact byte offsets.
+- Use `search --json` when you need exact extraction offsets, resume/build-state metadata, or full router/debug payloads.
 - Search by **concepts**, not just filenames (e.g., "incremental hashing", "embedding provider", "tree-sitter parser").
 - Use `--top-k` to widen or narrow results based on the task.
 - Use `--stream` if you are integrating results into a tool chain.

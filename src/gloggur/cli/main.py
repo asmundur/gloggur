@@ -27,6 +27,7 @@ from uuid import uuid4
 
 import click
 import yaml
+from click.core import ParameterSource
 
 from gloggur import __version__ as GLOGGUR_VERSION
 from gloggur.adapters.registry import AdapterResolutionError
@@ -88,6 +89,7 @@ from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
 from gloggur.search import hybrid_search as hybrid_search_module
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router import (
+    ContextPack,
     SearchIntent,
     SearchRouter,
     load_search_router_config,
@@ -438,6 +440,9 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     ],
     "search_stream_contract_conflict": [
         "Disable --stream when requesting evidence trace/grounding validation payloads.",
+    ],
+    "find_stream_contract_conflict": [
+        "Disable --stream when requesting `--debug-router` output from `gloggur find`.",
     ],
 }
 INSPECT_FAILURE_REMEDIATION: dict[str, list[str]] = {
@@ -4652,6 +4657,514 @@ def _search_with_bounded_retry(
     return result, confidence_payload
 
 
+@dataclass(frozen=True)
+class SearchExecutionOutcome:
+    """Shared search execution result for command-specific serializers."""
+
+    config: GloggurConfig
+    health: dict[str, object]
+    resume_contract: dict[str, object]
+    query_mode: str
+    normalized_search_mode: str
+    resolved_path_prefix: str | None
+    resolved_max_snippets: int
+    pack: ContextPack | None = None
+    error_payload: dict[str, object] | None = None
+
+
+def _merge_search_warning_codes(
+    existing_codes: object,
+    health_warning_codes: object,
+) -> list[str]:
+    """Merge warning codes while preserving first-seen order."""
+    merged: list[str] = []
+    for source in (existing_codes, health_warning_codes):
+        if not isinstance(source, list):
+            continue
+        for code in source:
+            if isinstance(code, str) and code and code not in merged:
+                merged.append(code)
+    return merged
+
+
+def _ensure_search_backends_returned_evidence(pack: ContextPack) -> None:
+    """Fail loudly when every routed backend errors and no hits survive."""
+    debug_info = pack.debug or {}
+    backend_scores = debug_info.get("backend_scores")
+    backend_errors = debug_info.get("backend_errors")
+    if (
+        isinstance(backend_scores, dict)
+        and isinstance(backend_errors, dict)
+        and backend_scores
+        and len(backend_errors) >= len(backend_scores)
+        and not pack.hits
+    ):
+        raise CLIContractError(
+            "Search router backends failed to return usable evidence.",
+            error_code="search_router_backends_failed",
+        )
+
+
+def _attach_search_debug_metadata(
+    payload: dict[str, object],
+    *,
+    health: dict[str, object],
+    resume_contract: dict[str, object],
+) -> None:
+    """Attach shared debug metadata for search-derived success payloads."""
+    debug_payload = payload.get("debug")
+    if not isinstance(debug_payload, dict):
+        debug_payload = {}
+        payload["debug"] = debug_payload
+    debug_payload["resume_contract"] = resume_contract
+    debug_payload["search_health"] = health
+    debug_payload["tool_version"] = GLOGGUR_VERSION
+
+
+def _build_search_not_ready_debug_payload(
+    *,
+    health: dict[str, object],
+    query_mode: str,
+    normalized_search_mode: str,
+    language: str | None,
+    resolved_path_prefix: str | None,
+    max_files: int | None,
+    resolved_max_snippets: int,
+    time_budget_ms: int | None,
+    ranking_mode: str,
+    kind: str | None,
+    context_radius: int,
+    top_k: int,
+    confidence_threshold: float,
+    max_requery_attempts: int,
+    disable_bounded_requery: bool,
+) -> dict[str, object]:
+    """Build deterministic debug metadata for cache-not-ready search requests."""
+    return {
+        "search_health": health,
+        "query_mode": query_mode,
+        "search_mode": normalized_search_mode,
+        "language": language,
+        "path_prefix": resolved_path_prefix,
+        "max_files": max_files,
+        "max_snippets": resolved_max_snippets,
+        "time_budget_ms": time_budget_ms,
+        "ranking_mode": ranking_mode,
+        "kind": kind,
+        "context_radius": context_radius,
+        "top_k": top_k,
+        "confidence_threshold": confidence_threshold,
+        "max_requery_attempts": max_requery_attempts,
+        "bounded_retry_enabled": not disable_bounded_requery,
+        "tool_version": GLOGGUR_VERSION,
+    }
+
+
+def _execute_search_command(
+    *,
+    query: str,
+    config_path: str | None,
+    mode: str,
+    language: str | None,
+    path_prefix: str | None,
+    max_files: int | None,
+    max_snippets: int | None,
+    time_budget_ms: int | None,
+    debug_router: bool,
+    kind: str | None,
+    file_path: str | None,
+    search_mode: str,
+    top_k: int,
+    context_radius: int,
+    ranking_mode: str,
+    confidence_threshold: float,
+    max_requery_attempts: int,
+    disable_bounded_requery: bool,
+    with_evidence_trace: bool,
+    validate_grounding: bool,
+    evidence_min_confidence: float,
+    evidence_min_items: int,
+    fail_on_ungrounded: bool,
+    allow_tool_version_drift: bool,
+    entrypoint: str,
+    contract_version: str,
+    resolved_max_snippets: int,
+) -> SearchExecutionOutcome:
+    """Execute routed search once and return shared artifacts for serialization."""
+    resolved_allow_tool_version_drift = _resolve_allow_tool_version_drift(
+        cli_flag_enabled=allow_tool_version_drift
+    )
+    _validate_search_confidence_options(
+        top_k=top_k,
+        confidence_threshold=confidence_threshold,
+        max_requery_attempts=max_requery_attempts,
+    )
+    _validate_search_evidence_options(
+        evidence_min_confidence=evidence_min_confidence,
+        evidence_min_items=evidence_min_items,
+    )
+    _validate_search_router_options(
+        max_files=max_files,
+        max_snippets=max_snippets,
+        time_budget_ms=time_budget_ms,
+    )
+    if with_evidence_trace or validate_grounding or fail_on_ungrounded:
+        raise CLIContractError(
+            "Legacy evidence-trace/grounding options were removed from search JSON v2.",
+            error_code="search_contract_v1_removed",
+        )
+
+    config, cache, vector_store = _create_runtime(config_path=config_path)
+    health = _build_search_health_snapshot(
+        config,
+        cache,
+        entrypoint=entrypoint,
+        contract_version=contract_version,
+        allow_tool_version_drift=resolved_allow_tool_version_drift,
+    )
+    query_mode = mode.strip().lower()
+    normalized_search_mode = search_mode.strip().lower() if search_mode else "semantic"
+    resume_contract = health["resume_contract"]
+    assert isinstance(resume_contract, dict)
+    resolved_path_prefix = path_prefix if path_prefix else file_path
+
+    if bool(health["needs_reindex"]):
+        payload = _build_search_not_ready_payload(query=query, health=health)
+        if debug_router:
+            payload["debug"] = _build_search_not_ready_debug_payload(
+                health=health,
+                query_mode=query_mode,
+                normalized_search_mode=normalized_search_mode,
+                language=language,
+                resolved_path_prefix=resolved_path_prefix,
+                max_files=max_files,
+                resolved_max_snippets=resolved_max_snippets,
+                time_budget_ms=time_budget_ms,
+                ranking_mode=ranking_mode,
+                kind=kind,
+                context_radius=context_radius,
+                top_k=top_k,
+                confidence_threshold=confidence_threshold,
+                max_requery_attempts=max_requery_attempts,
+                disable_bounded_requery=disable_bounded_requery,
+            )
+        return SearchExecutionOutcome(
+            config=config,
+            health=health,
+            resume_contract=resume_contract,
+            query_mode=query_mode,
+            normalized_search_mode=normalized_search_mode,
+            resolved_path_prefix=resolved_path_prefix,
+            resolved_max_snippets=resolved_max_snippets,
+            error_payload=payload,
+        )
+
+    metadata_store = _create_metadata_store(config)
+    router_repo_root = _resolve_router_repo_root(
+        metadata_store=metadata_store,
+        fallback=Path.cwd(),
+    )
+    symbol_store = SymbolIndexStore(
+        SymbolIndexStoreConfig(repo_root=router_repo_root),
+        create_if_missing=False,
+    )
+    router_config = load_search_router_config(router_repo_root)
+    router = SearchRouter(
+        repo_root=router_repo_root,
+        searcher=None,
+        metadata_store=metadata_store,
+        symbol_store=symbol_store,
+        config=router_config,
+        searcher_factory=_build_lazy_searcher_factory(
+            config=config,
+            vector_store=vector_store,
+            metadata_store=metadata_store,
+            cache=cache,
+            allow_tool_version_drift=resolved_allow_tool_version_drift,
+        ),
+    )
+    routing_path_prefix = _resolve_search_path_filter_for_routing(
+        repo_root=router_repo_root,
+        raw_path=resolved_path_prefix,
+    )
+    intent = SearchIntent(
+        search_mode=normalized_search_mode,
+        language=language,
+        path_prefix=routing_path_prefix,
+        max_files=max_files,
+        max_snippets=resolved_max_snippets,
+        time_budget_ms=time_budget_ms,
+    )
+    pack = router.search(
+        query=query,
+        intent=intent,
+        mode=mode,
+        include_debug=debug_router,
+    )
+    _ensure_search_backends_returned_evidence(pack)
+    return SearchExecutionOutcome(
+        config=config,
+        health=health,
+        resume_contract=resume_contract,
+        query_mode=query_mode,
+        normalized_search_mode=normalized_search_mode,
+        resolved_path_prefix=resolved_path_prefix,
+        resolved_max_snippets=resolved_max_snippets,
+        pack=pack,
+    )
+
+
+def _build_search_success_payload(
+    outcome: SearchExecutionOutcome,
+    *,
+    debug_router: bool,
+    compact: bool,
+    ranking_mode: str,
+    kind: str | None,
+    context_radius: int,
+    top_k: int,
+    confidence_threshold: float,
+    max_requery_attempts: int,
+    disable_bounded_requery: bool,
+) -> dict[str, object]:
+    """Serialize shared search execution artifacts into ContextPack v2."""
+    assert outcome.pack is not None
+    payload = outcome.pack.to_dict(include_debug=debug_router)
+    summary_payload = payload.get("summary")
+    if isinstance(summary_payload, dict):
+        summary_payload["warning_codes"] = _merge_search_warning_codes(
+            summary_payload.get("warning_codes"),
+            outcome.health["warning_codes"],
+        )
+        if not compact or debug_router:
+            summary_payload.setdefault("query_mode", outcome.query_mode)
+            summary_payload.setdefault("search_mode", outcome.normalized_search_mode)
+            summary_payload.setdefault("needs_reindex", outcome.health["needs_reindex"])
+            summary_payload.setdefault("reindex_reason", outcome.health["reindex_reason"])
+            summary_payload.setdefault(
+                "expected_index_profile",
+                outcome.health["expected_index_profile"],
+            )
+            summary_payload.setdefault(
+                "cached_index_profile",
+                outcome.health["cached_index_profile"],
+            )
+            summary_payload.setdefault("entrypoint", outcome.health["entrypoint"])
+            summary_payload.setdefault("contract_version", outcome.health["contract_version"])
+            summary_payload.setdefault(
+                "semantic_search_allowed",
+                outcome.health["semantic_search_allowed"],
+            )
+            summary_payload.setdefault("search_integrity", outcome.health["search_integrity"])
+            # Preserve legacy option observability as non-routing summary fields.
+            summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
+            summary_payload.setdefault("legacy_kind_filter", kind)
+            summary_payload.setdefault("legacy_context_radius", context_radius)
+            summary_payload.setdefault("legacy_top_k", top_k)
+            summary_payload.setdefault(
+                "legacy_confidence_threshold",
+                confidence_threshold,
+            )
+            summary_payload.setdefault(
+                "legacy_max_requery_attempts",
+                max_requery_attempts,
+            )
+            summary_payload.setdefault(
+                "legacy_retry_enabled",
+                not disable_bounded_requery,
+            )
+            summary_payload.setdefault("file_filter", outcome.resolved_path_prefix)
+            summary_payload.setdefault("tool_version", GLOGGUR_VERSION)
+            for key, value in outcome.resume_contract.items():
+                summary_payload.setdefault(str(key), value)
+
+    if debug_router:
+        _attach_search_debug_metadata(
+            payload,
+            health=outcome.health,
+            resume_contract=outcome.resume_contract,
+        )
+
+    if compact:
+        _apply_search_compact_mode(payload)
+    return payload
+
+
+def _resolve_find_max_snippets(top_k: int, max_snippets: int | None) -> int:
+    """Default `find` to five hits unless the caller explicitly overrides it."""
+    if max_snippets is not None:
+        return max_snippets
+    context = click.get_current_context(silent=True)
+    if context is not None and context.get_parameter_source("top_k") == ParameterSource.COMMANDLINE:
+        return top_k
+    return min(top_k, 5)
+
+
+def _find_status(summary: dict[str, object], hit_count: int) -> str:
+    """Classify the routed search outcome into a compact decision status."""
+    strategy = summary.get("strategy")
+    if strategy == "suppressed":
+        return "suppressed"
+    if hit_count == 0:
+        return "no_match"
+    if bool(summary.get("decisive")):
+        return "decisive"
+    return "ambiguous"
+
+
+def _trim_find_snippet(snippet: str, *, max_chars: int = 160) -> str:
+    """Bound snippet size for the agent-first find surface."""
+    if len(snippet) <= max_chars:
+        return snippet
+    return snippet[:max_chars].rstrip() + " ..."
+
+
+def _format_find_text_snippet(snippet: str) -> str:
+    """Flatten a snippet into a single rg-like line."""
+    trimmed = _trim_find_snippet(snippet)
+    return " ".join(trimmed.split())
+
+
+def _build_find_hit_payload(hit: object, *, rank: int) -> dict[str, object]:
+    """Project a ContextPack hit into the slim find contract."""
+    path = getattr(hit, "path", "")
+    span = getattr(hit, "span", None)
+    start_line = getattr(span, "start_line", None)
+    end_line = getattr(span, "end_line", None)
+    start_byte = getattr(hit, "start_byte", None)
+    end_byte = getattr(hit, "end_byte", None)
+    snippet = getattr(hit, "snippet", "")
+    score = getattr(hit, "score", 0.0)
+    tags = getattr(hit, "tags", ())
+    payload = {
+        "rank": rank,
+        "path": str(path),
+        "start_line": int(start_line or 0),
+        "end_line": int(end_line or 0),
+        "score": float(score),
+        "tags": [str(tag) for tag in tags if isinstance(tag, str) and tag],
+        "snippet": _trim_find_snippet(str(snippet)),
+    }
+    if isinstance(start_byte, int):
+        payload["start_byte"] = start_byte
+    if isinstance(end_byte, int):
+        payload["end_byte"] = end_byte
+    return payload
+
+
+def _build_find_success_payload(
+    outcome: SearchExecutionOutcome,
+    *,
+    debug_router: bool,
+) -> dict[str, object]:
+    """Serialize shared search execution artifacts into the slim find contract."""
+    assert outcome.pack is not None
+    summary = outcome.pack.summary if isinstance(outcome.pack.summary, dict) else {}
+    hits = [
+        _build_find_hit_payload(hit, rank=index)
+        for index, hit in enumerate(
+            outcome.pack.hits[: outcome.resolved_max_snippets],
+            start=1,
+        )
+    ]
+    decision: dict[str, object] = {
+        "status": _find_status(summary, len(hits)),
+        "strategy": summary.get("strategy"),
+        "reason": summary.get("reason"),
+        "query_kind": summary.get("query_kind"),
+        "next_action": summary.get("next_action"),
+    }
+    suggested_path_prefix = summary.get("suggested_path_prefix")
+    if isinstance(suggested_path_prefix, str) and suggested_path_prefix:
+        decision["suggested_path_prefix"] = suggested_path_prefix
+
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "contract_version": "find_v1",
+        "query": outcome.pack.query,
+        "decision": decision,
+        "hits": hits,
+    }
+    warning_codes = _merge_search_warning_codes(
+        summary.get("warning_codes"),
+        outcome.health["warning_codes"],
+    )
+    if warning_codes:
+        payload["warning_codes"] = warning_codes
+    security_warning_codes = _merge_string_codes(outcome.config.security_warning_codes)
+    if security_warning_codes:
+        payload["security_warning_codes"] = security_warning_codes
+        payload["config_trust_mode"] = outcome.config.config_trust_mode
+    if debug_router:
+        debug_payload = outcome.pack.to_dict(include_debug=True)
+        if isinstance(debug_payload.get("debug"), dict):
+            payload["debug"] = debug_payload["debug"]
+            _attach_search_debug_metadata(
+                payload,
+                health=outcome.health,
+                resume_contract=outcome.resume_contract,
+            )
+    return payload
+
+
+def _emit_find_success(
+    payload: dict[str, object],
+    *,
+    as_json: bool,
+    stream: bool,
+    debug_router: bool,
+) -> None:
+    """Emit find success output in text, JSON, or NDJSON form."""
+    if stream:
+        if debug_router:
+            raise CLIContractError(
+                "`gloggur find --stream` cannot include router debug payloads.",
+                error_code="find_stream_contract_conflict",
+            )
+        hits_payload = payload.get("hits")
+        if not isinstance(hits_payload, list):
+            raise CLIContractError(
+                "find response contract invalid: hits must be a list in stream mode",
+                error_code="search_result_payload_invalid",
+            )
+        for item in hits_payload:
+            click.echo(json.dumps(item))
+        return
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    decision = payload.get("decision") if isinstance(payload.get("decision"), dict) else {}
+    first_line_parts = [
+        f"status={decision.get('status', 'unknown')}",
+        f"strategy={decision.get('strategy', 'unknown')}",
+        f"query_kind={decision.get('query_kind', 'unknown')}",
+        f"next={decision.get('next_action', 'unknown')}",
+    ]
+    suggested_path_prefix = decision.get("suggested_path_prefix")
+    if isinstance(suggested_path_prefix, str) and suggested_path_prefix:
+        first_line_parts.append(f"suggested_path_prefix={suggested_path_prefix}")
+    lines = [" ".join(first_line_parts)]
+    hits_payload = payload.get("hits")
+    if isinstance(hits_payload, list):
+        for item in hits_payload:
+            if not isinstance(item, dict):
+                continue
+            tags = item.get("tags")
+            tag_text = (
+                ",".join(str(tag) for tag in tags) if isinstance(tags, list) and tags else "-"
+            )
+            line = (
+                f"{item.get('rank', '?')} {item.get('path', '?')}:"
+                f"{item.get('start_line', '?')}-{item.get('end_line', '?')} "
+                f"score={float(item.get('score', 0.0)):.3f} "
+                f"tags={tag_text} "
+                f"{_format_find_text_snippet(str(item.get('snippet', '')))}"
+            )
+            lines.append(line)
+    click.echo("\n".join(lines))
+
+
 @cli.command()
 @click.argument("query", type=str)
 @click.option("--config", "config_path", type=click.Path(), default=None)
@@ -4797,176 +5310,51 @@ def search(
     allow_tool_version_drift: bool,
 ) -> None:
     """Search repository context and return ContextPack v2 payload."""
-    allow_tool_version_drift = _resolve_allow_tool_version_drift(
-        cli_flag_enabled=allow_tool_version_drift
-    )
-    _validate_search_confidence_options(
-        top_k=top_k,
-        confidence_threshold=confidence_threshold,
-        max_requery_attempts=max_requery_attempts,
-    )
-    _validate_search_evidence_options(
-        evidence_min_confidence=evidence_min_confidence,
-        evidence_min_items=evidence_min_items,
-    )
-    _validate_search_router_options(
+    outcome = _execute_search_command(
+        query=query,
+        config_path=config_path,
+        mode=mode,
+        language=language,
+        path_prefix=path_prefix,
         max_files=max_files,
         max_snippets=max_snippets,
         time_budget_ms=time_budget_ms,
-    )
-    if with_evidence_trace or validate_grounding or fail_on_ungrounded:
-        raise CLIContractError(
-            "Legacy evidence-trace/grounding options were removed from search JSON v2.",
-            error_code="search_contract_v1_removed",
-        )
-
-    config, cache, vector_store = _create_runtime(config_path=config_path)
-    health = _build_search_health_snapshot(
-        config,
-        cache,
+        debug_router=debug_router,
+        kind=kind,
+        file_path=file_path,
+        search_mode=search_mode,
+        top_k=top_k,
+        context_radius=context_radius,
+        ranking_mode=ranking_mode,
+        confidence_threshold=confidence_threshold,
+        max_requery_attempts=max_requery_attempts,
+        disable_bounded_requery=disable_bounded_requery,
+        with_evidence_trace=with_evidence_trace,
+        validate_grounding=validate_grounding,
+        evidence_min_confidence=evidence_min_confidence,
+        evidence_min_items=evidence_min_items,
+        fail_on_ungrounded=fail_on_ungrounded,
+        allow_tool_version_drift=allow_tool_version_drift,
         entrypoint="search_cli_v2",
         contract_version="contextpack_v2",
-        allow_tool_version_drift=allow_tool_version_drift,
+        resolved_max_snippets=max_snippets if max_snippets is not None else top_k,
     )
-    needs_reindex = bool(health["needs_reindex"])
-    reindex_reason = health["reindex_reason"]
-    resume_contract = health["resume_contract"]
-    assert isinstance(resume_contract, dict)
-
-    resolved_path_prefix = path_prefix if path_prefix else file_path
-    resolved_max_snippets = max_snippets if max_snippets is not None else top_k
-    query_mode = mode.strip().lower()
-    normalized_search_mode = search_mode.strip().lower() if search_mode else "semantic"
-
-    if needs_reindex:
-        payload = _build_search_not_ready_payload(query=query, health=health)
-        if debug_router:
-            payload["debug"] = {
-                "search_health": health,
-                "query_mode": query_mode,
-                "search_mode": normalized_search_mode,
-                "language": language,
-                "path_prefix": resolved_path_prefix,
-                "max_files": max_files,
-                "max_snippets": resolved_max_snippets,
-                "time_budget_ms": time_budget_ms,
-                "ranking_mode": ranking_mode,
-                "kind": kind,
-                "context_radius": context_radius,
-                "top_k": top_k,
-                "confidence_threshold": confidence_threshold,
-                "max_requery_attempts": max_requery_attempts,
-                "bounded_retry_enabled": not disable_bounded_requery,
-                "tool_version": GLOGGUR_VERSION,
-            }
-        _emit(payload, as_json)
+    if outcome.error_payload is not None:
+        _emit(outcome.error_payload, as_json)
         raise click.exceptions.Exit(1)
 
-    metadata_store = _create_metadata_store(config)
-    router_repo_root = _resolve_router_repo_root(
-        metadata_store=metadata_store,
-        fallback=Path.cwd(),
+    payload = _build_search_success_payload(
+        outcome,
+        debug_router=debug_router,
+        compact=compact,
+        ranking_mode=ranking_mode,
+        kind=kind,
+        context_radius=context_radius,
+        top_k=top_k,
+        confidence_threshold=confidence_threshold,
+        max_requery_attempts=max_requery_attempts,
+        disable_bounded_requery=disable_bounded_requery,
     )
-    symbol_store = SymbolIndexStore(
-        SymbolIndexStoreConfig(repo_root=router_repo_root),
-        create_if_missing=False,
-    )
-    router_config = load_search_router_config(router_repo_root)
-    router = SearchRouter(
-        repo_root=router_repo_root,
-        searcher=None,
-        metadata_store=metadata_store,
-        symbol_store=symbol_store,
-        config=router_config,
-        searcher_factory=_build_lazy_searcher_factory(
-            config=config,
-            vector_store=vector_store,
-            metadata_store=metadata_store,
-            cache=cache,
-            allow_tool_version_drift=allow_tool_version_drift,
-        ),
-    )
-    routing_path_prefix = _resolve_search_path_filter_for_routing(
-        repo_root=router_repo_root,
-        raw_path=resolved_path_prefix,
-    )
-    intent = SearchIntent(
-        search_mode=normalized_search_mode,
-        language=language,
-        path_prefix=routing_path_prefix,
-        max_files=max_files,
-        max_snippets=resolved_max_snippets,
-        time_budget_ms=time_budget_ms,
-    )
-    pack = router.search(
-        query=query,
-        intent=intent,
-        mode=mode,
-        include_debug=debug_router,
-    )
-    payload = pack.to_dict(include_debug=debug_router)
-    summary_payload = payload.get("summary")
-    if isinstance(summary_payload, dict):
-        existing_warning_codes = summary_payload.get("warning_codes")
-        merged_warning_codes: list[str] = []
-        if isinstance(existing_warning_codes, list):
-            for code in existing_warning_codes:
-                if isinstance(code, str) and code and code not in merged_warning_codes:
-                    merged_warning_codes.append(code)
-        for code in health["warning_codes"]:
-            if isinstance(code, str) and code and code not in merged_warning_codes:
-                merged_warning_codes.append(code)
-        summary_payload["warning_codes"] = merged_warning_codes
-        if not compact or debug_router:
-            summary_payload.setdefault("query_mode", query_mode)
-            summary_payload.setdefault("search_mode", normalized_search_mode)
-            summary_payload.setdefault("needs_reindex", health["needs_reindex"])
-            summary_payload.setdefault("reindex_reason", reindex_reason)
-            summary_payload.setdefault("expected_index_profile", health["expected_index_profile"])
-            summary_payload.setdefault("cached_index_profile", health["cached_index_profile"])
-            summary_payload.setdefault("entrypoint", health["entrypoint"])
-            summary_payload.setdefault("contract_version", health["contract_version"])
-            summary_payload.setdefault("semantic_search_allowed", health["semantic_search_allowed"])
-            summary_payload.setdefault("search_integrity", health["search_integrity"])
-            # Preserve legacy option observability as non-routing summary fields.
-            summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
-            summary_payload.setdefault("legacy_kind_filter", kind)
-            summary_payload.setdefault("legacy_context_radius", context_radius)
-            summary_payload.setdefault("legacy_top_k", top_k)
-            summary_payload.setdefault("legacy_confidence_threshold", confidence_threshold)
-            summary_payload.setdefault("legacy_max_requery_attempts", max_requery_attempts)
-            summary_payload.setdefault("legacy_retry_enabled", not disable_bounded_requery)
-            summary_payload.setdefault("file_filter", resolved_path_prefix)
-            summary_payload.setdefault("tool_version", GLOGGUR_VERSION)
-            for key, value in resume_contract.items():
-                summary_payload.setdefault(str(key), value)
-
-    if debug_router:
-        debug_payload = payload.get("debug")
-        if not isinstance(debug_payload, dict):
-            debug_payload = {}
-            payload["debug"] = debug_payload
-        debug_payload["resume_contract"] = resume_contract
-        debug_payload["search_health"] = health
-        debug_payload["tool_version"] = GLOGGUR_VERSION
-
-    debug_info = pack.debug or {}
-    backend_scores = debug_info.get("backend_scores")
-    backend_errors = debug_info.get("backend_errors")
-    if (
-        isinstance(backend_scores, dict)
-        and isinstance(backend_errors, dict)
-        and backend_scores
-        and len(backend_errors) >= len(backend_scores)
-        and not pack.hits
-    ):
-        raise CLIContractError(
-            "Search router backends failed to return usable evidence.",
-            error_code="search_router_backends_failed",
-        )
-
-    if compact:
-        _apply_search_compact_mode(payload)
 
     if stream and as_json:
         hits_payload = payload.get("hits")
@@ -4979,6 +5367,197 @@ def search(
             error_code="search_result_payload_invalid",
         )
     _emit(payload, as_json)
+
+
+@cli.command("find")
+@click.argument("query", type=str)
+@click.option("--config", "config_path", type=click.Path(), default=None)
+@click.option("--json", "as_json", is_flag=True, default=False)
+@click.option(
+    "--mode",
+    type=click.Choice(["auto", "exact", "semantic", "hybrid"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="Retrieval mode for ContextPack routing.",
+)
+@click.option("--language", type=str, default=None)
+@click.option("--path-prefix", type=str, default=None)
+@click.option("--max-files", type=int, default=None)
+@click.option("--max-snippets", type=int, default=None)
+@click.option("--time-budget-ms", type=int, default=None)
+@click.option(
+    "--debug-router",
+    is_flag=True,
+    default=False,
+    help="Include debug payload with backend timings/scores/thresholds in JSON output.",
+)
+@click.option("--compact", is_flag=True, default=False, expose_value=False, hidden=True)
+@click.option("--kind", type=str, default=None)
+@click.option("--file", "file_path", type=str, default=None)
+@click.option(
+    "--search-mode",
+    type=click.Choice(
+        ["semantic", "by_fqname", "by_fqname_regex", "by_path"],
+        case_sensitive=False,
+    ),
+    default="semantic",
+    show_default=True,
+    help="Search mode: semantic chunk retrieval or exact/regex/path metadata lookup.",
+)
+@click.option("--top-k", type=int, default=10)
+@click.option(
+    "--context-radius",
+    type=click.IntRange(1, 200),
+    default=DEFAULT_SEARCH_CONTEXT_RADIUS,
+    show_default=True,
+    help="Number of context lines to include on each side of a symbol match.",
+)
+@click.option(
+    "--ranking-mode",
+    type=click.Choice(["balanced", "source-first"], case_sensitive=False),
+    default="balanced",
+    show_default=True,
+    help="Ranking profile for source-vs-test preference in search results.",
+)
+@click.option(
+    "--confidence-threshold",
+    type=float,
+    default=DEFAULT_RETRIEVAL_CONFIDENCE_THRESHOLD,
+    show_default=True,
+    help="Low-confidence threshold (0.0-1.0) that triggers bounded retry.",
+)
+@click.option(
+    "--max-requery-attempts",
+    type=int,
+    default=DEFAULT_MAX_REQUERY_ATTEMPTS,
+    show_default=True,
+    help="Maximum bounded retry attempts when confidence is below threshold.",
+)
+@click.option(
+    "--disable-bounded-requery",
+    is_flag=True,
+    default=False,
+    help="Disable bounded retry logic and emit confidence from initial retrieval only.",
+)
+@click.option(
+    "--with-evidence-trace",
+    is_flag=True,
+    default=False,
+    help="Include evidence trace payload tied to returned symbols in JSON output.",
+)
+@click.option(
+    "--validate-grounding",
+    is_flag=True,
+    default=False,
+    help="Run default grounding validator over evidence trace and emit pass/fail metadata.",
+)
+@click.option(
+    "--evidence-min-confidence",
+    type=float,
+    default=DEFAULT_EVIDENCE_MIN_CONFIDENCE,
+    show_default=True,
+    help="Minimum per-evidence confidence contribution for grounding pass criteria.",
+)
+@click.option(
+    "--evidence-min-items",
+    type=int,
+    default=DEFAULT_EVIDENCE_MIN_ITEMS,
+    show_default=True,
+    help="Minimum number of evidence items required at/above confidence threshold.",
+)
+@click.option(
+    "--fail-on-ungrounded",
+    is_flag=True,
+    default=False,
+    help="Exit non-zero when grounding validation fails.",
+)
+@click.option("--stream", is_flag=True, default=False)
+@click.option(
+    "--allow-tool-version-drift",
+    is_flag=True,
+    default=False,
+    help="Allow search when only tool-version drift is detected in resume metadata.",
+)
+@_with_io_failure_handling
+def find(
+    query: str,
+    config_path: str | None,
+    as_json: bool,
+    mode: str,
+    language: str | None,
+    path_prefix: str | None,
+    max_files: int | None,
+    max_snippets: int | None,
+    time_budget_ms: int | None,
+    debug_router: bool,
+    kind: str | None,
+    file_path: str | None,
+    search_mode: str,
+    top_k: int,
+    context_radius: int,
+    ranking_mode: str,
+    confidence_threshold: float,
+    max_requery_attempts: int,
+    disable_bounded_requery: bool,
+    with_evidence_trace: bool,
+    validate_grounding: bool,
+    evidence_min_confidence: float,
+    evidence_min_items: int,
+    fail_on_ungrounded: bool,
+    stream: bool,
+    allow_tool_version_drift: bool,
+) -> None:
+    """Find agent-friendly code context with minimal output overhead."""
+    outcome = _execute_search_command(
+        query=query,
+        config_path=config_path,
+        mode=mode,
+        language=language,
+        path_prefix=path_prefix,
+        max_files=max_files,
+        max_snippets=max_snippets,
+        time_budget_ms=time_budget_ms,
+        debug_router=debug_router and as_json and not stream,
+        kind=kind,
+        file_path=file_path,
+        search_mode=search_mode,
+        top_k=top_k,
+        context_radius=context_radius,
+        ranking_mode=ranking_mode,
+        confidence_threshold=confidence_threshold,
+        max_requery_attempts=max_requery_attempts,
+        disable_bounded_requery=disable_bounded_requery,
+        with_evidence_trace=with_evidence_trace,
+        validate_grounding=validate_grounding,
+        evidence_min_confidence=evidence_min_confidence,
+        evidence_min_items=evidence_min_items,
+        fail_on_ungrounded=fail_on_ungrounded,
+        allow_tool_version_drift=allow_tool_version_drift,
+        entrypoint="find_cli_v1",
+        contract_version="find_v1",
+        resolved_max_snippets=_resolve_find_max_snippets(top_k, max_snippets),
+    )
+    if outcome.error_payload is not None:
+        _emit(outcome.error_payload, as_json or stream)
+        raise click.exceptions.Exit(1)
+    if stream and debug_router:
+        exc = CLIContractError(
+            "`gloggur find --stream` cannot include router debug payloads.",
+            error_code="find_stream_contract_conflict",
+        )
+        _emit_json_error(exc.to_payload())
+        raise click.exceptions.Exit(exc.exit_code)
+
+    payload = _build_find_success_payload(
+        outcome,
+        debug_router=debug_router and as_json and not stream,
+    )
+    _emit_find_success(
+        payload,
+        as_json=as_json,
+        stream=stream,
+        debug_router=debug_router,
+    )
 
 
 @cli.group()

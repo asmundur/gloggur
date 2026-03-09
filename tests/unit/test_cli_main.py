@@ -36,6 +36,7 @@ from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.io_failures import StorageIOError
 from gloggur.models import IndexMetadata, Symbol
 from gloggur.search import attach_legacy_search_contract
+from gloggur.search.router.types import ContextHit, ContextPack, ContextSpan
 
 
 @pytest.fixture(autouse=True)
@@ -3847,6 +3848,430 @@ def test_search_json_wraps_metadata_store_connect_failure(
     assert str(error["path"]).endswith("index.db")
     assert "unable to open database file" in str(error["detail"])
     assert "Traceback (most recent call last)" not in result.output
+
+
+def _make_context_hit(
+    rank: int,
+    *,
+    snippet: str | None = None,
+    tags: tuple[str, ...] = ("literal_match", "symbol_match"),
+) -> ContextHit:
+    """Build a deterministic ContextPack hit for CLI tests."""
+    return ContextHit(
+        path=f"src/sample_{rank}.py",
+        span=ContextSpan(start_line=rank, end_line=rank + 1),
+        snippet=snippet or f"def sample_{rank}():\n    return {rank}",
+        score=max(0.1, 1.0 - (rank * 0.01)),
+        start_byte=rank * 10,
+        end_byte=(rank * 10) + 8,
+        tags=tags,
+    )
+
+
+def _make_context_pack(
+    *,
+    query: str = "needle",
+    hits: tuple[ContextHit, ...] = (_make_context_hit(1),),
+    summary_overrides: dict[str, object] | None = None,
+    debug: dict[str, object] | None = None,
+) -> ContextPack:
+    """Build a deterministic ContextPack payload for CLI tests."""
+    summary: dict[str, object] = {
+        "strategy": "exact",
+        "reason": "quality_threshold_met",
+        "winner": "exact",
+        "hits": len(hits),
+        "warning_codes": [],
+        "backend_thresholds": {},
+        "query_kind": "identifier",
+        "decisive": True,
+        "next_action": "open_hit_1",
+    }
+    if summary_overrides:
+        summary.update(summary_overrides)
+    return ContextPack(
+        query=query,
+        summary=summary,
+        hits=hits,
+        debug=debug
+        if debug is not None
+        else {"backend_scores": {"exact": 0.99}, "backend_errors": {}},
+    )
+
+
+def _install_routed_search_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    pack: ContextPack,
+    captures: dict[str, object],
+    health_overrides: dict[str, object] | None = None,
+    security_warning_codes: list[str] | None = None,
+) -> cli_main.GloggurConfig:
+    """Install a fake routed-search runtime that returns a fixed ContextPack."""
+    config = cli_main.GloggurConfig(
+        embedding_provider="test",
+        local_embedding_model="model-a",
+        cache_dir=str(tmp_path / "cache"),
+    )
+    if security_warning_codes is not None:
+        config.security_warning_codes = list(security_warning_codes)
+
+    base_health: dict[str, object] = {
+        "needs_reindex": False,
+        "reindex_reason": None,
+        "resume_contract": {},
+        "warning_codes": [],
+        "semantic_search_allowed": True,
+        "search_integrity": {
+            "vector_cache": {"status": "passed", "reason_codes": []},
+            "chunk_span": {"status": "passed", "reason_codes": []},
+        },
+        "build_state": None,
+        "expected_index_profile": "local:model-a",
+        "cached_index_profile": "local:model-a",
+        "entrypoint": "search_cli_v2",
+        "contract_version": "contextpack_v2",
+    }
+    if health_overrides:
+        base_health.update(health_overrides)
+
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **_kwargs: (config, object(), object()),
+    )
+
+    def _build_health(_config: object, _cache: object, **kwargs: object) -> dict[str, object]:
+        payload = dict(base_health)
+        payload["entrypoint"] = kwargs["entrypoint"]
+        payload["contract_version"] = kwargs["contract_version"]
+        return payload
+
+    monkeypatch.setattr(cli_main, "_build_search_health_snapshot", _build_health)
+    monkeypatch.setattr(cli_main, "_create_metadata_store", lambda _cfg: object())
+    monkeypatch.setattr(
+        cli_main,
+        "_resolve_router_repo_root",
+        lambda **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(cli_main, "SymbolIndexStore", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(cli_main, "load_search_router_config", lambda _repo_root: object())
+
+    class FakeRouter:
+        def __init__(self, **kwargs: object) -> None:
+            captures["router_init"] = kwargs
+
+        def search(
+            self,
+            *,
+            query: str,
+            intent: object,
+            mode: str,
+            include_debug: bool,
+        ) -> ContextPack:
+            captures["query"] = query
+            captures["mode"] = mode
+            captures["include_debug"] = include_debug
+            captures["intent"] = {
+                "search_mode": getattr(intent, "search_mode", None),
+                "language": getattr(intent, "language", None),
+                "path_prefix": getattr(intent, "path_prefix", None),
+                "max_files": getattr(intent, "max_files", None),
+                "max_snippets": getattr(intent, "max_snippets", None),
+                "time_budget_ms": getattr(intent, "time_budget_ms", None),
+            }
+            return pack
+
+    monkeypatch.setattr(cli_main, "SearchRouter", FakeRouter)
+    return config
+
+
+def test_find_text_output_reports_decision_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find should emit a terse first-line status for decisive/ambiguous/empty/suppressed results."""
+    runner = CliRunner()
+    cases = [
+        (
+            _make_context_pack(),
+            "status=decisive strategy=exact query_kind=identifier next=open_hit_1",
+        ),
+        (
+            _make_context_pack(
+                hits=(_make_context_hit(1), _make_context_hit(2)),
+                summary_overrides={
+                    "decisive": False,
+                    "query_kind": "mixed",
+                    "next_action": "narrow_by_path",
+                    "suggested_path_prefix": "src/sample_1.py",
+                },
+            ),
+            (
+                "status=ambiguous strategy=exact query_kind=mixed next=narrow_by_path "
+                "suggested_path_prefix=src/sample_1.py"
+            ),
+        ),
+        (
+            _make_context_pack(
+                hits=(),
+                summary_overrides={
+                    "hits": 0,
+                    "decisive": False,
+                    "query_kind": "natural_language",
+                    "next_action": "broaden_query",
+                },
+            ),
+            "status=no_match strategy=exact query_kind=natural_language next=broaden_query",
+        ),
+        (
+            _make_context_pack(
+                hits=(),
+                summary_overrides={
+                    "strategy": "suppressed",
+                    "hits": 0,
+                    "decisive": False,
+                    "query_kind": "natural_language",
+                    "next_action": "broaden_query",
+                    "warning_codes": ["ungrounded_results_suppressed"],
+                },
+            ),
+            "status=suppressed strategy=suppressed query_kind=natural_language next=broaden_query",
+        ),
+    ]
+
+    for pack, expected_first_line in cases:
+        captures: dict[str, object] = {}
+        _install_routed_search_runtime(
+            monkeypatch,
+            tmp_path,
+            pack=pack,
+            captures=captures,
+        )
+        result = runner.invoke(cli_main.cli, ["find", pack.query])
+        assert result.exit_code == 0, result.output
+        assert result.output.splitlines()[0] == expected_first_line
+
+
+def test_find_json_contract_is_slim_and_security_gated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find --json should emit the slim v1 contract and omit bulky search metadata."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(
+        summary_overrides={"warning_codes": ["identifier_query_high_top_k"]},
+    )
+    _install_routed_search_runtime(
+        monkeypatch,
+        tmp_path,
+        pack=pack,
+        captures=captures,
+        security_warning_codes=["untrusted_repo_config"],
+    )
+
+    result = runner.invoke(cli_main.cli, ["find", "needle", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["schema_version"] == 1
+    assert payload["contract_version"] == "find_v1"
+    assert payload["query"] == "needle"
+    assert payload["decision"] == {
+        "status": "decisive",
+        "strategy": "exact",
+        "reason": "quality_threshold_met",
+        "query_kind": "identifier",
+        "next_action": "open_hit_1",
+    }
+    assert payload["warning_codes"] == ["identifier_query_high_top_k"]
+    assert payload["security_warning_codes"] == ["untrusted_repo_config"]
+    assert payload["config_trust_mode"] == "auto"
+    assert "config_source" not in payload
+    assert "remote_embedding" not in payload
+    assert "search_integrity" not in payload
+    hit = payload["hits"][0]
+    assert hit["rank"] == 1
+    assert hit["start_byte"] == 10
+    assert hit["end_byte"] == 18
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_hits"),
+    [
+        (["find", "needle", "--json"], 5),
+        (["find", "needle", "--json", "--top-k", "7"], 7),
+        (["find", "needle", "--json", "--max-snippets", "3"], 3),
+    ],
+)
+def test_find_hit_limit_defaults_to_five_but_honors_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    args: list[str],
+    expected_hits: int,
+) -> None:
+    """find should default to five hits and respect explicit top-k/max-snippets overrides."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(hits=tuple(_make_context_hit(index) for index in range(1, 11)))
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(cli_main.cli, args)
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert len(payload["hits"]) == expected_hits
+    assert captures["intent"]["max_snippets"] == expected_hits
+
+
+def test_find_stream_emits_ndjson_hits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find --stream should emit one slim NDJSON object per hit."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(hits=(_make_context_hit(1), _make_context_hit(2)))
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(cli_main.cli, ["find", "needle", "--stream"])
+
+    assert result.exit_code == 0, result.output
+    lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    assert len(lines) == 2
+    assert lines[0]["rank"] == 1
+    assert "decision" not in lines[0]
+    assert lines[0]["start_byte"] == 10
+    assert lines[0]["end_byte"] == 18
+
+
+def test_find_stream_rejects_debug_router_with_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find --stream should fail closed when router debug is requested."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    _install_routed_search_runtime(
+        monkeypatch,
+        tmp_path,
+        pack=_make_context_pack(),
+        captures=captures,
+    )
+
+    result = runner.invoke(cli_main.cli, ["find", "needle", "--stream", "--debug-router"])
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "find_stream_contract_conflict"
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["SearchRouter", "--json", "--top-k", "4"],
+        ["how to decode auth token", "--json", "--mode", "hybrid", "--top-k", "4"],
+        [
+            "src/services",
+            "--json",
+            "--search-mode",
+            "by_path",
+            "--path-prefix",
+            "src/services",
+            "--top-k",
+            "4",
+        ],
+        ['rg -S "retry" src/', "--json", "--top-k", "4"],
+    ],
+)
+def test_find_matches_search_router_invocation_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    extra_args: list[str],
+) -> None:
+    """find should route queries with the same intent and filters as search."""
+    runner = CliRunner()
+    pack = _make_context_pack()
+
+    search_capture: dict[str, object] = {}
+    _install_routed_search_runtime(
+        monkeypatch,
+        tmp_path,
+        pack=pack,
+        captures=search_capture,
+    )
+    search_result = runner.invoke(cli_main.cli, ["search", *extra_args])
+    assert search_result.exit_code == 0, search_result.output
+
+    find_capture: dict[str, object] = {}
+    _install_routed_search_runtime(
+        monkeypatch,
+        tmp_path,
+        pack=pack,
+        captures=find_capture,
+    )
+    find_result = runner.invoke(cli_main.cli, ["find", *extra_args])
+    assert find_result.exit_code == 0, find_result.output
+
+    assert find_capture["query"] == search_capture["query"]
+    assert find_capture["mode"] == search_capture["mode"]
+    assert find_capture["intent"] == search_capture["intent"]
+
+
+def test_search_json_contract_remains_contextpack_v2_after_find_addition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """search should retain its existing ContextPack v2 success shape."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack()
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["schema_version"] == 2
+    assert "summary" in payload
+    assert "decision" not in payload
+    assert payload["hits"][0]["start_byte"] == 10
+    assert payload["hits"][0]["end_byte"] == 18
+
+
+def test_find_json_is_smaller_than_search_json_for_same_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find --json should serialize fewer bytes than search --json for the same result set."""
+    runner = CliRunner()
+    pack = _make_context_pack(hits=tuple(_make_context_hit(index) for index in range(1, 6)))
+
+    search_capture: dict[str, object] = {}
+    _install_routed_search_runtime(
+        monkeypatch,
+        tmp_path,
+        pack=pack,
+        captures=search_capture,
+    )
+    search_result = runner.invoke(cli_main.cli, ["search", "needle", "--json"])
+    assert search_result.exit_code == 0, search_result.output
+
+    find_capture: dict[str, object] = {}
+    _install_routed_search_runtime(
+        monkeypatch,
+        tmp_path,
+        pack=pack,
+        captures=find_capture,
+    )
+    find_result = runner.invoke(cli_main.cli, ["find", "needle", "--json"])
+    assert find_result.exit_code == 0, find_result.output
+
+    assert len(find_result.output.encode("utf8")) < len(search_result.output.encode("utf8"))
 
 
 @pytest.mark.parametrize(

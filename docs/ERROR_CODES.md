@@ -131,6 +131,11 @@ Fields:
   - Meaning: `--stream` was combined with evidence-trace or grounding-validation options.
   - Retryability: retry after choosing one mode.
   - Operator action: disable `--stream` or disable evidence/grounding extras.
+- `find_stream_contract_conflict`
+  - Command(s): `find`.
+  - Meaning: `--stream` was combined with `--debug-router`.
+  - Retryability: retry after choosing one mode.
+  - Operator action: disable `--stream` or disable router debug output.
 - `search_result_payload_invalid`
   - Command(s): `search`.
   - Meaning: search backend returned malformed ContextPack v2 contract data.

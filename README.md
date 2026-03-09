@@ -12,7 +12,12 @@ Gloggur extracts symbols using Tree‑sitter parsers for Python (`.py`), JavaScr
 
 ### Search & discovery
 
-The CLI provides a single `search` command with multiple modes:
+The CLI exposes two retrieval surfaces:
+
+* **find** – a terse, agent-first entrypoint that returns a short decision plus the best few hits in plain text by default, or a slim `find_v1` JSON/NDJSON contract for tool pipelines.
+* **search** – the full-fidelity retrieval surface with ContextPack v2 output and the complete operational metadata/debug contract.
+
+`search` supports multiple modes:
 
 * **Auto** (default) – routes queries to either lexical search (ripgrep), exact name search or semantic search based on heuristics.
 * **by_fqname** – search by fully‑qualified symbol name (e.g. `pkg.module.Class.method`).
@@ -59,7 +64,13 @@ gloggur index . --json
 Run searches in different modes:
 
 ```bash
-# natural language
+# agent-first default
+gloggur find "how to decode auth token"
+
+# slim structured output for agents
+gloggur find "pkg.module.Handler.handle" --json
+
+# full-fidelity JSON
 gloggur search "how to decode auth token" --json
 
 # fully‑qualified name
@@ -112,7 +123,16 @@ excluded_dirs:
 
 ## Output schema
 
-Commands emit JSON structures that are easy to consume programmatically.  Search results include:
+Commands emit JSON structures that are easy to consume programmatically.
+
+`find --json` returns a slim contract intended for agent loops:
+
+* `schema_version` / `contract_version`
+* `query`
+* `decision` – status, strategy, query kind, and next action
+* `hits[]` – rank, path, start/end lines, start/end bytes, score, tags, and a trimmed snippet
+
+Use `search --json` when you need the full ContextPack v2 contract. Search results include:
 
 * `schema_version` – version of the JSON schema.
 * `query` – the original query string.
@@ -124,6 +144,8 @@ Commands emit JSON structures that are easy to consume programmatically.  Search
   * `start_byte` / `end_byte` – raw file byte offsets (`end_byte` exclusive).
   * `snippet`, `score`, and `tags` (`literal_match`, `semantic_match`, `symbol_def`, `symbol_ref`).
 * `debug` – when `--debug-router` is provided, includes routing decisions, candidate counts and backend errors.
+
+`find --json` includes byte offsets for exact agent round-trips while still omitting bulkier success-only metadata such as resume fingerprints and search-integrity payloads. Reach for `search --json` when you need the full operational health/debug contract.
 
 Byte-range extraction is available without a fresh index once you already have a hit path/span:
 
