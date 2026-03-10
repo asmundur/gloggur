@@ -138,3 +138,38 @@ def test_run_exact_backend_ranks_source_definitions_above_docs_and_tests(
         str(test_file).replace("\\", "/"),
         str(docs_file).replace("\\", "/"),
     ]
+
+
+def test_run_exact_backend_keeps_repo_relative_path_filters_when_repo_root_collapses(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    repo_root = tmp_path / "src"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    sample = repo_root / "a_auth_token.py"
+    sample.write_text(
+        "def refresh_auth_state():\n"
+        "    return 'token-auth'\n",
+        encoding="utf8",
+    )
+
+    def _run(_cmd, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout="a_auth_token.py:2:    return 'token-auth'\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="token",
+        hints=extract_query_hints("token"),
+        repo_root=repo_root,
+        intent=SearchIntent(path_filters=("src/",), max_snippets=1, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert result.hits
+    assert result.hits[0].path.replace("\\", "/") == str(sample).replace("\\", "/")

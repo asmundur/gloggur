@@ -685,6 +685,29 @@ def test_cli_failure_catalog_includes_artifact_uploader_codes() -> None:
         assert guidance
 
 
+def test_cli_failure_catalog_includes_find_about_conflict_code() -> None:
+    """`find --about` contract conflicts should stay documented in the CLI failure catalog."""
+    guidance = CLI_FAILURE_REMEDIATION["find_about_contract_conflict"]
+    assert isinstance(guidance, list)
+    assert guidance
+
+
+def test_resolve_router_repo_root_keeps_workspace_root_for_relative_paths(tmp_path: Path) -> None:
+    """Repo-relative symbol paths should keep the caller workspace root as router root."""
+
+    class FakeMetadataStore:
+        def sample_symbol_file_paths(self, *, limit: int = 64) -> list[str]:
+            assert limit == 64
+            return ["src/a.py", "src/nested/b.py"]
+
+    resolved = cli_main._resolve_router_repo_root(
+        metadata_store=FakeMetadataStore(),
+        fallback=tmp_path,
+    )
+
+    assert resolved == tmp_path
+
+
 def test_coverage_ingest_invalid_json_returns_coverage_file_invalid(tmp_path: Path) -> None:
     """Malformed coverage JSON should fail closed with stable coverage_file_invalid code."""
     runner = CliRunner()
@@ -4310,6 +4333,7 @@ def _install_routed_search_runtime(
             captures["include_debug"] = include_debug
             captures["intent"] = {
                 "search_mode": getattr(intent, "search_mode", None),
+                "semantic_query": getattr(intent, "semantic_query", None),
                 "language": getattr(intent, "language", None),
                 "path_prefix": getattr(intent, "path_prefix", None),
                 "max_files": getattr(intent, "max_files", None),
@@ -4431,6 +4455,77 @@ def test_find_json_contract_is_slim_and_security_gated(
     assert hit["rank"] == 1
     assert hit["start_byte"] == 10
     assert hit["end_byte"] == 18
+
+
+def test_find_json_includes_about_and_forwards_semantic_query(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find --about should expose the semantic description and forward it to routing."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(
+        summary_overrides={"strategy": "hybrid", "reason": "semantic_query_requested"},
+    )
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", 'rg "token" src/', "--json", "--about", "cache warmup"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert payload["about"] == "cache warmup"
+    assert captures["query"] == 'rg "token" src/'
+    assert captures["intent"]["semantic_query"] == "cache warmup"
+
+
+def test_find_blank_about_is_treated_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Blank `--about` input should behave the same as omitting the option."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    _install_routed_search_runtime(
+        monkeypatch,
+        tmp_path,
+        pack=_make_context_pack(),
+        captures=captures,
+    )
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "needle", "--json", "--about", "   "],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert "about" not in payload
+    assert captures["intent"]["semantic_query"] is None
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["find", "needle", "--json", "--about", "cache warmup", "--mode", "exact"],
+        ["find", "needle", "--json", "--about", "cache warmup", "--mode", "semantic"],
+        ["find", "needle", "--json", "--about", "cache warmup", "--search-mode", "by_path"],
+    ],
+)
+def test_find_about_rejects_conflicting_modes(args: list[str]) -> None:
+    """find --about should fail closed when flags would drop one side of the query."""
+    runner = CliRunner()
+
+    result = runner.invoke(cli_main.cli, args)
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "find_about_contract_conflict"
+    assert payload["failure_codes"] == ["find_about_contract_conflict"]
 
 
 @pytest.mark.parametrize(

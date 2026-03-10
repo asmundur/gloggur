@@ -116,6 +116,18 @@ def _path_matches_prefix(path: str, prefix: str | None, *, repo_root: Path) -> b
                 return True
             if path_candidate.startswith(prefix_candidate + "/"):
                 return True
+    repo_root_name = _normalize_path(repo_root.name)
+    if repo_root_name and raw_prefix == repo_root_name:
+        return True
+    if repo_root_name and raw_prefix.startswith(repo_root_name + "/"):
+        stripped_prefix = raw_prefix[len(repo_root_name) + 1 :]
+        if not stripped_prefix:
+            return True
+        for path_candidate in path_candidates:
+            if path_candidate == stripped_prefix:
+                return True
+            if path_candidate.startswith(stripped_prefix + "/"):
+                return True
     return False
 
 
@@ -670,6 +682,11 @@ def run_semantic_backend(
 ) -> BackendResult:
     """Run semantic backend over existing HybridSearch."""
     started = time.perf_counter()
+    semantic_query = (
+        intent.semantic_query.strip()
+        if isinstance(intent.semantic_query, str) and intent.semantic_query.strip()
+        else query
+    )
 
     filters: dict[str, str] = {
         "ranking_mode": "balanced",
@@ -682,7 +699,7 @@ def run_semantic_backend(
 
     top_k = max(1, intent.max_snippets or config.semantic_top_k)
     payload = searcher.search(
-        query,
+        semantic_query,
         filters=filters,
         top_k=top_k,
         context_radius=8,

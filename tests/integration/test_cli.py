@@ -816,6 +816,72 @@ def test_cli_search_accepts_grep_compatible_query_syntax() -> None:
         assert malformed_parsed.get("fallback_used") is True
 
 
+def test_cli_find_about_combines_grep_query_with_semantic_ranking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/a_auth_token.py": (
+                    "def refresh_auth_state():\n"
+                    "    return 'token-auth'\n"
+                ),
+                "src/z_cache_token.py": (
+                    "def warm_cache_state():\n"
+                    '    """cache warmup token for startup state."""\n'
+                    "    token = 'token-cache'\n"
+                    "    return token\n"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        monkeypatch.chdir(repo)
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            [
+                "find",
+                "rg token src/",
+                "--json",
+                "--debug-router",
+                "--about",
+                "cache warmup startup state",
+                "--top-k",
+                "5",
+            ],
+            env=env,
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert payload["schema_version"] == 1
+        assert payload["about"] == "cache warmup startup state"
+        hits = payload["hits"]
+        assert isinstance(hits, list)
+        assert hits
+        assert hits[0]["path"].endswith("z_cache_token.py")
+        debug = payload.get("debug")
+        assert isinstance(debug, dict)
+        assert debug["queries"] == {
+            "lexical_query": "rg token src/",
+            "effective_lexical_query": "token",
+            "semantic_query": "cache warmup startup state",
+        }
+        parsed = debug.get("parsed_query")
+        assert isinstance(parsed, dict)
+        assert parsed["source"] == "grep_compat"
+        assert parsed["path_filters"] == ["src/"]
+
+
 def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
     """Low-signal search should return empty bounded evidence with deterministic metadata."""
     runner = CliRunner()

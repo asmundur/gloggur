@@ -70,6 +70,9 @@ gloggur find "how to decode auth token"
 # slim structured output for agents
 gloggur find "pkg.module.Handler.handle" --json
 
+# combine a ripgrep-style lexical query with semantic intent
+gloggur find "rg token src/" --about "cache warmup startup state" --json
+
 # full-fidelity JSON
 gloggur search "how to decode auth token" --json
 
@@ -129,6 +132,7 @@ Commands emit JSON structures that are easy to consume programmatically.
 
 * `schema_version` / `contract_version`
 * `query`
+* `about` – optional semantic description when `--about` is supplied
 * `decision` – status, strategy, query kind, and next action
 * `hits[]` – rank, path, start/end lines, start/end bytes, score, tags, and a trimmed snippet
 
@@ -143,7 +147,7 @@ Use `search --json` when you need the full ContextPack v2 contract. Search resul
   * `span.start_line` / `span.end_line` – inclusive logical line span.
   * `start_byte` / `end_byte` – raw file byte offsets (`end_byte` exclusive).
   * `snippet`, `score`, and `tags` (`literal_match`, `semantic_match`, `symbol_def`, `symbol_ref`).
-* `debug` – when `--debug-router` is provided, includes routing decisions, candidate counts and backend errors.
+* `debug` – when `--debug-router` is provided, includes routing decisions, candidate counts, backend errors, and routed lexical/semantic query fields.
 
 `find --json` includes byte offsets for exact agent round-trips while still omitting bulkier success-only metadata such as resume fingerprints and search-integrity payloads. Reach for `search --json` when you need the full operational health/debug contract.
 

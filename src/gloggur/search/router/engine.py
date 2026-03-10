@@ -57,6 +57,13 @@ def _normalize_string_tuple(values: object) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _normalize_optional_query(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def _normalize_search_mode(value: object) -> str:
     search_mode = (
         str(value).strip().lower() if isinstance(value, str) and str(value).strip() else "semantic"
@@ -95,9 +102,11 @@ def _normalize_search_intent(
         if isinstance(base.path_prefix, str) and base.path_prefix.strip()
         else None
     )
+    semantic_query = _normalize_optional_query(base.semantic_query)
     path_filters = _normalize_string_tuple(base.path_filters)
     return SearchIntent(
         search_mode=_normalize_search_mode(base.search_mode),
+        semantic_query=semantic_query,
         language=language,
         path_prefix=path_prefix,
         path_filters=path_filters,
@@ -527,7 +536,13 @@ def _adaptive_fusion_selection(
     for name in ordered_backends:
         candidates = ranked_candidates.get(name, [])
         for rank, hit in enumerate(candidates, start=1):
-            key = (hit.path, hit.start_line, hit.end_line)
+            key: tuple[str, int, int] | None = None
+            for existing_key, existing_hit in representatives.items():
+                if _spans_overlap(hit, existing_hit):
+                    key = existing_key
+                    break
+            if key is None:
+                key = (hit.path, hit.start_line, hit.end_line)
             vote_scores[key] = vote_scores.get(key, 0.0) + (1.0 / (_RANK_FUSION_K + rank))
             if key not in first_seen:
                 first_seen[key] = order_counter
@@ -894,7 +909,14 @@ class SearchRouter:
         backend_execution_hints = resolved_execution_hints
         if hints.query_kind in {"identifier", "declaration"} and not explicit_regex_requested:
             backend_execution_hints = replace(resolved_execution_hints, fixed_string=True)
-        backend_names = self._resolve_backends(normalized_mode)
+        force_semantic_fusion = bool(
+            resolved_intent.semantic_query and normalized_mode in {"auto", "hybrid"}
+        )
+        backend_names = (
+            self._resolve_backends("auto")
+            if force_semantic_fusion
+            else self._resolve_backends(normalized_mode)
+        )
 
         def _run_backend(name: str) -> BackendResult:
             if name == "exact":
@@ -941,7 +963,15 @@ class SearchRouter:
             )
 
         backend_results: list[BackendResult] = []
-        if normalized_mode == "hybrid":
+        if force_semantic_fusion:
+            non_semantic_results: list[BackendResult] = []
+            for backend_name in ("exact", "symbol"):
+                if backend_name in backend_names:
+                    non_semantic_results.append(_run_backend(backend_name))
+            backend_results.extend(non_semantic_results)
+            if "semantic" in backend_names:
+                backend_results.append(_run_backend("semantic"))
+        elif normalized_mode == "hybrid":
             if len(backend_names) == 1:
                 backend_results.append(_run_backend(backend_names[0]))
             else:
@@ -1015,7 +1045,27 @@ class SearchRouter:
         fusion_proportional_shares: dict[str, float] = {}
         outcome: RouterOutcome
         selected_hits: list[BackendHit]
-        if normalized_mode == "hybrid":
+        if force_semantic_fusion:
+            outcome = RouterOutcome(
+                strategy="hybrid",
+                reason="semantic_query_requested",
+                winner=None,
+                considered=tuple(result.name for result in enriched_results),
+                backend_scores={result.name: result.quality_score for result in enriched_results},
+            )
+            (
+                selected_hits,
+                fusion_allocation,
+                backend_weights,
+                eligibility,
+                fusion_proportional_shares,
+            ) = _adaptive_fusion_selection(
+                results_by_name=results_by_name,
+                intent=resolved_intent,
+                hints=hints,
+                config=self.config,
+            )
+        elif normalized_mode == "hybrid":
             outcome = RouterOutcome(
                 strategy="hybrid",
                 reason="forced_mode",
@@ -1109,6 +1159,11 @@ class SearchRouter:
             summary["suggested_path_prefix"] = suggested_path_prefix
 
         debug_payload: dict[str, object] = {
+            "queries": {
+                "lexical_query": query,
+                "effective_lexical_query": effective_query,
+                "semantic_query": resolved_intent.semantic_query,
+            },
             "timings": {
                 "total_ms": total_ms,
                 "backend_ms": {result.name: result.timing_ms for result in enriched_results},
@@ -1163,6 +1218,11 @@ class SearchRouter:
                 "reason": outcome.reason,
                 "next_action": next_action,
                 "decisive": decisive,
+                "queries": {
+                    "lexical_query": query,
+                    "effective_lexical_query": effective_query,
+                    "semantic_query": resolved_intent.semantic_query,
+                },
                 "backend_scores": {
                     result.name: result.quality_score for result in enriched_results
                 },

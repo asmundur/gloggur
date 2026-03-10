@@ -131,6 +131,11 @@ Fields:
   - Meaning: `--stream` was combined with evidence-trace or grounding-validation options.
   - Retryability: retry after choosing one mode.
   - Operator action: disable `--stream` or disable evidence/grounding extras.
+- `find_about_contract_conflict`
+  - Command(s): `find`.
+  - Meaning: `--about` was combined with `--mode exact` / `--mode semantic` or a non-semantic `--search-mode`.
+  - Retryability: retry after choosing a compatible routing mode.
+  - Operator action: use `--mode auto` or `--mode hybrid` with `--search-mode semantic`.
 - `find_stream_contract_conflict`
   - Command(s): `find`.
   - Meaning: `--stream` was combined with `--debug-router`.

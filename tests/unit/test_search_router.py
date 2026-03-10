@@ -831,3 +831,105 @@ def test_query_compat_flags_map_to_execution_hints_without_leaking_into_search_i
     assert getattr(captured_hints, "word_match", False) is True
     assert getattr(captured_hints, "fixed_string", False) is True
     assert "*.py" in getattr(captured_hints, "include_globs", ())
+
+
+def test_search_router_semantic_query_uses_fusion_and_keeps_lexical_parsing_separate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _exact_backend(**kwargs):
+        captured["exact_query"] = kwargs["query"]
+        return BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "src/a_auth_token.py"),
+                    start_line=5,
+                    end_line=5,
+                    snippet="token = refresh_token()",
+                    raw_score=0.99,
+                    tags=("literal_match",),
+                ),
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "src/z_cache_token.py"),
+                    start_line=8,
+                    end_line=8,
+                    snippet="token = warm_cache_token()",
+                    raw_score=0.98,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        )
+
+    def _symbol_backend(**kwargs):
+        captured["symbol_query"] = kwargs["query"]
+        return BackendResult(name="symbol", hits=(), timing_ms=2)
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
+    monkeypatch.setattr("gloggur.search.router.engine.run_symbol_backend", _symbol_backend)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.99 if result.name == "exact" else 0.90,
+    )
+
+    class FakeSearcher:
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str] | None = None,
+            top_k: int = 10,
+            context_radius: int = 8,
+        ) -> dict[str, object]:
+            captured["semantic_query"] = query
+            captured["semantic_filters"] = filters
+            captured["semantic_top_k"] = top_k
+            captured["semantic_context_radius"] = context_radius
+            return {
+                "results": [
+                    {
+                        "file": "src/z_cache_token.py",
+                        "line": 8,
+                        "line_end": 8,
+                        "context": "token = warm_cache_token()",
+                        "ranking_score": 0.95,
+                    }
+                ]
+            }
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=FakeSearcher(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="rg token src/",
+        intent=SearchIntent(semantic_query="cache warmup", max_snippets=5),
+        mode="auto",
+        include_debug=True,
+    )
+
+    assert captured["exact_query"] == "token"
+    assert captured["symbol_query"] == "token"
+    assert captured["semantic_query"] == "cache warmup"
+    assert captured["semantic_filters"] == {"ranking_mode": "balanced", "mode": "semantic"}
+    assert pack.summary["strategy"] == "hybrid"
+    assert pack.summary["reason"] == "semantic_query_requested"
+    assert pack.hits
+    assert pack.hits[0].path == "src/z_cache_token.py"
+    assert isinstance(pack.debug, dict)
+    assert pack.debug["queries"] == {
+        "lexical_query": "rg token src/",
+        "effective_lexical_query": "token",
+        "semantic_query": "cache warmup",
+    }
+    parsed = pack.debug["parsed_query"]
+    assert isinstance(parsed, dict)
+    assert parsed["source"] == "grep_compat"

@@ -443,6 +443,10 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "search_stream_contract_conflict": [
         "Disable --stream when requesting evidence trace/grounding validation payloads.",
     ],
+    "find_about_contract_conflict": [
+        "Use `gloggur find <pattern> --about <description>` with `--mode auto` or `--mode hybrid`.",
+        "Keep `--search-mode semantic` so lexical and semantic retrieval can both contribute.",
+    ],
     "find_stream_contract_conflict": [
         "Disable --stream when requesting `--debug-router` output from `gloggur find`.",
     ],
@@ -4436,6 +4440,37 @@ def _validate_search_router_options(
         )
 
 
+def _normalize_find_about(value: str | None) -> str | None:
+    """Normalize optional `find --about` input so blanks behave as absent."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _validate_find_about_options(
+    *,
+    semantic_query: str | None,
+    mode: str,
+    search_mode: str,
+) -> None:
+    """Reject `find --about` combinations that would silently drop one side of the query."""
+    if semantic_query is None:
+        return
+    normalized_mode = mode.strip().lower() if mode else "auto"
+    normalized_search_mode = search_mode.strip().lower() if search_mode else "semantic"
+    if normalized_mode in {"exact", "semantic"}:
+        raise CLIContractError(
+            "`gloggur find --about` requires `--mode auto` or `--mode hybrid`.",
+            error_code="find_about_contract_conflict",
+        )
+    if normalized_search_mode != "semantic":
+        raise CLIContractError(
+            "`gloggur find --about` requires `--search-mode semantic`.",
+            error_code="find_about_contract_conflict",
+        )
+
+
 def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) -> Path:
     """Resolve router repo root from indexed symbol paths with cwd fallback."""
     try:
@@ -4448,6 +4483,7 @@ def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) 
         return fallback
 
     normalized_paths: list[str] = []
+    saw_relative_path = False
     for raw in file_paths:
         candidate = raw.strip()
         if not candidate:
@@ -4455,9 +4491,12 @@ def _resolve_router_repo_root(*, metadata_store: MetadataStore, fallback: Path) 
         if os.path.isabs(candidate):
             absolute = candidate
         else:
+            saw_relative_path = True
             absolute = os.path.abspath(str(fallback / candidate))
         normalized_paths.append(os.path.normpath(absolute))
     if not normalized_paths:
+        return fallback
+    if saw_relative_path:
         return fallback
 
     try:
@@ -4829,6 +4868,7 @@ class SearchExecutionOutcome:
     resume_contract: dict[str, object]
     query_mode: str
     normalized_search_mode: str
+    semantic_query: str | None
     resolved_path_prefix: str | None
     resolved_max_snippets: int
     pack: ContextPack | None = None
@@ -4889,6 +4929,7 @@ def _build_search_not_ready_debug_payload(
     health: dict[str, object],
     query_mode: str,
     normalized_search_mode: str,
+    semantic_query: str | None,
     language: str | None,
     resolved_path_prefix: str | None,
     max_files: int | None,
@@ -4907,6 +4948,7 @@ def _build_search_not_ready_debug_payload(
         "search_health": health,
         "query_mode": query_mode,
         "search_mode": normalized_search_mode,
+        "semantic_query": semantic_query,
         "language": language,
         "path_prefix": resolved_path_prefix,
         "max_files": max_files,
@@ -4926,6 +4968,7 @@ def _build_search_not_ready_debug_payload(
 def _execute_search_command(
     *,
     query: str,
+    semantic_query: str | None,
     config_path: str | None,
     mode: str,
     language: str | None,
@@ -4987,6 +5030,7 @@ def _execute_search_command(
     )
     query_mode = mode.strip().lower()
     normalized_search_mode = search_mode.strip().lower() if search_mode else "semantic"
+    normalized_semantic_query = _normalize_find_about(semantic_query)
     resume_contract = health["resume_contract"]
     assert isinstance(resume_contract, dict)
     resolved_path_prefix = path_prefix if path_prefix else file_path
@@ -4998,6 +5042,7 @@ def _execute_search_command(
                 health=health,
                 query_mode=query_mode,
                 normalized_search_mode=normalized_search_mode,
+                semantic_query=normalized_semantic_query,
                 language=language,
                 resolved_path_prefix=resolved_path_prefix,
                 max_files=max_files,
@@ -5017,6 +5062,7 @@ def _execute_search_command(
             resume_contract=resume_contract,
             query_mode=query_mode,
             normalized_search_mode=normalized_search_mode,
+            semantic_query=normalized_semantic_query,
             resolved_path_prefix=resolved_path_prefix,
             resolved_max_snippets=resolved_max_snippets,
             error_payload=payload,
@@ -5052,6 +5098,7 @@ def _execute_search_command(
     )
     intent = SearchIntent(
         search_mode=normalized_search_mode,
+        semantic_query=normalized_semantic_query,
         language=language,
         path_prefix=routing_path_prefix,
         max_files=max_files,
@@ -5071,6 +5118,7 @@ def _execute_search_command(
         resume_contract=resume_contract,
         query_mode=query_mode,
         normalized_search_mode=normalized_search_mode,
+        semantic_query=normalized_semantic_query,
         resolved_path_prefix=resolved_path_prefix,
         resolved_max_snippets=resolved_max_snippets,
         pack=pack,
@@ -5248,6 +5296,8 @@ def _build_find_success_payload(
         "decision": decision,
         "hits": hits,
     }
+    if outcome.semantic_query is not None:
+        payload["about"] = outcome.semantic_query
     warning_codes = _merge_search_warning_codes(
         summary.get("warning_codes"),
         outcome.health["warning_codes"],
@@ -5483,6 +5533,7 @@ def search(
     """Search repository context and return ContextPack v2 payload."""
     outcome = _execute_search_command(
         query=query,
+        semantic_query=None,
         config_path=config_path,
         mode=mode,
         language=language,
@@ -5542,6 +5593,12 @@ def search(
 
 @cli.command("find")
 @click.argument("query", type=str)
+@click.option(
+    "--about",
+    type=str,
+    default=None,
+    help="Semantic description used to influence fused ranking alongside the lexical query.",
+)
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option(
@@ -5660,6 +5717,7 @@ def search(
 @_with_io_failure_handling
 def find(
     query: str,
+    about: str | None,
     config_path: str | None,
     as_json: bool,
     mode: str,
@@ -5687,8 +5745,15 @@ def find(
     allow_tool_version_drift: bool,
 ) -> None:
     """Find agent-friendly code context with minimal output overhead."""
+    normalized_about = _normalize_find_about(about)
+    _validate_find_about_options(
+        semantic_query=normalized_about,
+        mode=mode,
+        search_mode=search_mode,
+    )
     outcome = _execute_search_command(
         query=query,
+        semantic_query=normalized_about,
         config_path=config_path,
         mode=mode,
         language=language,
@@ -5717,6 +5782,8 @@ def find(
         resolved_max_snippets=_resolve_find_max_snippets(top_k, max_snippets),
     )
     if outcome.error_payload is not None:
+        if normalized_about is not None and isinstance(outcome.error_payload, dict):
+            outcome.error_payload.setdefault("about", normalized_about)
         _emit(outcome.error_payload, as_json or stream)
         raise click.exceptions.Exit(1)
     if stream and debug_router:

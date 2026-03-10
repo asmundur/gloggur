@@ -8,6 +8,7 @@ class SearchIntent:
     """Public caller-facing search intent for ContextPack routing."""
 
     search_mode: str = "semantic"
+    semantic_query: str | None = None
     language: str | None = None
     path_prefix: str | None = None
     path_filters: tuple[str, ...] = ()
