@@ -23,8 +23,6 @@ class SearchRouterConfig:
     symbol_top_k: int = 24
     ignore_globs: tuple[str, ...] = ("dist/**", "vendor/**", "node_modules/**")
     log_path: str = ".gloggur/logs/search_router.jsonl"
-    state_path: str = ".gloggur/logs/search_router_state.json"
-    locality_state_ttl_sec: int = 600
     telemetry_enabled: bool = True
     telemetry_log_query: bool = False
     telemetry_log_snippets: bool = False
@@ -131,12 +129,6 @@ def load_search_router_config(repo_root: Path) -> SearchRouterConfig:
         symbol_top_k=_coerce_int(section, "symbol_top_k", SearchRouterConfig.symbol_top_k),
         ignore_globs=_coerce_str_tuple(section, "ignore_globs", SearchRouterConfig.ignore_globs),
         log_path=str(section.get("log_path", SearchRouterConfig.log_path)),
-        state_path=str(section.get("state_path", SearchRouterConfig.state_path)),
-        locality_state_ttl_sec=_coerce_int(
-            section,
-            "locality_state_ttl_sec",
-            SearchRouterConfig.locality_state_ttl_sec,
-        ),
         telemetry_enabled=bool(
             section.get("telemetry_enabled", SearchRouterConfig.telemetry_enabled)
         ),

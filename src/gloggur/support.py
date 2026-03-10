@@ -523,8 +523,6 @@ def _snapshot_optional_runtime_files(
         )
     router_log_path = repo_root / router_config.log_path
     log_sources.append((router_log_path, session_dir / "logs" / "search_router.jsonl", True))
-    router_state_path = repo_root / router_config.state_path
-    log_sources.append((router_state_path, session_dir / "logs" / "search_router_state.json", True))
     bootstrap_log_path = os.environ.get("BOOTSTRAP_GLOGGUR_LOG_FILE")
     if bootstrap_log_path:
         log_sources.append((Path(bootstrap_log_path), session_dir / "logs" / "bootstrap.log", True))

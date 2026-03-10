@@ -119,11 +119,6 @@ def test_support_collect_manual_snapshot_includes_runtime_logs(
             '{"event":"router"}\n',
             encoding="utf8",
         )
-        (repo / ".gloggur" / "logs" / "search_router_state.json").write_text(
-            '{"anchor":{"path":"src/sample.py","start_line":1,"end_line":1,"score":0.99},'
-            '"updated_at_epoch":123.0,"ambiguity_streak":1}\n',
-            encoding="utf8",
-        )
         monkeypatch.chdir(repo)
 
         index_result = runner.invoke(cli, ["index", ".", "--json"], env=env)
@@ -141,7 +136,6 @@ def test_support_collect_manual_snapshot_includes_runtime_logs(
         assert f"support/{session_id}/logs/watch.log" in names
         assert f"support/{session_id}/logs/bootstrap.log" in names
         assert f"support/{session_id}/logs/search_router.jsonl" in names
-        assert f"support/{session_id}/logs/search_router_state.json" in names
 
 
 def test_support_collect_include_cache_adds_cache_and_symbol_artifacts(
