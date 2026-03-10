@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from gloggur.byte_spans import discover_repo_root
-from gloggur.io_failures import StorageIOError, wrap_io_error
+from gloggur.io_failures import wrap_io_error
 
 SUPPORT_RUNTIME_CONFIG_PATH = ".gloggur/config.toml"
 DEFAULT_LOG_BYTES = 5 * 1024 * 1024
@@ -332,7 +332,11 @@ def load_support_runtime_config(repo_root: Path) -> SupportRuntimeConfig:
     try:
         parsed = _parse_toml(config_path)
     except OSError as exc:
-        raise wrap_io_error(exc, operation="read support runtime config", path=str(config_path)) from exc
+        raise wrap_io_error(
+            exc,
+            operation="read support runtime config",
+            path=str(config_path),
+        ) from exc
     section = parsed.get("support")
     if not isinstance(section, dict):
         return SupportRuntimeConfig()
@@ -359,11 +363,19 @@ def write_support_runtime_config(repo_root: Path, *, enabled: bool) -> Path:
         updated = _replace_toml_section(existing, "support", section_lines)
         config_path.write_text(updated, encoding="utf8")
     except OSError as exc:
-        raise wrap_io_error(exc, operation="write support runtime config", path=str(config_path)) from exc
+        raise wrap_io_error(
+            exc,
+            operation="write support runtime config",
+            path=str(config_path),
+        ) from exc
     return config_path
 
 
-def maybe_start_command_trace(command_name: str, *, argv: list[str] | None = None) -> CommandTraceSession | None:
+def maybe_start_command_trace(
+    command_name: str,
+    *,
+    argv: list[str] | None = None,
+) -> CommandTraceSession | None:
     repo_root = discover_repo_root()
     config = load_support_runtime_config(repo_root)
     if not config.enabled:
@@ -383,7 +395,9 @@ def current_trace_session() -> CommandTraceSession | None:
     return _ACTIVE_TRACE_SESSION
 
 
-def load_runtime_records(repo_root: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def load_runtime_records(
+    repo_root: Path,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     paths = support_runtime_paths(repo_root)
     active = _load_record_root(paths.active_root)
     recent = _load_record_root(paths.recent_root)
@@ -456,7 +470,9 @@ def _status_indicates_cache_trouble(status_payload: dict[str, object] | None) ->
         if str(build_state.get("state")) in {"building", "interrupted"}:
             return True
     warning_codes = status_payload.get("warning_codes")
-    warnings = set(str(code) for code in warning_codes) if isinstance(warning_codes, list) else set()
+    warnings = (
+        set(str(code) for code in warning_codes) if isinstance(warning_codes, list) else set()
+    )
     return bool(
         warnings.intersection(
             {
@@ -491,7 +507,10 @@ def _record_indicates_cache_trouble(record: dict[str, object], *, active: bool) 
         ):
             return True
     build_state = record.get("build_state")
-    if isinstance(build_state, dict) and str(build_state.get("state")) in {"building", "interrupted"}:
+    if isinstance(build_state, dict) and str(build_state.get("state")) in {
+        "building",
+        "interrupted",
+    }:
         return True
     return False
 
@@ -558,7 +577,10 @@ def _load_record_root(root: Path) -> list[dict[str, object]]:
             continue
         if isinstance(payload, dict):
             payloads.append(payload)
-    payloads.sort(key=lambda item: str(item.get("updated_at") or item.get("started_at") or ""), reverse=True)
+    payloads.sort(
+        key=lambda item: str(item.get("updated_at") or item.get("started_at") or ""),
+        reverse=True,
+    )
     return payloads
 
 
@@ -595,7 +617,11 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
         temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf8")
         temp_path.replace(path)
     except OSError as exc:
-        raise wrap_io_error(exc, operation="write support runtime metadata", path=str(path)) from exc
+        raise wrap_io_error(
+            exc,
+            operation="write support runtime metadata",
+            path=str(path),
+        ) from exc
 
 
 def _parse_toml(path: Path) -> dict[str, object]:

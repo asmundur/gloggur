@@ -139,6 +139,7 @@ WATCH_DAEMON_READY_POLL_INTERVAL_SECONDS = 0.05
 @click.option("--betatester-support", is_flag=True, default=False)
 @click.option("--json", "as_json", is_flag=True, default=False)
 def init(path: str, betatester_support: bool, as_json: bool) -> None:
+    """Initialize repo-local Glöggur config for optional repo features."""
     _with_io_failure_handling(_init_impl)(
         path=path,
         betatester_support=betatester_support,
@@ -811,10 +812,14 @@ def _resolve_as_json(kwargs: dict[str, object]) -> bool:
 
 
 class _NullTraceContext:
+    """No-op context manager used when support tracing is not active."""
+
     def __enter__(self) -> _NullTraceContext:
+        """Return self so traced and untraced paths share the same shape."""
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        """Leave exceptions untouched while matching the context-manager API."""
         return None
 
 
