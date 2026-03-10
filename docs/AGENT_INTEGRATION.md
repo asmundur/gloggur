@@ -114,7 +114,8 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```bash
    scripts/gloggur find "<query>"
    scripts/gloggur find "<query>" --json
-   scripts/gloggur find "rg token src/" --about "cache warmup startup state" --json
+   scripts/gloggur find make_response src/flask/app.py --json
+   scripts/gloggur find rg -S -g '*.py' AuthToken src/ --about "cache warmup startup state" --json
    scripts/gloggur search "<query>" --top-k 5 --json
    scripts/gloggur search "rg -S -g '*.py' AuthToken" --json
    ```
@@ -198,7 +199,9 @@ Pytest defaults for this repo:
 
 - Use `find` first when you want the shortest viable answer for an agent loop.
 - Use `find --json` or `find --stream` when you need a slim, low-token machine-readable result set with exact byte offsets.
-- Use `find --about "<semantic description>"` when you already know the lexical pattern but want semantic ranking to disambiguate the matches.
+- `find` accepts grep-like token sequences directly. If the final positional token is an existing file or directory, it is treated as `--file` / `--path-prefix` automatically.
+- Use `find --about "<semantic description>"` when you already know the lexical pattern but want bounded semantic disambiguation. It reranks the lexical candidates from the same invocation and only falls back to a single semantic code rescue when lexical lookup is empty or auxiliary-only.
+- If a literal query token collides with a Glöggur option name such as `--about`, quote it or place it after `--`.
 - Use `search --json` when you need exact extraction offsets, resume/build-state metadata, or full router/debug payloads.
 - Search by **concepts**, not just filenames (e.g., "incremental hashing", "embedding provider", "tree-sitter parser").
 - Use `--top-k` to widen or narrow results based on the task.
@@ -216,6 +219,7 @@ Pytest defaults for this repo:
   is missing, search still runs but symbol-tagged hits are absent until reindex.
 - Search hits now expose repo-relative `path` plus additive `start_byte` / `end_byte`
   fields so agents can round-trip exact source text with `gloggur extract`.
+- Ambiguous `find --json` responses can include `decision.suggested_next_command`; prefer that direct narrowing step over broad follow-up probes.
 - Missing/corrupt symbol index stays non-fatal: use `--debug-router` and inspect
   `debug.backend_errors.symbol` for deterministic diagnostics.
 

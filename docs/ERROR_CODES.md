@@ -136,6 +136,11 @@ Fields:
   - Meaning: `--about` was combined with `--mode exact` / `--mode semantic` or a non-semantic `--search-mode`.
   - Retryability: retry after choosing a compatible routing mode.
   - Operator action: use `--mode auto` or `--mode hybrid` with `--search-mode semantic`.
+- `find_trailing_path_missing`
+  - Command(s): `find`.
+  - Meaning: the final positional argument looked like a file or directory path, but it did not exist in the active workspace.
+  - Retryability: retry after fixing the path or making the scope explicit.
+  - Operator action: pass an existing trailing path, or use `--file` / `--path-prefix` with a valid repo-relative path.
 - `find_stream_contract_conflict`
   - Command(s): `find`.
   - Meaning: `--stream` was combined with `--debug-router`.

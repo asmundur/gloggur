@@ -9,6 +9,9 @@ class SearchIntent:
 
     search_mode: str = "semantic"
     semantic_query: str | None = None
+    ranking_mode: str = "balanced"
+    result_profile: str = "default"
+    semantic_assist_mode: str = "none"
     language: str | None = None
     path_prefix: str | None = None
     path_filters: tuple[str, ...] = ()

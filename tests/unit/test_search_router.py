@@ -833,15 +833,88 @@ def test_query_compat_flags_map_to_execution_hints_without_leaking_into_search_i
     assert "*.py" in getattr(captured_hints, "include_globs", ())
 
 
-def test_search_router_semantic_query_uses_fusion_and_keeps_lexical_parsing_separate(
+def test_search_router_locator_about_skips_semantic_on_decisive_lexical_hit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    semantic_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "tests/test_sessions.py"),
+                    start_line=20,
+                    end_line=20,
+                    snippet="def test_mount_behavior():",
+                    raw_score=0.97,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=2),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.96 if result.name == "exact" else 0.0,
+    )
+
+    class FakeSearcher:
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str] | None = None,
+            top_k: int = 10,
+            context_radius: int = 8,
+        ) -> dict[str, object]:
+            semantic_calls.append(query)
+            _ = filters, top_k, context_radius
+            return {"results": []}
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=FakeSearcher(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="Session.mount",
+        intent=SearchIntent(
+            semantic_query="mount registry",
+            ranking_mode="source-first",
+            result_profile="locator",
+            semantic_assist_mode="bounded_about",
+            max_snippets=5,
+        ),
+        mode="auto",
+        include_debug=True,
+    )
+
+    assert semantic_calls == []
+    assert pack.summary["assist"] == "none"
+    assert pack.summary["strategy"] == "exact"
+    assert pack.summary["next_action"] == "open_hit_1"
+    assert pack.hits[0].path == "tests/test_sessions.py"
+
+
+def test_search_router_locator_about_reranks_lexical_hits_without_adding_semantic_only_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _exact_backend(**kwargs):
-        captured["exact_query"] = kwargs["query"]
-        return BackendResult(
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **kwargs: BackendResult(
             name="exact",
             hits=(
                 BackendHit(
@@ -864,17 +937,15 @@ def test_search_router_semantic_query_uses_fusion_and_keeps_lexical_parsing_sepa
                 ),
             ),
             timing_ms=4,
-        )
-
-    def _symbol_backend(**kwargs):
-        captured["symbol_query"] = kwargs["query"]
-        return BackendResult(name="symbol", hits=(), timing_ms=2)
-
-    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
-    monkeypatch.setattr("gloggur.search.router.engine.run_symbol_backend", _symbol_backend)
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **kwargs: BackendResult(name="symbol", hits=(), timing_ms=2),
+    )
     monkeypatch.setattr(
         "gloggur.search.router.engine._compute_quality",
-        lambda result, **_kwargs: 0.99 if result.name == "exact" else 0.90,
+        lambda result, **_kwargs: 0.92 if result.name == "exact" else 0.70,
     )
 
     class FakeSearcher:
@@ -889,7 +960,7 @@ def test_search_router_semantic_query_uses_fusion_and_keeps_lexical_parsing_sepa
             captured["semantic_query"] = query
             captured["semantic_filters"] = filters
             captured["semantic_top_k"] = top_k
-            captured["semantic_context_radius"] = context_radius
+            _ = context_radius
             return {
                 "results": [
                     {
@@ -898,7 +969,14 @@ def test_search_router_semantic_query_uses_fusion_and_keeps_lexical_parsing_sepa
                         "line_end": 8,
                         "context": "token = warm_cache_token()",
                         "ranking_score": 0.95,
-                    }
+                    },
+                    {
+                        "file": "src/semantic_only.py",
+                        "line": 3,
+                        "line_end": 3,
+                        "context": "token = unrelated_semantic_token()",
+                        "ranking_score": 0.99,
+                    },
                 ]
             }
 
@@ -911,25 +989,185 @@ def test_search_router_semantic_query_uses_fusion_and_keeps_lexical_parsing_sepa
     )
     pack = router.search(
         query="rg token src/",
-        intent=SearchIntent(semantic_query="cache warmup", max_snippets=5),
+        intent=SearchIntent(
+            semantic_query="cache warmup",
+            ranking_mode="source-first",
+            result_profile="locator",
+            semantic_assist_mode="bounded_about",
+            max_snippets=5,
+        ),
         mode="auto",
         include_debug=True,
     )
 
-    assert captured["exact_query"] == "token"
-    assert captured["symbol_query"] == "token"
     assert captured["semantic_query"] == "cache warmup"
-    assert captured["semantic_filters"] == {"ranking_mode": "balanced", "mode": "semantic"}
-    assert pack.summary["strategy"] == "hybrid"
-    assert pack.summary["reason"] == "semantic_query_requested"
-    assert pack.hits
+    assert captured["semantic_filters"] == {"ranking_mode": "source-first", "mode": "semantic"}
+    assert pack.summary["assist"] == "rerank"
+    assert pack.summary["reason"] == "semantic_rerank"
     assert pack.hits[0].path == "src/z_cache_token.py"
+    assert all(hit.path != "src/semantic_only.py" for hit in pack.hits)
     assert isinstance(pack.debug, dict)
     assert pack.debug["queries"] == {
         "lexical_query": "rg token src/",
         "effective_lexical_query": "token",
         "semantic_query": "cache warmup",
     }
-    parsed = pack.debug["parsed_query"]
-    assert isinstance(parsed, dict)
-    assert parsed["source"] == "grep_compat"
+
+
+def test_search_router_locator_about_allows_single_semantic_rescue_from_auxiliary_hits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "docs/reference.md"),
+                    start_line=10,
+                    end_line=10,
+                    snippet="make_response tuple coercion",
+                    raw_score=0.95,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=3,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=1),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.92 if result.name == "exact" else 0.68,
+    )
+
+    class FakeSearcher:
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str] | None = None,
+            top_k: int = 10,
+            context_radius: int = 8,
+        ) -> dict[str, object]:
+            _ = query, filters, top_k, context_radius
+            return {
+                "results": [
+                    {
+                        "file": "src/flask/app.py",
+                        "line": 1224,
+                        "line_end": 1224,
+                        "context": "def make_response(rv):",
+                        "ranking_score": 0.88,
+                    },
+                    {
+                        "file": "src/other.py",
+                        "line": 9,
+                        "line_end": 9,
+                        "context": "def not_it():",
+                        "ranking_score": 0.80,
+                    },
+                ]
+            }
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=FakeSearcher(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="make_response tuple",
+        intent=SearchIntent(
+            semantic_query="Flask response tuple coercion",
+            ranking_mode="source-first",
+            result_profile="locator",
+            semantic_assist_mode="bounded_about",
+            max_snippets=5,
+        ),
+        mode="auto",
+        include_debug=True,
+    )
+
+    assert pack.summary["assist"] == "semantic_rescue"
+    assert pack.summary["strategy"] == "semantic"
+    assert pack.summary["reason"] == "semantic_rescue"
+    assert pack.summary["next_action"] == "open_hit_1"
+    assert len(pack.hits) == 1
+    assert pack.hits[0].path == "src/flask/app.py"
+
+
+def test_search_router_locator_about_rejects_weak_semantic_rescue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **kwargs: BackendResult(name="exact", hits=(), timing_ms=3),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=1),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.60 if result.name == "semantic" else 0.0,
+    )
+
+    class FakeSearcher:
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str] | None = None,
+            top_k: int = 10,
+            context_radius: int = 8,
+        ) -> dict[str, object]:
+            _ = query, filters, top_k, context_radius
+            return {
+                "results": [
+                    {
+                        "file": "src/flask/app.py",
+                        "line": 1224,
+                        "line_end": 1224,
+                        "context": "def make_response(rv):",
+                        "ranking_score": 0.72,
+                    },
+                    {
+                        "file": "src/flask/helpers.py",
+                        "line": 210,
+                        "line_end": 210,
+                        "context": "def weak_alt():",
+                        "ranking_score": 0.70,
+                    },
+                ]
+            }
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=FakeSearcher(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="make_response tuple",
+        intent=SearchIntent(
+            semantic_query="Flask response tuple coercion",
+            ranking_mode="source-first",
+            result_profile="locator",
+            semantic_assist_mode="bounded_about",
+            max_snippets=5,
+        ),
+        mode="auto",
+        include_debug=True,
+    )
+
+    assert pack.summary["assist"] == "none"
+    assert pack.summary["strategy"] == "suppressed"
+    assert pack.hits == ()

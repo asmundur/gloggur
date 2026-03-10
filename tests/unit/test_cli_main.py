@@ -4334,6 +4334,9 @@ def _install_routed_search_runtime(
             captures["intent"] = {
                 "search_mode": getattr(intent, "search_mode", None),
                 "semantic_query": getattr(intent, "semantic_query", None),
+                "ranking_mode": getattr(intent, "ranking_mode", None),
+                "result_profile": getattr(intent, "result_profile", None),
+                "semantic_assist_mode": getattr(intent, "semantic_assist_mode", None),
                 "language": getattr(intent, "language", None),
                 "path_prefix": getattr(intent, "path_prefix", None),
                 "max_files": getattr(intent, "max_files", None),
@@ -4413,6 +4416,31 @@ def test_find_text_output_reports_decision_statuses(
         assert result.output.splitlines()[0] == expected_first_line
 
 
+def test_find_text_output_appends_suggested_next_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Ambiguous find output should emit one reusable narrowing command."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(
+        query="needle",
+        hits=(_make_context_hit(1), _make_context_hit(2)),
+        summary_overrides={
+            "decisive": False,
+            "query_kind": "mixed",
+            "next_action": "narrow_by_path",
+            "suggested_path_prefix": "src/sample_1.py",
+        },
+    )
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(cli_main.cli, ["find", "needle"])
+
+    assert result.exit_code == 0, result.output
+    assert "suggested_next_command: gloggur find needle --file src/sample_1.py" in result.output
+
+
 def test_find_json_contract_is_slim_and_security_gated(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4444,6 +4472,7 @@ def test_find_json_contract_is_slim_and_security_gated(
         "reason": "quality_threshold_met",
         "query_kind": "identifier",
         "next_action": "open_hit_1",
+        "assist": "none",
     }
     assert payload["warning_codes"] == ["identifier_query_high_top_k"]
     assert payload["security_warning_codes"] == ["untrusted_repo_config"]
@@ -4455,6 +4484,38 @@ def test_find_json_contract_is_slim_and_security_gated(
     assert hit["rank"] == 1
     assert hit["start_byte"] == 10
     assert hit["end_byte"] == 18
+
+
+def test_find_json_adds_assist_and_suggested_next_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find should surface assist state and an additive next-command hint."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(
+        query="needle",
+        hits=(_make_context_hit(1), _make_context_hit(2)),
+        summary_overrides={
+            "decisive": False,
+            "query_kind": "mixed",
+            "next_action": "narrow_by_path",
+            "suggested_path_prefix": "src/sample_1.py",
+            "assist": "rerank",
+        },
+    )
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(cli_main.cli, ["find", "needle", "--json", "--about", "cache warmup"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    decision = payload["decision"]
+    assert decision["assist"] == "rerank"
+    assert (
+        decision["suggested_next_command"]
+        == "gloggur find needle --file src/sample_1.py --about 'cache warmup'"
+    )
 
 
 def test_find_json_includes_about_and_forwards_semantic_query(
@@ -4479,6 +4540,9 @@ def test_find_json_includes_about_and_forwards_semantic_query(
     assert payload["about"] == "cache warmup"
     assert captures["query"] == 'rg "token" src/'
     assert captures["intent"]["semantic_query"] == "cache warmup"
+    assert captures["intent"]["ranking_mode"] == "source-first"
+    assert captures["intent"]["result_profile"] == "locator"
+    assert captures["intent"]["semantic_assist_mode"] == "bounded_about"
 
 
 def test_find_blank_about_is_treated_as_absent(
@@ -4504,6 +4568,117 @@ def test_find_blank_about_is_treated_as_absent(
     payload = _parse_json_output(result.output)
     assert "about" not in payload
     assert captures["intent"]["semantic_query"] is None
+    assert captures["intent"]["ranking_mode"] == "source-first"
+    assert captures["intent"]["result_profile"] == "locator"
+    assert captures["intent"]["semantic_assist_mode"] == "none"
+
+
+def test_find_unprocessed_query_tokens_infer_file_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find should accept shell-level query tokens and peel a trailing file path."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    target = tmp_path / "src" / "flask" / "app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def make_response():\n    return None\n", encoding="utf8")
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "make_response", "src/flask/app.py", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captures["query"] == "make_response"
+    assert captures["intent"]["path_prefix"] == str(target.resolve())
+
+
+def test_find_unprocessed_rg_tokens_infer_directory_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find should preserve grep-like tokens while peeling a trailing directory path."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "rg", "-S", "-g", "*.py", "AuthToken", "src", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captures["query"] == "rg -S -g *.py AuthToken"
+    assert captures["intent"]["path_prefix"] == str(source_dir.resolve())
+
+
+def test_find_explicit_scope_disables_implicit_trailing_path_inference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Explicit scope flags should keep trailing tokens in the lexical query."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    explicit_target = tmp_path / "src"
+    explicit_target.mkdir()
+    trailing = tmp_path / "docs"
+    trailing.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "AuthToken", "docs", "--path-prefix", "src", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captures["query"] == "AuthToken docs"
+    assert captures["intent"]["path_prefix"] == str(explicit_target.resolve())
+
+
+def test_find_after_double_dash_preserves_query_tokens_named_like_cli_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tokens after `--` should stay part of the find query."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "--json", "--", "rg", "--about", "token"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captures["query"] == "rg --about token"
+
+
+def test_find_pathlike_trailing_token_missing_returns_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Missing trailing path-like tokens should fail with a corrective find error."""
+    runner = CliRunner()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "make_response", "src/flask/app.py", "--json"],
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "find_trailing_path_missing"
 
 
 @pytest.mark.parametrize(
@@ -4623,7 +4798,7 @@ def test_find_matches_search_router_invocation_semantics(
     tmp_path: Path,
     extra_args: list[str],
 ) -> None:
-    """find should route queries with the same intent and filters as search."""
+    """find should preserve shared routing fields while applying locator defaults."""
     runner = CliRunner()
     pack = _make_context_pack()
 
@@ -4649,7 +4824,22 @@ def test_find_matches_search_router_invocation_semantics(
 
     assert find_capture["query"] == search_capture["query"]
     assert find_capture["mode"] == search_capture["mode"]
-    assert find_capture["intent"] == search_capture["intent"]
+    for field in (
+        "search_mode",
+        "semantic_query",
+        "language",
+        "path_prefix",
+        "max_files",
+        "max_snippets",
+        "time_budget_ms",
+    ):
+        assert find_capture["intent"][field] == search_capture["intent"][field]
+    assert search_capture["intent"]["ranking_mode"] == "balanced"
+    assert search_capture["intent"]["result_profile"] == "default"
+    assert search_capture["intent"]["semantic_assist_mode"] == "none"
+    assert find_capture["intent"]["ranking_mode"] == "source-first"
+    assert find_capture["intent"]["result_profile"] == "locator"
+    assert find_capture["intent"]["semantic_assist_mode"] == "none"
 
 
 def test_search_json_contract_remains_contextpack_v2_after_find_addition(

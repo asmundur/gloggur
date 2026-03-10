@@ -41,6 +41,12 @@ _BACKEND_TIE_PRIORITY = {
     "semantic": 2,
 }
 _RANK_FUSION_K = 60
+_AUXILIARY_INTENT_RE = re.compile(
+    r"(?i)\b(doc|docs|readme|changelog|history|news|release(?:-notes)?|guide|tutorial|example|examples)\b"
+)
+_SOURCE_FIRST_RANKING_MODES = {"balanced", "source-first"}
+_RESULT_PROFILES = {"default", "locator"}
+_SEMANTIC_ASSIST_MODES = {"none", "bounded_about"}
 
 
 def _normalize_string_tuple(values: object) -> tuple[str, ...]:
@@ -71,6 +77,33 @@ def _normalize_search_mode(value: object) -> str:
     if search_mode not in {"semantic", "by_fqname", "by_fqname_regex", "by_path"}:
         return "semantic"
     return search_mode
+
+
+def _normalize_ranking_mode(value: object) -> str:
+    ranking_mode = (
+        str(value).strip().lower() if isinstance(value, str) and str(value).strip() else "balanced"
+    )
+    if ranking_mode not in _SOURCE_FIRST_RANKING_MODES:
+        return "balanced"
+    return ranking_mode
+
+
+def _normalize_result_profile(value: object) -> str:
+    profile = (
+        str(value).strip().lower() if isinstance(value, str) and str(value).strip() else "default"
+    )
+    if profile not in _RESULT_PROFILES:
+        return "default"
+    return profile
+
+
+def _normalize_semantic_assist_mode(value: object) -> str:
+    assist_mode = (
+        str(value).strip().lower() if isinstance(value, str) and str(value).strip() else "none"
+    )
+    if assist_mode not in _SEMANTIC_ASSIST_MODES:
+        return "none"
+    return assist_mode
 
 
 def _normalize_search_intent(
@@ -107,6 +140,9 @@ def _normalize_search_intent(
     return SearchIntent(
         search_mode=_normalize_search_mode(base.search_mode),
         semantic_query=semantic_query,
+        ranking_mode=_normalize_ranking_mode(base.ranking_mode),
+        result_profile=_normalize_result_profile(base.result_profile),
+        semantic_assist_mode=_normalize_semantic_assist_mode(base.semantic_assist_mode),
         language=language,
         path_prefix=path_prefix,
         path_filters=path_filters,
@@ -143,6 +179,9 @@ def _intent_and_hints_from_constraints(
         return _normalize_search_intent(None, config), _normalize_execution_hints(None)
     intent = SearchIntent(
         search_mode=constraints.search_mode,
+        ranking_mode="balanced",
+        result_profile="default",
+        semantic_assist_mode="none",
         language=constraints.language,
         path_prefix=constraints.path_prefix,
         path_filters=constraints.path_filters,
@@ -376,6 +415,45 @@ def _route_auto(results: list[BackendResult], config: SearchRouterConfig) -> Rou
     )
 
 
+def _route_lexical_auto(results: list[BackendResult], config: SearchRouterConfig) -> RouterOutcome:
+    qualified = [
+        result
+        for result in results
+        if result.hits and result.quality_score >= _threshold_for(result.name, config)
+    ]
+    if qualified:
+        chosen = sorted(
+            qualified,
+            key=lambda item: (
+                -item.quality_score,
+                _BACKEND_TIE_PRIORITY.get(item.name, 99),
+                item.timing_ms,
+            ),
+        )[0]
+        return RouterOutcome(
+            strategy=chosen.name,
+            reason="quality_threshold_met",
+            winner=chosen.name,
+            considered=tuple(result.name for result in results),
+            backend_scores={result.name: result.quality_score for result in results},
+        )
+    if not any(result.hits for result in results):
+        return RouterOutcome(
+            strategy="suppressed",
+            reason="no_lexical_hits",
+            winner=None,
+            considered=tuple(result.name for result in results),
+            backend_scores={result.name: result.quality_score for result in results},
+        )
+    return RouterOutcome(
+        strategy="hybrid",
+        reason="no_backend_met_threshold",
+        winner=None,
+        considered=tuple(result.name for result in results),
+        backend_scores={result.name: result.quality_score for result in results},
+    )
+
+
 def _lexical_support_for_backend(result: BackendResult, *, hints: QueryHints) -> float:
     if not result.hits:
         return 0.0
@@ -577,6 +655,134 @@ def _adaptive_fusion_selection(
     )
 
 
+def _select_hits_for_outcome(
+    *,
+    results_by_name: dict[str, BackendResult],
+    outcome: RouterOutcome,
+    intent: SearchIntent,
+    hints: QueryHints,
+    config: SearchRouterConfig,
+) -> tuple[list[BackendHit], dict[str, int], dict[str, float], dict[str, bool], dict[str, float]]:
+    if outcome.strategy == "hybrid":
+        return _adaptive_fusion_selection(
+            results_by_name=results_by_name,
+            intent=intent,
+            hints=hints,
+            config=config,
+        )
+    if outcome.strategy == "suppressed":
+        return [], {}, {}, {}, {}
+    winner_result = results_by_name.get(outcome.strategy)
+    return list(winner_result.hits if winner_result is not None else ()), {}, {}, {}, {}
+
+
+def _is_auxiliary_path(path: str) -> bool:
+    lowered = path.replace("\\", "/").lower()
+    basename = Path(lowered).name
+    stem = Path(lowered).stem
+    if "/docs/" in lowered or "/doc/" in lowered:
+        return True
+    if "/examples/" in lowered or "/example/" in lowered:
+        return True
+    if basename.endswith((".md", ".rst", ".txt")):
+        return True
+    return any(
+        marker in stem
+        for marker in ("readme", "changelog", "changes", "history", "news", "release-notes")
+    )
+
+
+def _auxiliary_intent_requested(*, query: str, intent: SearchIntent) -> bool:
+    if _AUXILIARY_INTENT_RE.search(query):
+        return True
+    for raw_path in (intent.path_prefix, *intent.path_filters):
+        if not isinstance(raw_path, str):
+            continue
+        lowered = raw_path.replace("\\", "/").lower()
+        if "/docs" in lowered or "/examples" in lowered or "readme" in lowered:
+            return True
+    return False
+
+
+def _lexical_hits_are_auxiliary_only(
+    *,
+    hits: tuple[ContextHit, ...],
+    query: str,
+    intent: SearchIntent,
+) -> bool:
+    if not hits or _auxiliary_intent_requested(query=query, intent=intent):
+        return False
+    return all(_is_auxiliary_path(hit.path) for hit in hits)
+
+
+def _semantic_overlap_score(
+    *,
+    candidate: BackendHit,
+    semantic_hits: tuple[BackendHit, ...],
+) -> float:
+    best = 0.0
+    for semantic_hit in semantic_hits:
+        if semantic_hit.path != candidate.path:
+            continue
+        score = semantic_hit.raw_score
+        if _spans_overlap(candidate, semantic_hit):
+            score += 0.05
+        elif abs(candidate.start_line - semantic_hit.start_line) <= 4:
+            score += 0.02
+        if score > best:
+            best = score
+    return min(best, 1.0)
+
+
+def _rerank_lexical_hits_with_semantic(
+    *,
+    lexical_hits: list[BackendHit],
+    semantic_hits: tuple[BackendHit, ...],
+) -> tuple[list[BackendHit], bool]:
+    if len(lexical_hits) < 2 or not semantic_hits:
+        return lexical_hits, False
+
+    overlap_scores = {
+        index: _semantic_overlap_score(candidate=hit, semantic_hits=semantic_hits)
+        for index, hit in enumerate(lexical_hits)
+    }
+    if not any(score > 0.0 for score in overlap_scores.values()):
+        return lexical_hits, False
+
+    reranked = sorted(
+        enumerate(lexical_hits),
+        key=lambda item: (
+            -overlap_scores[item[0]],
+            -item[1].raw_score,
+            item[0],
+        ),
+    )
+    ordered_hits = [hit for _index, hit in reranked]
+    return ordered_hits, ordered_hits != lexical_hits
+
+
+def _semantic_rescue_threshold(config: SearchRouterConfig) -> float:
+    return max(config.threshold_semantic + 0.08, 0.74)
+
+
+def _select_semantic_rescue_hits(
+    *,
+    semantic_result: BackendResult,
+    config: SearchRouterConfig,
+) -> tuple[list[BackendHit], bool]:
+    candidates = [hit for hit in semantic_result.hits if not _is_auxiliary_path(hit.path)]
+    if not candidates:
+        return [], False
+
+    top_hit = candidates[0]
+    threshold = _semantic_rescue_threshold(config)
+    if top_hit.raw_score < threshold:
+        return [], False
+    if len(candidates) > 1 and (top_hit.raw_score - candidates[1].raw_score) < 0.05:
+        return [], False
+    return [top_hit], True
+
+
 def _suggested_path_prefix(hits: tuple[ContextHit, ...]) -> str | None:
     top_hits = hits[:4]
     if len(top_hits) < 2:
@@ -607,6 +813,11 @@ def _suggested_path_prefix(hits: tuple[ContextHit, ...]) -> str | None:
     if parent_count >= 2:
         return parent
     return None
+
+
+def _has_multiple_hit_paths(hits: tuple[ContextHit, ...]) -> bool:
+    """Return True when the packed hit set spans more than one file path."""
+    return len({hit.path for hit in hits if hit.path}) > 1
 
 
 def _decisive_non_semantic_result(
@@ -642,7 +853,11 @@ def _resolve_next_action(
     outcome: RouterOutcome,
     backend_thresholds: dict[str, dict[str, object]],
     query_kind: str,
+    semantic_assist: str,
 ) -> tuple[bool, str, str | None]:
+    if semantic_assist == "semantic_rescue" and hits:
+        return True, "open_hit_1", None
+
     decisive = _decisive_non_semantic_result(
         hits=hits,
         outcome=outcome,
@@ -909,12 +1124,19 @@ class SearchRouter:
         backend_execution_hints = resolved_execution_hints
         if hints.query_kind in {"identifier", "declaration"} and not explicit_regex_requested:
             backend_execution_hints = replace(resolved_execution_hints, fixed_string=True)
+        bounded_about = bool(
+            resolved_intent.semantic_query
+            and resolved_intent.semantic_assist_mode == "bounded_about"
+            and normalized_mode in {"auto", "hybrid"}
+        )
         force_semantic_fusion = bool(
-            resolved_intent.semantic_query and normalized_mode in {"auto", "hybrid"}
+            resolved_intent.semantic_query
+            and normalized_mode in {"auto", "hybrid"}
+            and not bounded_about
         )
         backend_names = (
             self._resolve_backends("auto")
-            if force_semantic_fusion
+            if force_semantic_fusion or bounded_about
             else self._resolve_backends(normalized_mode)
         )
 
@@ -962,38 +1184,18 @@ class SearchRouter:
                 config=self.config,
             )
 
-        backend_results: list[BackendResult] = []
-        if force_semantic_fusion:
-            non_semantic_results: list[BackendResult] = []
-            for backend_name in ("exact", "symbol"):
-                if backend_name in backend_names:
-                    non_semantic_results.append(_run_backend(backend_name))
-            backend_results.extend(non_semantic_results)
-            if "semantic" in backend_names:
-                backend_results.append(_run_backend("semantic"))
-        elif normalized_mode == "hybrid":
-            if len(backend_names) == 1:
-                backend_results.append(_run_backend(backend_names[0]))
-            else:
-                timeout_seconds = max((resolved_intent.time_budget_ms or 1) / 1000.0, 0.1)
-                with ThreadPoolExecutor(max_workers=len(backend_names)) as executor:
-                    futures = {executor.submit(_run_backend, name): name for name in backend_names}
-                    try:
-                        for future in as_completed(futures, timeout=timeout_seconds):
-                            backend_results.append(future.result())
-                    except TimeoutError:
-                        for future in futures:
-                            future.cancel()
-        elif normalized_mode in {"exact", "semantic"}:
-            backend_results.append(_run_backend(normalized_mode))
-        else:
-            non_semantic_results: list[BackendResult] = []
-            for backend_name in ("exact", "symbol"):
-                if backend_name in backend_names:
-                    non_semantic_results.append(_run_backend(backend_name))
-            backend_results.extend(non_semantic_results)
+        fusion_allocation: dict[str, int] = {}
+        fusion_proportional_shares: dict[str, float] = {}
+        semantic_assist = "none"
+        outcome: RouterOutcome
+        selected_hits: list[BackendHit]
 
-            preliminary_results = [
+        if bounded_about:
+            lexical_backend_names = tuple(
+                name for name in ("exact", "symbol") if name in backend_names
+            )
+            lexical_results = [_run_backend(name) for name in lexical_backend_names]
+            lexical_enriched = [
                 replace(
                     result,
                     quality_score=_compute_quality(
@@ -1002,26 +1204,293 @@ class SearchRouter:
                         intent=resolved_intent,
                     ),
                 )
-                for result in non_semantic_results
+                for result in lexical_results
             ]
-            preliminary_outcome = _route_auto(preliminary_results, self.config)
-            has_non_semantic_hits = any(result.hits for result in non_semantic_results)
-            needs_semantic_fallback = False
-            if "semantic" in backend_names:
-                if hints.query_kind in {"identifier", "declaration"}:
-                    needs_semantic_fallback = not has_non_semantic_hits
+            lexical_results_by_name = {result.name: result for result in lexical_enriched}
+            if normalized_mode == "hybrid":
+                lexical_outcome = RouterOutcome(
+                    strategy="hybrid",
+                    reason="forced_mode",
+                    winner=None,
+                    considered=tuple(result.name for result in lexical_enriched),
+                    backend_scores={
+                        result.name: result.quality_score for result in lexical_enriched
+                    },
+                )
+            else:
+                lexical_outcome = _route_lexical_auto(lexical_enriched, self.config)
+            (
+                lexical_selected_hits,
+                lexical_fusion_allocation,
+                _lexical_backend_weights,
+                _lexical_eligibility,
+                lexical_fusion_proportional_shares,
+            ) = _select_hits_for_outcome(
+                results_by_name=lexical_results_by_name,
+                outcome=lexical_outcome,
+                intent=resolved_intent,
+                hints=hints,
+                config=self.config,
+            )
+            lexical_packed_hits = _pack_hits(
+                lexical_selected_hits,
+                repo_root=self.repo_root,
+                intent=resolved_intent,
+                config=self.config,
+                preserve_ranked_order=lexical_outcome.strategy == "hybrid",
+            )
+            lexical_backend_thresholds = _backend_threshold_status(
+                lexical_enriched,
+                self.config,
+            )
+            lexical_decisive = _decisive_non_semantic_result(
+                hits=lexical_packed_hits,
+                outcome=lexical_outcome,
+                backend_thresholds=lexical_backend_thresholds,
+                query_kind=hints.query_kind,
+            )
+            lexical_auxiliary_only = _lexical_hits_are_auxiliary_only(
+                hits=lexical_packed_hits,
+                query=effective_query,
+                intent=resolved_intent,
+            )
+            lexical_decisive_for_about = (
+                lexical_decisive
+                and not lexical_auxiliary_only
+                and not _has_multiple_hit_paths(lexical_packed_hits)
+            )
+            semantic_needed = "semantic" in backend_names and (
+                not lexical_decisive_for_about or lexical_auxiliary_only
+            )
+            enriched_results = list(lexical_enriched)
+            if semantic_needed:
+                semantic_result = _run_backend("semantic")
+                semantic_enriched = replace(
+                    semantic_result,
+                    quality_score=_compute_quality(
+                        semantic_result,
+                        hints=hints,
+                        intent=resolved_intent,
+                    ),
+                )
+                enriched_results.append(semantic_enriched)
+                if not lexical_packed_hits or lexical_auxiliary_only:
+                    rescue_hits, rescue_used = _select_semantic_rescue_hits(
+                        semantic_result=semantic_enriched,
+                        config=self.config,
+                    )
+                    if rescue_used:
+                        semantic_assist = "semantic_rescue"
+                        selected_hits = rescue_hits
+                        outcome = RouterOutcome(
+                            strategy="semantic",
+                            reason="semantic_rescue",
+                            winner="semantic",
+                            considered=tuple(result.name for result in enriched_results),
+                            backend_scores={
+                                result.name: result.quality_score for result in enriched_results
+                            },
+                        )
+                    else:
+                        if lexical_auxiliary_only:
+                            selected_hits = []
+                            outcome = RouterOutcome(
+                                strategy="suppressed",
+                                reason="semantic_rescue_not_confident",
+                                winner=None,
+                                considered=tuple(result.name for result in enriched_results),
+                                backend_scores={
+                                    result.name: result.quality_score for result in enriched_results
+                                },
+                                warning_codes=lexical_outcome.warning_codes,
+                            )
+                        else:
+                            selected_hits = lexical_selected_hits
+                            outcome = RouterOutcome(
+                                strategy=lexical_outcome.strategy,
+                                reason=lexical_outcome.reason,
+                                winner=lexical_outcome.winner,
+                                considered=tuple(result.name for result in enriched_results),
+                                backend_scores={
+                                    result.name: result.quality_score for result in enriched_results
+                                },
+                                warning_codes=lexical_outcome.warning_codes,
+                            )
+                            fusion_allocation = lexical_fusion_allocation
+                            fusion_proportional_shares = lexical_fusion_proportional_shares
                 else:
-                    needs_semantic_fallback = preliminary_outcome.strategy in {
-                        "hybrid",
-                        "suppressed",
-                    }
-            if needs_semantic_fallback:
-                backend_results.append(_run_backend("semantic"))
+                    reranked_hits, reranked = _rerank_lexical_hits_with_semantic(
+                        lexical_hits=lexical_selected_hits,
+                        semantic_hits=semantic_enriched.hits,
+                    )
+                    semantic_assist = "rerank" if reranked else "none"
+                    selected_hits = reranked_hits
+                    outcome = RouterOutcome(
+                        strategy=lexical_outcome.strategy,
+                        reason="semantic_rerank" if reranked else lexical_outcome.reason,
+                        winner=lexical_outcome.winner,
+                        considered=tuple(result.name for result in enriched_results),
+                        backend_scores={
+                            result.name: result.quality_score for result in enriched_results
+                        },
+                        warning_codes=lexical_outcome.warning_codes,
+                    )
+                    fusion_allocation = lexical_fusion_allocation
+                    fusion_proportional_shares = lexical_fusion_proportional_shares
+            else:
+                selected_hits = lexical_selected_hits
+                outcome = RouterOutcome(
+                    strategy=lexical_outcome.strategy,
+                    reason=lexical_outcome.reason,
+                    winner=lexical_outcome.winner,
+                    considered=tuple(result.name for result in enriched_results),
+                    backend_scores={
+                        result.name: result.quality_score for result in enriched_results
+                    },
+                    warning_codes=lexical_outcome.warning_codes,
+                )
+                fusion_allocation = lexical_fusion_allocation
+                fusion_proportional_shares = lexical_fusion_proportional_shares
+        else:
+            backend_results: list[BackendResult] = []
+            if force_semantic_fusion:
+                non_semantic_results: list[BackendResult] = []
+                for backend_name in ("exact", "symbol"):
+                    if backend_name in backend_names:
+                        non_semantic_results.append(_run_backend(backend_name))
+                backend_results.extend(non_semantic_results)
+                if "semantic" in backend_names:
+                    backend_results.append(_run_backend("semantic"))
+            elif normalized_mode == "hybrid":
+                if len(backend_names) == 1:
+                    backend_results.append(_run_backend(backend_names[0]))
+                else:
+                    timeout_seconds = max((resolved_intent.time_budget_ms or 1) / 1000.0, 0.1)
+                    with ThreadPoolExecutor(max_workers=len(backend_names)) as executor:
+                        futures = {
+                            executor.submit(_run_backend, name): name for name in backend_names
+                        }
+                        try:
+                            for future in as_completed(futures, timeout=timeout_seconds):
+                                backend_results.append(future.result())
+                        except TimeoutError:
+                            for future in futures:
+                                future.cancel()
+            elif normalized_mode in {"exact", "semantic"}:
+                backend_results.append(_run_backend(normalized_mode))
+            else:
+                non_semantic_results = []
+                for backend_name in ("exact", "symbol"):
+                    if backend_name in backend_names:
+                        non_semantic_results.append(_run_backend(backend_name))
+                backend_results.extend(non_semantic_results)
 
-        enriched_results: list[BackendResult] = []
-        for result in backend_results:
-            quality = _compute_quality(result, hints=hints, intent=resolved_intent)
-            enriched_results.append(replace(result, quality_score=quality))
+                preliminary_results = [
+                    replace(
+                        result,
+                        quality_score=_compute_quality(
+                            result,
+                            hints=hints,
+                            intent=resolved_intent,
+                        ),
+                    )
+                    for result in non_semantic_results
+                ]
+                preliminary_outcome = _route_auto(preliminary_results, self.config)
+                has_non_semantic_hits = any(result.hits for result in non_semantic_results)
+                needs_semantic_fallback = False
+                if "semantic" in backend_names:
+                    if hints.query_kind in {"identifier", "declaration"}:
+                        needs_semantic_fallback = not has_non_semantic_hits
+                    else:
+                        needs_semantic_fallback = preliminary_outcome.strategy in {
+                            "hybrid",
+                            "suppressed",
+                        }
+                if needs_semantic_fallback:
+                    backend_results.append(_run_backend("semantic"))
+
+            enriched_results = []
+            for result in backend_results:
+                quality = _compute_quality(result, hints=hints, intent=resolved_intent)
+                enriched_results.append(replace(result, quality_score=quality))
+
+            results_by_name = {result.name: result for result in enriched_results}
+            if force_semantic_fusion:
+                outcome = RouterOutcome(
+                    strategy="hybrid",
+                    reason="semantic_query_requested",
+                    winner=None,
+                    considered=tuple(result.name for result in enriched_results),
+                    backend_scores={
+                        result.name: result.quality_score for result in enriched_results
+                    },
+                )
+                (
+                    selected_hits,
+                    fusion_allocation,
+                    _ignored_backend_weights,
+                    _ignored_eligibility,
+                    fusion_proportional_shares,
+                ) = _adaptive_fusion_selection(
+                    results_by_name=results_by_name,
+                    intent=resolved_intent,
+                    hints=hints,
+                    config=self.config,
+                )
+            elif normalized_mode == "hybrid":
+                outcome = RouterOutcome(
+                    strategy="hybrid",
+                    reason="forced_mode",
+                    winner=None,
+                    considered=tuple(result.name for result in enriched_results),
+                    backend_scores={
+                        result.name: result.quality_score for result in enriched_results
+                    },
+                )
+                (
+                    selected_hits,
+                    fusion_allocation,
+                    _ignored_backend_weights,
+                    _ignored_eligibility,
+                    fusion_proportional_shares,
+                ) = _adaptive_fusion_selection(
+                    results_by_name=results_by_name,
+                    intent=resolved_intent,
+                    hints=hints,
+                    config=self.config,
+                )
+            elif normalized_mode in {"exact", "semantic"}:
+                forced = results_by_name.get(normalized_mode)
+                if forced is None:
+                    forced = BackendResult(
+                        name=normalized_mode, hits=(), timing_ms=0, error="backend_not_available"
+                    )
+                outcome = RouterOutcome(
+                    strategy=normalized_mode,
+                    reason="forced_mode",
+                    winner=normalized_mode,
+                    considered=tuple(result.name for result in enriched_results),
+                    backend_scores={
+                        result.name: result.quality_score for result in enriched_results
+                    },
+                )
+                selected_hits = list(forced.hits)
+            else:
+                outcome = _route_auto(enriched_results, self.config)
+                (
+                    selected_hits,
+                    fusion_allocation,
+                    _ignored_backend_weights,
+                    _ignored_eligibility,
+                    fusion_proportional_shares,
+                ) = _select_hits_for_outcome(
+                    results_by_name=results_by_name,
+                    outcome=outcome,
+                    intent=resolved_intent,
+                    hints=hints,
+                    config=self.config,
+                )
 
         results_by_name = {result.name: result for result in enriched_results}
         max_backend_ms = max((result.timing_ms for result in enriched_results), default=1)
@@ -1041,91 +1510,13 @@ class SearchRouter:
             )
             for result in enriched_results
         }
-        fusion_allocation: dict[str, int] = {}
-        fusion_proportional_shares: dict[str, float] = {}
-        outcome: RouterOutcome
-        selected_hits: list[BackendHit]
-        if force_semantic_fusion:
-            outcome = RouterOutcome(
-                strategy="hybrid",
-                reason="semantic_query_requested",
-                winner=None,
-                considered=tuple(result.name for result in enriched_results),
-                backend_scores={result.name: result.quality_score for result in enriched_results},
-            )
-            (
-                selected_hits,
-                fusion_allocation,
-                backend_weights,
-                eligibility,
-                fusion_proportional_shares,
-            ) = _adaptive_fusion_selection(
-                results_by_name=results_by_name,
-                intent=resolved_intent,
-                hints=hints,
-                config=self.config,
-            )
-        elif normalized_mode == "hybrid":
-            outcome = RouterOutcome(
-                strategy="hybrid",
-                reason="forced_mode",
-                winner=None,
-                considered=tuple(result.name for result in enriched_results),
-                backend_scores={result.name: result.quality_score for result in enriched_results},
-            )
-            (
-                selected_hits,
-                fusion_allocation,
-                backend_weights,
-                eligibility,
-                fusion_proportional_shares,
-            ) = _adaptive_fusion_selection(
-                results_by_name=results_by_name,
-                intent=resolved_intent,
-                hints=hints,
-                config=self.config,
-            )
-        elif normalized_mode in {"exact", "semantic"}:
-            forced = results_by_name.get(normalized_mode)
-            if forced is None:
-                forced = BackendResult(
-                    name=normalized_mode, hits=(), timing_ms=0, error="backend_not_available"
-                )
-            outcome = RouterOutcome(
-                strategy=normalized_mode,
-                reason="forced_mode",
-                winner=normalized_mode,
-                considered=tuple(result.name for result in enriched_results),
-                backend_scores={result.name: result.quality_score for result in enriched_results},
-            )
-            selected_hits = list(forced.hits)
-        else:
-            outcome = _route_auto(enriched_results, self.config)
-            if outcome.strategy == "hybrid":
-                (
-                    selected_hits,
-                    fusion_allocation,
-                    backend_weights,
-                    eligibility,
-                    fusion_proportional_shares,
-                ) = _adaptive_fusion_selection(
-                    results_by_name=results_by_name,
-                    intent=resolved_intent,
-                    hints=hints,
-                    config=self.config,
-                )
-            elif outcome.strategy == "suppressed":
-                selected_hits = []
-            else:
-                winner_result = results_by_name.get(outcome.strategy)
-                selected_hits = list(winner_result.hits if winner_result is not None else ())
 
         packed_hits = _pack_hits(
             selected_hits,
             repo_root=self.repo_root,
             intent=resolved_intent,
             config=self.config,
-            preserve_ranked_order=outcome.strategy == "hybrid",
+            preserve_ranked_order=outcome.strategy == "hybrid" or semantic_assist == "rerank",
         )
 
         total_ms = int((time.perf_counter() - started) * 1000)
@@ -1143,6 +1534,7 @@ class SearchRouter:
             outcome=outcome,
             backend_thresholds=backend_thresholds,
             query_kind=hints.query_kind,
+            semantic_assist=semantic_assist,
         )
         summary: dict[str, object] = {
             "strategy": outcome.strategy,
@@ -1155,6 +1547,8 @@ class SearchRouter:
             "decisive": decisive,
             "next_action": next_action,
         }
+        if resolved_intent.result_profile == "locator":
+            summary["assist"] = semantic_assist
         if suggested_path_prefix is not None:
             summary["suggested_path_prefix"] = suggested_path_prefix
 
@@ -1164,6 +1558,7 @@ class SearchRouter:
                 "effective_lexical_query": effective_query,
                 "semantic_query": resolved_intent.semantic_query,
             },
+            "semantic_assist": semantic_assist,
             "timings": {
                 "total_ms": total_ms,
                 "backend_ms": {result.name: result.timing_ms for result in enriched_results},
@@ -1201,6 +1596,9 @@ class SearchRouter:
                 "max_files": resolved_intent.max_files,
                 "max_snippets": resolved_intent.max_snippets,
                 "time_budget_ms": resolved_intent.time_budget_ms,
+                "ranking_mode": resolved_intent.ranking_mode,
+                "result_profile": resolved_intent.result_profile,
+                "semantic_assist_mode": resolved_intent.semantic_assist_mode,
             },
             "query_kind": hints.query_kind,
             "declaration_terms": list(hints.declaration_terms),
@@ -1218,6 +1616,7 @@ class SearchRouter:
                 "reason": outcome.reason,
                 "next_action": next_action,
                 "decisive": decisive,
+                "semantic_assist": semantic_assist,
                 "queries": {
                     "lexical_query": query,
                     "effective_lexical_query": effective_query,

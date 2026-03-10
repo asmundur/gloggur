@@ -70,8 +70,11 @@ gloggur find "how to decode auth token"
 # slim structured output for agents
 gloggur find "pkg.module.Handler.handle" --json
 
-# combine a ripgrep-style lexical query with semantic intent
-gloggur find "rg token src/" --about "cache warmup startup state" --json
+# natural grep-like narrowing with a trailing path
+gloggur find make_response src/flask/app.py
+
+# combine a ripgrep-style lexical query with bounded semantic disambiguation
+gloggur find rg -S -g '*.py' AuthToken src/ --about "cache warmup startup state" --json
 
 # full-fidelity JSON
 gloggur search "how to decode auth token" --json
@@ -133,8 +136,13 @@ Commands emit JSON structures that are easy to consume programmatically.
 * `schema_version` / `contract_version`
 * `query`
 * `about` – optional semantic description when `--about` is supplied
-* `decision` – status, strategy, query kind, and next action
+* `decision` – status, strategy, query kind, next action, bounded assist mode, and an additive `suggested_next_command` when narrowing is needed
 * `hits[]` – rank, path, start/end lines, start/end bytes, score, tags, and a trimmed snippet
+
+`find` accepts grep-like token sequences directly. If the final positional token
+is an existing file or directory, it is treated like `--file` / `--path-prefix`
+automatically. If you need a literal query token that collides with a Glöggur
+option name, quote it or place it after `--`.
 
 Use `search --json` when you need the full ContextPack v2 contract. Search results include:
 

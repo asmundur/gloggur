@@ -447,6 +447,16 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
         "Use `gloggur find <pattern> --about <description>` with `--mode auto` or `--mode hybrid`.",
         "Keep `--search-mode semantic` so lexical and semantic retrieval can both contribute.",
     ],
+    "find_trailing_path_missing": [
+        (
+            "Use an existing trailing file/directory path, or pass `--file` / "
+            "`--path-prefix` explicitly."
+        ),
+        (
+            "If you are running outside the repo root, pass a repo-relative path "
+            "or change into the repo first."
+        ),
+    ],
     "find_stream_contract_conflict": [
         "Disable --stream when requesting `--debug-router` output from `gloggur find`.",
     ],
@@ -4448,6 +4458,91 @@ def _normalize_find_about(value: str | None) -> str | None:
     return normalized or None
 
 
+def _looks_find_pathlike(token: str) -> bool:
+    """Return True when a trailing token plausibly refers to a repo path."""
+    candidate = token.strip()
+    if not candidate:
+        return False
+    if is_path_absolute(candidate):
+        return True
+    if candidate.startswith(("./", "../", "~")):
+        return True
+    if "/" in candidate or "\\" in candidate:
+        return True
+    return bool(Path(candidate).suffix)
+
+
+def _resolve_find_scope_path(raw_path: str) -> tuple[str, str] | None:
+    """Resolve an inferred trailing find path into file/path-prefix scope."""
+    candidate = raw_path.strip()
+    if not candidate:
+        return None
+
+    repo_root = discover_repo_root()
+    checked_paths: list[Path] = []
+    expanded = Path(candidate).expanduser()
+    if is_path_absolute(str(expanded)):
+        checked_paths.append(expanded)
+    else:
+        cwd_candidate = (Path.cwd() / expanded).resolve()
+        checked_paths.append(cwd_candidate)
+        repo_candidate = (repo_root / expanded).resolve()
+        if repo_candidate not in checked_paths:
+            checked_paths.append(repo_candidate)
+
+    for path in checked_paths:
+        if not path.exists():
+            continue
+        normalized = str(path)
+        try:
+            normalized = path.resolve().relative_to(repo_root.resolve()).as_posix()
+        except ValueError:
+            normalized = str(path.resolve())
+        if path.is_file():
+            return "file", normalized
+        if path.is_dir():
+            return "path_prefix", normalized
+    return None
+
+
+def _resolve_find_query_parts(
+    *,
+    query_parts: Sequence[str],
+    file_path: str | None,
+    path_prefix: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Normalize variadic find tokens into query text plus optional implicit scope."""
+    parts = [str(part).strip() for part in query_parts if str(part).strip()]
+    if not parts:
+        raise click.UsageError("Missing argument 'QUERY'.")
+
+    resolved_file_path = file_path
+    resolved_path_prefix = path_prefix
+    if resolved_file_path is None and resolved_path_prefix is None and len(parts) > 1:
+        trailing = parts[-1]
+        scope = _resolve_find_scope_path(trailing)
+        if scope is not None:
+            parts = parts[:-1]
+            scope_kind, scope_value = scope
+            if scope_kind == "file":
+                resolved_file_path = scope_value
+            else:
+                resolved_path_prefix = scope_value
+        elif _looks_find_pathlike(trailing):
+            raise CLIContractError(
+                (
+                    f"Trailing argument {trailing!r} looks like a file or directory path, "
+                    "but it does not exist in the current workspace."
+                ),
+                error_code="find_trailing_path_missing",
+            )
+
+    query = " ".join(parts).strip()
+    if not query:
+        raise click.UsageError("Missing argument 'QUERY'.")
+    return query, resolved_file_path, resolved_path_prefix
+
+
 def _validate_find_about_options(
     *,
     semantic_query: str | None,
@@ -4983,6 +5078,8 @@ def _execute_search_command(
     top_k: int,
     context_radius: int,
     ranking_mode: str,
+    result_profile: str,
+    semantic_assist_mode: str,
     confidence_threshold: float,
     max_requery_attempts: int,
     disable_bounded_requery: bool,
@@ -5099,6 +5196,9 @@ def _execute_search_command(
     intent = SearchIntent(
         search_mode=normalized_search_mode,
         semantic_query=normalized_semantic_query,
+        ranking_mode=ranking_mode,
+        result_profile=result_profile,
+        semantic_assist_mode=semantic_assist_mode,
         language=language,
         path_prefix=routing_path_prefix,
         max_files=max_files,
@@ -5263,6 +5363,40 @@ def _build_find_hit_payload(hit: object, *, rank: int) -> dict[str, object]:
     return payload
 
 
+def _build_find_suggested_next_command(
+    *,
+    query: str,
+    semantic_query: str | None,
+    decision: dict[str, object],
+    hits: list[dict[str, object]],
+) -> str | None:
+    """Build one reusable narrowing command for ambiguous find outcomes."""
+    if decision.get("next_action") == "open_hit_1":
+        return None
+
+    target: str | None = None
+    scope_flag: str | None = None
+    suggested_path_prefix = decision.get("suggested_path_prefix")
+    hit_paths = {
+        str(item.get("path"))
+        for item in hits
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    if isinstance(suggested_path_prefix, str) and suggested_path_prefix:
+        target = suggested_path_prefix
+        scope_flag = "--file" if suggested_path_prefix in hit_paths else "--path-prefix"
+    elif hits and isinstance(hits[0], dict) and isinstance(hits[0].get("path"), str):
+        target = str(hits[0]["path"])
+        scope_flag = "--file"
+    if not target or not scope_flag:
+        return None
+
+    argv = ["gloggur", "find", query, scope_flag, target]
+    if semantic_query is not None:
+        argv.extend(["--about", semantic_query])
+    return " ".join(shlex.quote(part) for part in argv)
+
+
 def _build_find_success_payload(
     outcome: SearchExecutionOutcome,
     *,
@@ -5284,10 +5418,19 @@ def _build_find_success_payload(
         "reason": summary.get("reason"),
         "query_kind": summary.get("query_kind"),
         "next_action": summary.get("next_action"),
+        "assist": summary.get("assist", "none"),
     }
     suggested_path_prefix = summary.get("suggested_path_prefix")
     if isinstance(suggested_path_prefix, str) and suggested_path_prefix:
         decision["suggested_path_prefix"] = suggested_path_prefix
+    suggested_next_command = _build_find_suggested_next_command(
+        query=outcome.pack.query,
+        semantic_query=outcome.semantic_query,
+        decision=decision,
+        hits=hits,
+    )
+    if suggested_next_command is not None:
+        decision["suggested_next_command"] = suggested_next_command
 
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -5375,6 +5518,9 @@ def _emit_find_success(
                 f"{_format_find_text_snippet(str(item.get('snippet', '')))}"
             )
             lines.append(line)
+    suggested_next_command = decision.get("suggested_next_command")
+    if isinstance(suggested_next_command, str) and suggested_next_command:
+        lines.append(f"suggested_next_command: {suggested_next_command}")
     click.echo("\n".join(lines))
 
 
@@ -5548,6 +5694,8 @@ def search(
         top_k=top_k,
         context_radius=context_radius,
         ranking_mode=ranking_mode,
+        result_profile="default",
+        semantic_assist_mode="none",
         confidence_threshold=confidence_threshold,
         max_requery_attempts=max_requery_attempts,
         disable_bounded_requery=disable_bounded_requery,
@@ -5591,13 +5739,16 @@ def search(
     _emit(payload, as_json)
 
 
-@cli.command("find")
-@click.argument("query", type=str)
+@cli.command("find", context_settings={"ignore_unknown_options": True})
+@click.argument("query_parts", nargs=-1, type=click.UNPROCESSED)
 @click.option(
     "--about",
     type=str,
     default=None,
-    help="Semantic description used to influence fused ranking alongside the lexical query.",
+    help=(
+        "Semantic description used to rerank lexical find hits, with a bounded code rescue "
+        "when lexical lookup is empty or auxiliary-only."
+    ),
 )
 @click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--json", "as_json", is_flag=True, default=False)
@@ -5643,7 +5794,7 @@ def search(
 @click.option(
     "--ranking-mode",
     type=click.Choice(["balanced", "source-first"], case_sensitive=False),
-    default="balanced",
+    default="source-first",
     show_default=True,
     help="Ranking profile for source-vs-test preference in search results.",
 )
@@ -5716,7 +5867,7 @@ def search(
 )
 @_with_io_failure_handling
 def find(
-    query: str,
+    query_parts: tuple[str, ...],
     about: str | None,
     config_path: str | None,
     as_json: bool,
@@ -5745,6 +5896,11 @@ def find(
     allow_tool_version_drift: bool,
 ) -> None:
     """Find agent-friendly code context with minimal output overhead."""
+    query, resolved_file_path, resolved_path_prefix = _resolve_find_query_parts(
+        query_parts=query_parts,
+        file_path=file_path,
+        path_prefix=path_prefix,
+    )
     normalized_about = _normalize_find_about(about)
     _validate_find_about_options(
         semantic_query=normalized_about,
@@ -5757,17 +5913,19 @@ def find(
         config_path=config_path,
         mode=mode,
         language=language,
-        path_prefix=path_prefix,
+        path_prefix=resolved_path_prefix,
         max_files=max_files,
         max_snippets=max_snippets,
         time_budget_ms=time_budget_ms,
         debug_router=debug_router and as_json and not stream,
         kind=kind,
-        file_path=file_path,
+        file_path=resolved_file_path,
         search_mode=search_mode,
         top_k=top_k,
         context_radius=context_radius,
         ranking_mode=ranking_mode,
+        result_profile="locator",
+        semantic_assist_mode="bounded_about" if normalized_about is not None else "none",
         confidence_threshold=confidence_threshold,
         max_requery_attempts=max_requery_attempts,
         disable_bounded_requery=disable_bounded_requery,

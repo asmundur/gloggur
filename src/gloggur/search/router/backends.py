@@ -687,9 +687,16 @@ def run_semantic_backend(
         if isinstance(intent.semantic_query, str) and intent.semantic_query.strip()
         else query
     )
+    ranking_mode = "balanced"
+    if intent.result_profile == "locator":
+        ranking_mode = (
+            intent.ranking_mode.strip().lower()
+            if isinstance(intent.ranking_mode, str) and intent.ranking_mode.strip()
+            else "balanced"
+        )
 
     filters: dict[str, str] = {
-        "ranking_mode": "balanced",
+        "ranking_mode": ranking_mode,
         "mode": intent.search_mode or "semantic",
     }
     if intent.path_prefix:
