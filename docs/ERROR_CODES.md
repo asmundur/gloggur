@@ -65,12 +65,12 @@ Fields:
   - Command(s): `support run`.
   - Meaning: the wrapped command was empty, recursive (`support ...`), or not a Glöggur subcommand.
   - Retryability: retry after passing a normal Glöggur command after `--`.
-  - Operator action: run `gloggur support run -- <gloggur-subcommand...>`, for example `gloggur support run -- status --json`.
+  - Operator action: if you meant field diagnostics, use `gloggur support collect`; otherwise run `gloggur support run -- <gloggur-subcommand...>`, for example `gloggur support run -- status --json`.
 - `support_session_missing`
   - Command(s): `support collect`.
   - Meaning: the requested support session id does not exist on disk.
   - Retryability: retry after using an existing session id or omitting `--session`.
-  - Operator action: use a session id created by `gloggur support run`/`gloggur support collect`, or rerun `gloggur support collect` without `--session` to create a fresh snapshot.
+  - Operator action: use a session id created by `gloggur support collect` (or advanced `support run` usage), or rerun `gloggur support collect` without `--session` to create a fresh snapshot.
 - `support_session_invalid`
   - Command(s): `support collect`.
   - Meaning: the provided support session id or session directory is malformed, incomplete, or outside the support root.

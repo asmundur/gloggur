@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tarfile
+import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -32,6 +36,11 @@ def _test_env(cache_dir: Path) -> dict[str, str]:
         "GLOGGUR_EMBEDDING_PROVIDER": "test",
         "PYTHONPATH": pythonpath,
     }
+
+
+def _init_betatester_support(runner: CliRunner, repo: Path, env: dict[str, str]) -> None:
+    result = runner.invoke(cli, ["init", str(repo), "--betatester-support", "--json"], env=env)
+    assert result.exit_code == 0, result.output
 
 
 def test_support_run_search_json_creates_session_and_preserves_exit_code(
@@ -255,6 +264,171 @@ def test_support_collect_missing_session_fails_closed(
         assert result.exit_code != 0
         payload = _parse_json_output(result.output)
         error = payload["error"]
-        assert isinstance(error, dict)
-        assert error["code"] == "support_session_missing"
-        assert payload["failure_codes"] == ["support_session_missing"]
+    assert isinstance(error, dict)
+    assert error["code"] == "support_session_missing"
+    assert payload["failure_codes"] == ["support_session_missing"]
+
+
+def test_support_collect_degrades_gracefully_without_betatester_support(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        (repo / ".git").mkdir(exist_ok=True)
+        env = _test_env(tmp_path / "cache")
+        monkeypatch.chdir(repo)
+
+        result = runner.invoke(cli, ["support", "collect", "--json"], env=env)
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert payload["support_mode_enabled"] is False
+        assert "betatester_support_not_enabled" in payload["capture_warnings"]
+
+
+def test_support_collect_bundles_recent_runtime_traces_after_init(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        (repo / ".git").mkdir(exist_ok=True)
+        env = _test_env(tmp_path / "cache")
+        monkeypatch.chdir(repo)
+        _init_betatester_support(runner, repo, env)
+
+        index_result = runner.invoke(cli, ["index", ".", "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+        status_result = runner.invoke(cli, ["status", "--json"], env=env)
+        assert status_result.exit_code == 0, status_result.output
+
+        collect_result = runner.invoke(cli, ["support", "collect", "--json"], env=env)
+
+        assert collect_result.exit_code == 0, collect_result.output
+        payload = _parse_json_output(collect_result.output)
+        assert payload["support_mode_enabled"] is True
+        assert payload["active_commands"] == []
+        bundle_path = Path(str(payload["bundle_path"]))
+        with tarfile.open(bundle_path, "r:gz") as archive:
+            names = set(archive.getnames())
+            session_id = str(payload["session_id"])
+            runtime_entries = [
+                name
+                for name in names
+                if name.startswith(f"support/{session_id}/runtime/recent/")
+                and name.endswith("/meta.json")
+            ]
+            assert runtime_entries
+            meta_member = archive.extractfile(sorted(runtime_entries)[-1])
+            assert meta_member is not None
+            meta_payload = json.loads(meta_member.read().decode("utf8"))
+        assert meta_payload["command_name"] in {"index", "status"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="live stack-dump signaling requires POSIX")
+def test_support_collect_captures_active_index_trace_and_stack_dump(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        (repo / ".git").mkdir(exist_ok=True)
+        env = _test_env(tmp_path / "cache")
+        monkeypatch.chdir(repo)
+        _init_betatester_support(runner, repo, env)
+
+        script = textwrap.dedent(
+            """
+            import json
+            import os
+            import time
+            from pathlib import Path
+
+            from gloggur.support_runtime import CommandTraceSession, load_support_runtime_config
+
+            repo = Path(os.environ["TEST_REPO"]).resolve()
+            os.chdir(repo)
+            config = load_support_runtime_config(repo)
+            session = CommandTraceSession(
+                repo_root=repo,
+                command_name="index",
+                argv=["index", ".", "--json"],
+                config=config,
+            )
+            with session:
+                session.update_stage("extract_symbols", build_id="build-live")
+                session.update_build_state(
+                    {
+                        "state": "building",
+                        "build_id": "build-live",
+                        "pid": os.getpid(),
+                        "stage": "extract_symbols",
+                    }
+                )
+                print("index still running")
+                while True:
+                    time.sleep(0.5)
+            """
+        )
+        proc_env = dict(env)
+        proc_env["TEST_REPO"] = str(repo)
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            cwd=str(repo),
+            env=proc_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            active_root = repo / ".gloggur" / "support" / "runtime" / "active"
+            deadline = time.time() + 10
+            active_dirs: list[Path] = []
+            while time.time() < deadline:
+                active_dirs = list(active_root.glob("*"))
+                if active_dirs:
+                    break
+                time.sleep(0.1)
+            assert active_dirs, "timed out waiting for active runtime trace"
+
+            collect_result = runner.invoke(cli, ["support", "collect", "--json"], env=env)
+
+            assert collect_result.exit_code == 0, collect_result.output
+            payload = _parse_json_output(collect_result.output)
+            assert payload["support_mode_enabled"] is True
+            assert payload["includes_cache_artifacts"] is True
+            assert payload["bundle_policy_applied"] == "smart"
+            assert payload["active_commands"]
+            bundle_path = Path(str(payload["bundle_path"]))
+            with tarfile.open(bundle_path, "r:gz") as archive:
+                names = set(archive.getnames())
+                session_id = str(payload["session_id"])
+                active_meta = (
+                    f"support/{session_id}/runtime/active/{active_dirs[0].name}/meta.json"
+                )
+                active_stack = (
+                    f"support/{session_id}/runtime/active/{active_dirs[0].name}/stackdump.log"
+                )
+                assert active_meta in names
+                assert active_stack in names
+                meta_member = archive.extractfile(active_meta)
+                assert meta_member is not None
+                meta_payload = json.loads(meta_member.read().decode("utf8"))
+                stack_member = archive.extractfile(active_stack)
+                assert stack_member is not None
+                stack_text = stack_member.read().decode("utf8")
+            assert meta_payload["command_name"] == "index"
+            assert meta_payload["stage"] == "extract_symbols"
+            assert meta_payload["build_state"]["build_id"] == "build-live"
+            assert "Thread" in stack_text or "Current thread" in stack_text
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)

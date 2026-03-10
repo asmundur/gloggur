@@ -26,8 +26,16 @@ from gloggur.archive_utils import (
 from gloggur.bootstrap_launcher import resolve_bootstrap_status
 from gloggur.byte_spans import discover_repo_root
 from gloggur.config import GloggurConfig
+from gloggur.indexer.concurrency import read_cache_lock_metadata
 from gloggur.io_failures import StorageIOError, wrap_io_error
 from gloggur.search.router.config import load_search_router_config
+from gloggur.support_runtime import (
+    capture_enabled as runtime_capture_enabled,
+    load_runtime_records,
+    request_active_stack_dumps,
+    should_auto_include_cache,
+    support_runtime_paths,
+)
 
 SUPPORT_MANIFEST_SCHEMA_VERSION = "1"
 SUPPORT_BUNDLE_TYPE = "support"
@@ -70,6 +78,9 @@ class SupportRoots:
     support_root: Path
     sessions_root: Path
     bundles_root: Path
+    runtime_root: Path
+    active_root: Path
+    recent_root: Path
 
 
 @dataclass(frozen=True)
@@ -232,6 +243,7 @@ def collect_support_bundle(
 ) -> dict[str, object]:
     """Collect diagnostics for a session and package a deterministic support bundle."""
     roots = _support_roots(discover_repo_root())
+    support_mode_enabled = runtime_capture_enabled(roots.repo_root)
     if session_id is None:
         session_dir = _create_session_dir(roots)
         session_payload = {
@@ -268,6 +280,39 @@ def collect_support_bundle(
         config_path=config_path,
         callbacks=callbacks,
     )
+    _capture_cache_lock_diagnostics(
+        session_dir=session_dir,
+        repo_root=roots.repo_root,
+        callbacks=callbacks,
+        config_path=config_path,
+    )
+
+    active_records, recent_records = load_runtime_records(roots.repo_root)
+    capture_warnings: list[str] = []
+    if support_mode_enabled:
+        capture_warnings.extend(request_active_stack_dumps(roots.repo_root))
+        active_records, recent_records = load_runtime_records(roots.repo_root)
+    else:
+        capture_warnings.append("betatester_support_not_enabled")
+    capture_warnings.extend(
+        _snapshot_runtime_trace_dirs(
+            roots=roots,
+            session_dir=session_dir,
+        )
+    )
+
+    status_payload = _extract_status_payload(session_dir)
+    auto_include_cache = False
+    if not include_cache:
+        auto_include_cache = should_auto_include_cache(
+            active_records=active_records,
+            recent_records=recent_records,
+            status_payload=status_payload,
+        )
+    effective_include_cache = include_cache or auto_include_cache
+    bundle_policy_applied = "explicit"
+    if not include_cache:
+        bundle_policy_applied = "smart" if effective_include_cache else "sanitized"
 
     bundle_path = _resolve_bundle_destination(
         roots=roots,
@@ -282,16 +327,20 @@ def collect_support_bundle(
         config = None
     cache_dir = config.cache_dir if config is not None else str(roots.repo_root / ".gloggur-cache")
     runtime_artifacts = _inventory_runtime_artifacts(roots.repo_root, cache_dir)
-    included_artifacts = runtime_artifacts if include_cache else []
-    excluded_artifacts = [] if include_cache else runtime_artifacts
+    included_artifacts = runtime_artifacts if effective_include_cache else []
+    excluded_artifacts = [] if effective_include_cache else runtime_artifacts
     _write_bundle(
         repo_root=roots.repo_root,
         session_dir=session_dir,
         bundle_path=bundle_path,
-        include_cache=include_cache,
+        include_cache=effective_include_cache,
         allow_sensitive_data=allow_sensitive_data,
         included_artifacts=included_artifacts,
         excluded_artifacts=excluded_artifacts,
+        support_mode_enabled=support_mode_enabled,
+        bundle_policy_applied=bundle_policy_applied,
+        active_commands=_summarize_command_records(active_records),
+        capture_warnings=capture_warnings,
     )
     manifest_payload = _read_bundle_manifest(bundle_path)
     public_included_artifacts = _public_artifact_inventory(included_artifacts)
@@ -303,12 +352,16 @@ def collect_support_bundle(
             "collected_at": _utc_now_iso(),
             "bundle_path": str(bundle_path),
             "redaction_mode": "sanitized",
-            "include_cache": include_cache,
-            "bundle_sensitivity": "sensitive" if include_cache else "sanitized",
-            "includes_cache_artifacts": include_cache,
+            "include_cache": effective_include_cache,
+            "bundle_sensitivity": "sensitive" if effective_include_cache else "sanitized",
+            "includes_cache_artifacts": effective_include_cache,
             "sensitive_data_acknowledged": allow_sensitive_data,
             "excluded_artifacts": public_excluded_artifacts,
             "included_artifacts": public_included_artifacts,
+            "support_mode_enabled": support_mode_enabled,
+            "bundle_policy_applied": bundle_policy_applied,
+            "active_commands": _summarize_command_records(active_records),
+            "capture_warnings": capture_warnings,
         }
     )
     _write_json(session_dir / "session.json", session_payload)
@@ -319,25 +372,33 @@ def collect_support_bundle(
         "session_dir": str(session_dir),
         "bundle_path": str(bundle_path),
         "bundle_uri": bundle_path.resolve().as_uri(),
-        "include_cache": include_cache,
-        "bundle_sensitivity": "sensitive" if include_cache else "sanitized",
-        "includes_cache_artifacts": include_cache,
+        "include_cache": effective_include_cache,
+        "bundle_sensitivity": "sensitive" if effective_include_cache else "sanitized",
+        "includes_cache_artifacts": effective_include_cache,
         "sensitive_data_acknowledged": allow_sensitive_data,
         "manifest_sha256": manifest_payload["manifest_sha256"],
         "archive_sha256": manifest_payload["archive_sha256"],
         "archive_bytes": manifest_payload["archive_bytes"],
         "excluded_artifacts": public_excluded_artifacts,
         "included_artifacts": public_included_artifacts,
+        "support_mode_enabled": support_mode_enabled,
+        "bundle_policy_applied": bundle_policy_applied,
+        "active_commands": _summarize_command_records(active_records),
+        "capture_warnings": capture_warnings,
     }
 
 
 def _support_roots(repo_root: Path) -> SupportRoots:
     support_root = repo_root / ".gloggur" / "support"
+    runtime_paths = support_runtime_paths(repo_root)
     return SupportRoots(
         repo_root=repo_root,
         support_root=support_root,
         sessions_root=support_root / "sessions",
         bundles_root=support_root / "bundles",
+        runtime_root=runtime_paths.runtime_root,
+        active_root=runtime_paths.active_root,
+        recent_root=runtime_paths.recent_root,
     )
 
 
@@ -544,6 +605,84 @@ def _snapshot_optional_runtime_files(
             )
         else:
             _snapshot_optional_file(source_path=source_path, destination_path=destination_path)
+
+
+def _capture_cache_lock_diagnostics(
+    *,
+    session_dir: Path,
+    repo_root: Path,
+    callbacks: SupportCallbacks,
+    config_path: str | None,
+) -> None:
+    config: GloggurConfig | None = None
+    try:
+        config, _ = callbacks.load_config(config_path)
+    except (StorageIOError, OSError, ValueError, TypeError):
+        config = None
+    if config is None:
+        _write_json(
+            session_dir / "diagnostics" / "cache_lock.json",
+            {"captured": False, "reason": "config_unavailable"},
+        )
+        return
+    lock_metadata = read_cache_lock_metadata(config.cache_dir)
+    payload: dict[str, object] = {
+        "captured": True,
+        "lock_metadata": _sanitize_object(lock_metadata, repo_root),
+    }
+    _write_json(session_dir / "diagnostics" / "cache_lock.json", payload)
+
+
+def _snapshot_runtime_trace_dirs(*, roots: SupportRoots, session_dir: Path) -> list[str]:
+    warnings: list[str] = []
+    for source_root, label in (
+        (roots.active_root, "active"),
+        (roots.recent_root, "recent"),
+    ):
+        destination_root = session_dir / "runtime" / label
+        destination_root.parent.mkdir(parents=True, exist_ok=True)
+        if not source_root.exists():
+            continue
+        for source_dir in sorted(path for path in source_root.iterdir() if path.is_dir()):
+            destination_dir = destination_root / source_dir.name
+            try:
+                if destination_dir.exists():
+                    shutil.rmtree(destination_dir)
+                shutil.copytree(source_dir, destination_dir)
+            except OSError:
+                warnings.append(f"runtime_trace_copy_failed:{label}:{source_dir.name}")
+    return warnings
+
+
+def _extract_status_payload(session_dir: Path) -> dict[str, object] | None:
+    status_path = session_dir / "diagnostics" / "status.json"
+    if not status_path.exists():
+        return None
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    inner = payload.get("payload")
+    return inner if isinstance(inner, dict) else None
+
+
+def _summarize_command_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    summary: list[dict[str, object]] = []
+    for record in records:
+        summary.append(
+            {
+                "command_id": record.get("command_id"),
+                "command_name": record.get("command_name"),
+                "pid": record.get("pid"),
+                "status": record.get("status"),
+                "stage": record.get("stage"),
+                "updated_at": record.get("updated_at"),
+                "exit_code": record.get("exit_code"),
+            }
+        )
+    return summary
 
 
 def _snapshot_optional_text_file(
@@ -768,6 +907,10 @@ def _write_bundle(
     allow_sensitive_data: bool,
     included_artifacts: list[dict[str, object]],
     excluded_artifacts: list[dict[str, object]],
+    support_mode_enabled: bool,
+    bundle_policy_applied: str,
+    active_commands: list[dict[str, object]],
+    capture_warnings: list[str],
 ) -> None:
     support_prefix = f"support/{session_dir.name}"
     try:
@@ -816,6 +959,10 @@ def _write_bundle(
             included_artifacts=included_artifacts,
             excluded_artifacts=excluded_artifacts,
             repo_root=repo_root,
+            support_mode_enabled=support_mode_enabled,
+            bundle_policy_applied=bundle_policy_applied,
+            active_commands=active_commands,
+            capture_warnings=capture_warnings,
         )
         manifest_bytes = json.dumps(manifest, sort_keys=True, indent=2).encode("utf8") + b"\n"
         create_deterministic_tar_gz(
@@ -840,6 +987,10 @@ def _build_bundle_manifest(
     included_artifacts: list[dict[str, object]],
     excluded_artifacts: list[dict[str, object]],
     repo_root: Path,
+    support_mode_enabled: bool,
+    bundle_policy_applied: str,
+    active_commands: list[dict[str, object]],
+    capture_warnings: list[str],
 ) -> dict[str, object]:
     capture_meta = _load_capture_metadata(session_dir)
     file_entries: list[dict[str, object]] = []
@@ -876,11 +1027,15 @@ def _build_bundle_manifest(
         "session": _sanitize_object(session_payload, repo_root),
         "redaction_mode": "sanitized",
         "include_cache": include_cache,
+        "support_mode_enabled": support_mode_enabled,
+        "bundle_policy_applied": bundle_policy_applied,
         "bundle_sensitivity": "sensitive" if include_cache else "sanitized",
         "includes_cache_artifacts": include_cache,
         "sensitive_data_acknowledged": allow_sensitive_data,
         "included_artifacts": _public_artifact_inventory(included_artifacts),
         "excluded_artifacts": _public_artifact_inventory(excluded_artifacts),
+        "active_commands": active_commands,
+        "capture_warnings": capture_warnings,
         "files_total": len(file_entries),
         "bytes_total": sum(int(entry["bytes"]) for entry in file_entries),
         "files": file_entries,

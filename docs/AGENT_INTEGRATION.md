@@ -105,11 +105,17 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```bash
    scripts/gloggur index . --json
    ```
+   Optional one-time repo setup for betatester support bundles:
+   ```bash
+   scripts/gloggur init . --betatester-support --json
+   ```
+   `gloggur init .` is optional and repo-local. It does not enable watch mode.
    Optional one-time setup for background save-triggered indexing:
    ```bash
    scripts/gloggur watch init . --json
    scripts/gloggur watch start --daemon --json
    ```
+   `watch init` remains watch-specific.
 2. **Locate relevant code** with `find` or `search`:
    ```bash
    scripts/gloggur find "<query>"
@@ -158,19 +164,19 @@ For the single-path onboarding flow with provider setup and troubleshooting code
 
 ## Support Bundles
 
-Use the support CLI when a field tester needs a sendable diagnostics bundle after Glöggur fails.
+Use the support CLI when a field tester needs a sendable diagnostics bundle
+after anything odd, including hangs or commands that are still running.
 
-Capture a traced run around the failing command:
+One time per repo, enable richer support tracing:
 
 ```bash
-scripts/gloggur support run -- search "add numbers token" --json
+scripts/gloggur init . --betatester-support --json
 ```
 
-- Everything after `--` must be a normal Glöggur subcommand.
-- Non-zero child exits automatically create a support bundle unless `--no-bundle-on-failure` is set.
-- Add `--note "what went wrong"` when the tester can explain the failure in plain language.
+Normal Glöggur commands still work without repo init. This only enables richer
+support capture for later `support collect` runs.
 
-Create a manual snapshot without rerunning the failing command:
+Create a bundle after the problem happens:
 
 ```bash
 scripts/gloggur support collect --json --note "manual support snapshot"
@@ -183,7 +189,13 @@ Support bundle paths:
 Bundle policy:
 - sanitized by default: secrets and local absolute paths are redacted
 - runtime logs/status/config snapshots are included automatically
-- cache/index databases stay out of the bundle unless `--include-cache` is passed
+- in betatester-support repos, recent command traces and active running-command traces are included automatically
+- when a Glöggur command is still running, `support collect` requests a live Python stack dump when supported
+- cache/index databases are auto-included only when active or recent evidence points at index/cache trouble; otherwise they stay out of the bundle unless `--include-cache` is passed
+
+Fallback behavior:
+- without `--betatester-support`, `support collect` still creates a smaller current-state snapshot
+- `support run` remains available for advanced/internal repros, but it is not the primary field-tester workflow
 
 Subject repo coverage note:
 - For subject repo analysis, test/coverage collection should run in the subject repo's own environment/toolchain (its own venv/runner), not in this Gloggur repo environment.

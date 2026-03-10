@@ -95,6 +95,17 @@ scripts/gloggur inspect . --json
 scripts/gloggur watch stop --json
 ```
 
+Optional repo-local setup for betatester support bundles:
+
+```bash
+scripts/gloggur init . --betatester-support --json
+```
+
+`gloggur init .` writes a minimal repo-local Glöggur config scaffold. Add
+`--betatester-support` when you want later `support collect` runs to include
+recent and active command traces. `gloggur watch init . --json` stays
+watch-specific and only configures watch mode.
+
 `search --json` emits ContextPack v2 fields (`schema_version`, `query`, `summary`, `hits[]`) only when the cache is ready.
 When the cache is not reusable, `search --json` exits non-zero with:
 
@@ -107,42 +118,45 @@ When the cache is not reusable, `search --json` exits non-zero with:
 
 - `scripts/gloggur inspect . --json` focuses on source paths by default; add `--include-tests` and `--include-scripts` when you want a broader repo audit.
 - Parser support is baseline rather than uniform. Run `scripts/gloggur parsers check --json` before depending on symbol fidelity for JavaScript/TypeScript arrow assignments, TypeScript type aliases or enums, named Go types, Rust impl methods, or Java records/enums.
-- After `scripts/gloggur watch init . --json`, later commands may include `security_warning_codes: ["untrusted_repo_config"]` because the repo-local config is auto-discovered and treated as untrusted by default.
+- After `scripts/gloggur init . --json` or `scripts/gloggur watch init . --json`, later commands may include `security_warning_codes: ["untrusted_repo_config"]` because the repo-local config is auto-discovered and treated as untrusted by default.
 - This repo's `scripts/run_quickstart_smoke.py` harness and most deterministic CI checks use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.
 
 ## If Something Goes Wrong
 
-Use the support tool when a field tester needs to send you enough trace data to reproduce a Glöggur failure.
+Use the support tool when a field tester sees anything odd: failures, hangs,
+wrong results, or unusually slow commands.
 
-1. Rerun the failing Glöggur command through the support wrapper.
-
-```bash
-scripts/gloggur support run -- search "add numbers token" --json
-```
-
-Everything after `--` is the normal Glöggur command. Replace `search "add numbers token" --json` with the command that failed for you.
-
-2. If you want to add a short human note, include `--note`.
+1. One time per repo, enable betatester support tracing:
 
 ```bash
-scripts/gloggur support run --note "search failed right after indexing" -- search "add numbers token" --json
+scripts/gloggur init . --betatester-support --json
 ```
 
-3. If the failure already happened and you just want a snapshot of the current Glöggur state, collect a support bundle directly.
+This is optional. Normal `index`, `search`, `status`, and `watch` commands still
+work without repo init.
+
+2. After anything weird, collect a bundle:
 
 ```bash
-scripts/gloggur support collect --json --note "manual snapshot after search failure"
+scripts/gloggur support collect --json --note "index hung for several minutes"
 ```
 
-4. Send the generated `.tar.gz` file from `.gloggur/support/bundles/`.
+3. Send the generated `.tar.gz` file from `.gloggur/support/bundles/`.
 
-What the tool does for you:
-- creates a support session under `.gloggur/support/sessions/`
-- copies Glöggur logs, watch state, bootstrap state, and config summaries
+What `support collect` does for you:
+- always creates a support session under `.gloggur/support/sessions/`
+- always copies Glöggur logs, watch state, bootstrap state, current diagnostics, and config summaries
+- in betatester-support repos, also bundles recent completed command traces and traces from Glöggur commands that are still running
+- when a Glöggur command is still running, requests a live Python stack dump from that process when the platform supports it
 - redacts obvious secrets and local absolute paths by default
-- creates a compressed support bundle you can attach to a bug report
+- auto-includes raw cache/index artifacts when active or recent evidence points at index/cache trouble; otherwise keeps the bundle sanitized
 
-Use `--include-cache` only when the smaller sanitized bundle is not enough and you explicitly want to include the runtime cache and index databases.
+If betatester support was not enabled first, `support collect` still creates a
+smaller snapshot bundle from current logs/state, but it cannot recover past
+live-command traces that were never recorded.
+
+`support run` still exists for advanced/internal repro workflows, but field
+testers should use `support collect`.
 
 ## Troubleshooting by Failure Code
 

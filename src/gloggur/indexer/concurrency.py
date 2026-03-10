@@ -198,6 +198,12 @@ def _lock_timeout_error(lock_path: str, waited_ms: int, attempts: int) -> Storag
     )
 
 
+def read_cache_lock_metadata(cache_dir: str) -> dict[str, object] | None:
+    """Return current cache lock metadata when present and parseable."""
+    lock_path = os.path.join(cache_dir, LOCK_FILE_NAME)
+    return _read_lock_metadata(lock_path)
+
+
 def _write_lock_metadata(handle: IO[bytes]) -> None:
     """Write current lock-holder metadata into the lock file."""
     payload = {

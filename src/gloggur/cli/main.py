@@ -107,6 +107,11 @@ from gloggur.support import (
 from gloggur.support import (
     run_support_command as run_support_command_impl,
 )
+from gloggur.support_runtime import (
+    current_trace_session,
+    maybe_start_command_trace,
+    write_support_runtime_config,
+)
 from gloggur.symbol_index.indexer import SymbolIndexer
 from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 from gloggur.watch.service import (
@@ -127,6 +132,36 @@ _ACTIVE_JSON_CONFIG: GloggurConfig | None = None
 _ACTIVE_JSON_EMBEDDING: EmbeddingProvider | None = None
 WATCH_DAEMON_READY_TIMEOUT_SECONDS = 5.0
 WATCH_DAEMON_READY_POLL_INTERVAL_SECONDS = 0.05
+
+
+@cli.command("init")
+@click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
+@click.option("--betatester-support", is_flag=True, default=False)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def init(path: str, betatester_support: bool, as_json: bool) -> None:
+    _with_io_failure_handling(_init_impl)(
+        path=path,
+        betatester_support=betatester_support,
+        as_json=as_json,
+    )
+
+
+def _init_impl(path: str, betatester_support: bool, as_json: bool) -> None:
+    """Write minimal repo-local Glöggur initialization state."""
+    repo_root = _resolve_init_repo_root(path)
+    config_file = write_support_runtime_config(repo_root, enabled=betatester_support)
+    response = {
+        "initialized": True,
+        "repo_root": str(repo_root),
+        "config_file": str(config_file),
+        "betatester_support": betatester_support,
+        "next_steps": (
+            ["gloggur support collect"]
+            if betatester_support
+            else ["gloggur index . --json", "gloggur watch init . --json"]
+        ),
+    }
+    _emit(response, as_json)
 
 
 @cli.group()
@@ -266,6 +301,7 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
     "support_command_invalid": [
         "Pass a Gloggur subcommand after `--`, for example `gloggur support run -- status --json`.",
         "Do not pass executable paths or recursive `support` child commands.",
+        "For betatester bundle capture, prefer `gloggur support collect` over `support run`.",
     ],
     "support_session_missing": [
         "List or inspect the existing session ids under `.gloggur/support/sessions`.",
@@ -774,6 +810,14 @@ def _resolve_as_json(kwargs: dict[str, object]) -> bool:
     return bool(context.params.get("as_json"))
 
 
+class _NullTraceContext:
+    def __enter__(self) -> _NullTraceContext:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+
 def _with_io_failure_handling(
     callback: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -784,56 +828,101 @@ def _with_io_failure_handling(
         """Normalize CLI/runtime failures into deterministic non-zero command exits."""
         global _ACTIVE_JSON_CONFIG, _ACTIVE_JSON_EMBEDDING
         as_json = _resolve_as_json(kwargs)
+        context = click.get_current_context(silent=True)
+        command_path = context.command_path if context is not None else "gloggur"
+        command_name = command_path.strip()
+        if " " in command_name:
+            leader, remainder = command_name.split(" ", 1)
+            if leader in {"gloggur", "cli"}:
+                command_name = remainder
+        trace_session = maybe_start_command_trace(command_name, argv=list(sys.argv[1:]))
         previous_config = _ACTIVE_JSON_CONFIG
         previous_embedding = _ACTIVE_JSON_EMBEDDING
         _ACTIVE_JSON_CONFIG = None
         _ACTIVE_JSON_EMBEDDING = None
-        try:
-            return callback(*args, **kwargs)
-        except CLIContractError as exc:
-            if as_json:
-                _emit_json_error(exc.to_payload())
-                raise click.exceptions.Exit(exc.exit_code) from exc
-            raise
-        except click.ClickException as exc:
-            if as_json:
+        if trace_session is None:
+            trace_context: Any = _NullTraceContext()
+        else:
+            trace_context = trace_session
+        with trace_context:
+            try:
+                result = callback(*args, **kwargs)
+                if trace_session is not None:
+                    trace_session.set_exit_code(0)
+                return result
+            except CLIContractError as exc:
+                if trace_session is not None:
+                    trace_session.record_failure(
+                        error_code=exc.error_code,
+                        failure_codes=[exc.error_code],
+                        exit_code=exc.exit_code,
+                    )
+                if as_json:
+                    _emit_json_error(exc.to_payload())
+                    raise click.exceptions.Exit(exc.exit_code) from exc
+                raise
+            except click.exceptions.Exit as exc:
+                if trace_session is not None:
+                    exit_code = int(exc.exit_code or 0)
+                    trace_session.set_exit_code(exit_code)
+                raise
+            except click.ClickException as exc:
                 error_code = "cli_usage_error"
                 guidance = CLI_FAILURE_REMEDIATION.get(
                     error_code,
                     [DEFAULT_CLI_FAILURE_REMEDIATION],
                 )
-                _emit_json_error(
-                    {
-                        "error": {
-                            "type": "cli_usage_error",
-                            "code": error_code,
-                            "detail": exc.message,
-                            "probable_cause": (
-                                "Command arguments/options were invalid for this CLI path."
-                            ),
-                            "remediation": guidance,
-                        },
-                        "failure_codes": [error_code],
-                        "failure_guidance": {error_code: guidance},
-                    }
-                )
-                raise click.exceptions.Exit(exc.exit_code) from exc
-            raise
-        except StorageIOError as exc:
-            if as_json:
-                _emit_json_error(exc.to_payload())
-            else:
-                click.echo(format_io_error_message(exc), err=True)
-            raise click.exceptions.Exit(1) from exc
-        except EmbeddingProviderError as exc:
-            if as_json:
-                _emit_json_error(exc.to_payload())
-            else:
-                click.echo(format_embedding_error_message(exc), err=True)
-            raise click.exceptions.Exit(1) from exc
-        finally:
-            _ACTIVE_JSON_CONFIG = previous_config
-            _ACTIVE_JSON_EMBEDDING = previous_embedding
+                if trace_session is not None:
+                    trace_session.record_failure(
+                        error_code=error_code,
+                        failure_codes=[error_code],
+                        exit_code=exc.exit_code,
+                    )
+                if as_json:
+                    _emit_json_error(
+                        {
+                            "error": {
+                                "type": "cli_usage_error",
+                                "code": error_code,
+                                "detail": exc.message,
+                                "probable_cause": (
+                                    "Command arguments/options were invalid for this CLI path."
+                                ),
+                                "remediation": guidance,
+                            },
+                            "failure_codes": [error_code],
+                            "failure_guidance": {error_code: guidance},
+                        }
+                    )
+                    raise click.exceptions.Exit(exc.exit_code) from exc
+                raise
+            except StorageIOError as exc:
+                if trace_session is not None:
+                    trace_session.record_failure(
+                        error_code=exc.category,
+                        failure_codes=[exc.category],
+                        exit_code=1,
+                    )
+                if as_json:
+                    _emit_json_error(exc.to_payload())
+                else:
+                    click.echo(format_io_error_message(exc), err=True)
+                raise click.exceptions.Exit(1) from exc
+            except EmbeddingProviderError as exc:
+                if trace_session is not None:
+                    trace_session.record_failure(
+                        error_code=exc.error_code,
+                        failure_codes=[exc.error_code],
+                        exit_code=1,
+                    )
+                if as_json:
+                    _emit_json_error(exc.to_payload())
+                else:
+                    click.echo(format_embedding_error_message(exc), err=True)
+                raise click.exceptions.Exit(1) from exc
+            finally:
+                _ACTIVE_JSON_CONFIG = previous_config
+                _ACTIVE_JSON_EMBEDDING = previous_embedding
 
     return _wrapped
 
@@ -1827,7 +1916,7 @@ def _write_cache_build_state(
 ) -> dict[str, object]:
     """Persist cache build-state sidecar updates with stable timestamps."""
     updated_at = datetime.now(timezone.utc).isoformat()
-    return cache.write_build_state(
+    payload = cache.write_build_state(
         {
             "state": state,
             "build_id": build_id,
@@ -1838,6 +1927,10 @@ def _write_cache_build_state(
             "cleanup_pending": cleanup_pending,
         }
     )
+    trace_session = current_trace_session()
+    if trace_session is not None:
+        trace_session.update_build_state(payload)
+    return payload
 
 
 def _warm_embedding_provider(embedding: EmbeddingProvider | None) -> dict[str, object]:
@@ -2075,6 +2168,17 @@ def _resolve_config_file_path(config_path: str | None) -> str:
         if os.path.exists(candidate):
             return candidate
     return ".gloggur.yaml"
+
+
+def _resolve_init_repo_root(path: str) -> Path:
+    """Resolve repo root used for repo-local init state."""
+    candidate = Path(path).resolve()
+    if candidate.is_file():
+        candidate = candidate.parent
+    discovered = discover_repo_root(candidate)
+    if (discovered / ".git").exists() or discovered == candidate:
+        return discovered
+    return candidate
 
 
 def _read_config_payload(path: str) -> dict[str, object]:
@@ -3927,6 +4031,9 @@ def index(
             nonlocal current_stage
             current_stage = stage_name
             assert active_cache is not None
+            trace_session = current_trace_session()
+            if trace_session is not None:
+                trace_session.update_stage(stage_name, build_id=build_id)
             _write_cache_build_state(
                 active_cache,
                 state="building",

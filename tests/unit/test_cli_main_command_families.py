@@ -946,6 +946,41 @@ def test_support_run_wraps_support_contract_errors(monkeypatch: pytest.MonkeyPat
     assert payload["failure_codes"] == ["support_command_invalid"]
 
 
+def test_init_writes_minimal_repo_support_config(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["init", str(repo), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["initialized"] is True
+    assert payload["betatester_support"] is False
+    config_path = repo / ".gloggur" / "config.toml"
+    assert config_path.exists()
+    text = config_path.read_text(encoding="utf8")
+    assert "[support]" in text
+    assert "enabled = false" in text
+
+
+def test_init_with_betatester_support_enables_runtime_capture(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["init", str(repo), "--betatester-support", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["betatester_support"] is True
+    text = (repo / ".gloggur" / "config.toml").read_text(encoding="utf8")
+    assert "enabled = true" in text
+
+
 def test_status_json_rethrows_second_non_transient_retry_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

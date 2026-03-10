@@ -82,6 +82,9 @@ def test_resolve_existing_session_dir_rejects_invalid_session_id(tmp_path: Path)
         support_root=tmp_path / ".gloggur" / "support",
         sessions_root=tmp_path / ".gloggur" / "support" / "sessions",
         bundles_root=tmp_path / ".gloggur" / "support" / "bundles",
+        runtime_root=tmp_path / ".gloggur" / "support" / "runtime",
+        active_root=tmp_path / ".gloggur" / "support" / "runtime" / "active",
+        recent_root=tmp_path / ".gloggur" / "support" / "runtime" / "recent",
     )
 
     with pytest.raises(support_module.SupportContractError) as error:

@@ -197,7 +197,7 @@ gloggur inspect . --json --warn-on-skipped-extensions
 
 - Language support is baseline, not uniform. Current known construct gaps include JavaScript/TypeScript arrow or assigned function forms, TypeScript type aliases and enums, Go named struct/interface declarations, Rust impl/trait method forms, and Java record/enum declarations. Use `gloggur status --json` or `gloggur parsers check --json` when symbol fidelity matters for a workflow.
 - `gloggur inspect . --json` audits source paths by default. Add `--include-tests` and `--include-scripts` when you need a wider repo audit.
-- `gloggur watch init . --json` writes repo-local config. Later commands in that workspace may report `security_warning_codes=["untrusted_repo_config"]` because auto-discovered repo config is treated as untrusted by default.
+- `gloggur init . --betatester-support --json` enables repo-local support tracing. `gloggur watch init . --json` stays watch-specific. Either command writes repo-local config, so later commands in that workspace may report `security_warning_codes=["untrusted_repo_config"]` because auto-discovered repo config is treated as untrusted by default.
 - This repo's quickstart smoke and most deterministic CI verification use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.
 
 ## Current status
