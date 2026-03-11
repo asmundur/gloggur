@@ -112,8 +112,6 @@ class GloggurConfig:
         default_factory=lambda: [
             ".git",
             "node_modules",
-            "venv",
-            ".venv",
             ".gloggur-cache",
             "dist",
             "build",

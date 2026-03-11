@@ -12,7 +12,7 @@ from gloggur.config import GloggurConfig
 from gloggur.indexer.shared import ParsedFileSnapshot
 from gloggur.models import Symbol
 from gloggur.parsers.registry import ParserRegistry
-from gloggur.path_filters import is_indexable_source_path
+from gloggur.path_filters import filter_index_walk_dirs, is_indexable_source_path
 from gloggur.symbol_index.models import IndexedFile, SymbolIndexResult, SymbolOccurrence
 from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 
@@ -275,9 +275,12 @@ class SymbolIndexer:
 
     def _iter_source_files(self, root: Path) -> list[str]:
         files: list[str] = []
-        excludes = set(self.config.excluded_dirs)
         for current_root, dirs, filenames in os.walk(str(root)):
-            dirs[:] = [name for name in dirs if name not in excludes]
+            dirs[:] = filter_index_walk_dirs(
+                current_root,
+                dirs,
+                excluded_dirs=self.config.excluded_dirs,
+            )
             for filename in filenames:
                 full_path = os.path.join(current_root, filename)
                 if self._is_supported_file(full_path):

@@ -219,6 +219,40 @@ def test_cli_index_skips_django_vendor_minified_js_by_default() -> None:
         assert "chunk_span_integrity_error" not in failed_reasons
 
 
+def test_cli_index_skips_structural_virtualenv_roots_without_name_assumptions() -> None:
+    """index --json should skip arbitrary-name POSIX and Windows virtualenv layouts."""
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/app.py": "def app() -> int:\n    return 1\n",
+                "tools/helper.py": "def helper() -> int:\n    return 2\n",
+                "_venv/Lib/site-packages/vendor_win.py": "def vendor_win() -> int:\n    return 3\n",
+                "python-runtime/lib/python3.13/site-packages/vendor.py": (
+                    "def vendor() -> int:\n    return 4\n"
+                ),
+            }
+        )
+        (repo / "_venv" / "Scripts").mkdir(parents=True)
+        (repo / "_venv" / "Scripts" / "python.exe").write_text("", encoding="utf8")
+        (repo / "python-runtime" / "bin").mkdir(parents=True)
+        (repo / "python-runtime" / "bin" / "python").write_text("", encoding="utf8")
+
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert int(payload["files_considered"]) == 2
+        assert int(payload["indexed_files"]) == 2
+        assert int(payload["failed"]) == 0
+
+
 def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
     """search --json should emit ContextPack v2 and exclude removed v1 payload keys."""
     runner = CliRunner()

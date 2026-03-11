@@ -27,3 +27,4 @@ verification_report.json
 coverage.xml
 .gloggur/logs/
 .gloggur
+fieldtest_bugreports/

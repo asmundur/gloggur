@@ -82,6 +82,47 @@ def test_symbol_index_skips_minified_js_by_default_and_can_include(tmp_path) -> 
     assert include_result.files_considered == 2
 
 
+def test_symbol_index_skips_structural_virtualenv_roots_and_keeps_sibling_project_code(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("def app() -> int:\n    return 1\n", encoding="utf8")
+    (repo / "tools").mkdir()
+    (repo / "tools" / "helper.py").write_text(
+        "def helper() -> int:\n    return 2\n",
+        encoding="utf8",
+    )
+    (repo / "_venv" / "Scripts").mkdir(parents=True)
+    (repo / "_venv" / "Scripts" / "python.exe").write_text("", encoding="utf8")
+    (repo / "_venv" / "Lib" / "site-packages").mkdir(parents=True)
+    (repo / "_venv" / "Lib" / "site-packages" / "vendor_win.py").write_text(
+        "def vendor_win() -> int:\n    return 3\n",
+        encoding="utf8",
+    )
+    (repo / "python-runtime" / "bin").mkdir(parents=True)
+    (repo / "python-runtime" / "bin" / "python").write_text("", encoding="utf8")
+    (repo / "python-runtime" / "lib" / "python3.13" / "site-packages").mkdir(parents=True)
+    (repo / "python-runtime" / "lib" / "python3.13" / "site-packages" / "vendor.py").write_text(
+        "def vendor() -> int:\n    return 4\n",
+        encoding="utf8",
+    )
+
+    indexer = SymbolIndexer(
+        repo_root=repo,
+        config=_config(tmp_path),
+        parser_registry=ParserRegistry(),
+    )
+    store = SymbolIndexStore(SymbolIndexStoreConfig(repo_root=repo))
+
+    result = indexer.index_path(str(repo))
+
+    assert result.files_considered == 2
+    paths = sorted(item.path for item in store.list_occurrences() if item.kind == "def")
+    assert paths == [str(repo / "src" / "app.py"), str(repo / "tools" / "helper.py")]
+
+
 def test_symbol_index_replaces_changed_file_occurrences(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

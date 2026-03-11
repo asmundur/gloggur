@@ -18,7 +18,7 @@ from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.models import EdgeRecord, FileMetadata, IndexMetadata, Symbol, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
-from gloggur.path_filters import is_indexable_source_path
+from gloggur.path_filters import filter_index_walk_dirs, is_indexable_source_path
 from gloggur.storage.vector_store import VectorStore
 
 FAILURE_REMEDIATION: dict[str, list[str]] = {
@@ -919,9 +919,12 @@ class Indexer:
     def _iter_source_files(self, root: str) -> Iterable[str]:
         """Yield supported source files under a root directory."""
 
-        excludes = set(self.config.excluded_dirs)
         for current_root, dirs, files in os.walk(root):
-            dirs[:] = [d for d in dirs if d not in excludes]
+            dirs[:] = filter_index_walk_dirs(
+                current_root,
+                dirs,
+                excluded_dirs=self.config.excluded_dirs,
+            )
             for filename in files:
                 full_path = os.path.join(current_root, filename)
                 if self._is_supported_file(full_path):

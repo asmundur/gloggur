@@ -120,6 +120,41 @@ def test_indexer_skips_django_vendor_minified_paths_by_default() -> None:
         assert "chunk_span_integrity_error" not in result.failed_reasons
 
 
+def test_indexer_skips_structural_virtualenv_roots_and_keeps_sibling_project_code() -> None:
+    """Repository scan should skip arbitrary-name virtualenv roots but keep sibling sources."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/app.py": "def app() -> int:\n    return 1\n",
+                "tools/helper.py": "def helper() -> int:\n    return 2\n",
+                "_venv/Lib/site-packages/vendor_win.py": "def vendor_win() -> int:\n    return 3\n",
+                "python-runtime/lib/python3.13/site-packages/vendor.py": (
+                    "def vendor() -> int:\n    return 4\n"
+                ),
+            }
+        )
+        (repo / "_venv" / "Scripts").mkdir(parents=True)
+        (repo / "_venv" / "Scripts" / "python.exe").write_text("", encoding="utf8")
+        (repo / "python-runtime" / "bin").mkdir(parents=True)
+        (repo / "python-runtime" / "bin" / "python").write_text("", encoding="utf8")
+
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=CacheManager(CacheConfig(cache_dir)),
+            parser_registry=ParserRegistry(),
+        )
+
+        result = indexer.index_repository(str(repo))
+
+        assert result.failed == 0
+        assert result.files_considered == 2
+        assert sorted(result.source_files) == [
+            str(repo / "src" / "app.py"),
+            str(repo / "tools" / "helper.py"),
+        ]
+
+
 def test_indexer_fails_closed_on_chunk_span_integrity_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

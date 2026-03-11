@@ -84,7 +84,11 @@ from gloggur.parsers.support_contract import (
     build_language_support_contract,
     run_parser_capability_check,
 )
-from gloggur.path_filters import is_indexable_source_path
+from gloggur.path_filters import (
+    filter_index_walk_dirs,
+    is_excluded_index_path,
+    is_indexable_source_path,
+)
 from gloggur.runtime.hosts import create_runtime_host, list_runtime_hosts
 from gloggur.search import hybrid_search as hybrid_search_module
 from gloggur.search.hybrid_search import HybridSearch
@@ -1179,7 +1183,6 @@ def _collect_index_skipped_extension_diagnostics(
     counts: dict[str, int] = {}
     samples: list[str] = []
     supported_extensions = tuple(config.supported_extensions)
-    excluded_dirs = set(config.excluded_dirs)
 
     def _record(candidate_path: str) -> None:
         """Record one skipped path under its normalized extension bucket."""
@@ -1190,7 +1193,11 @@ def _collect_index_skipped_extension_diagnostics(
 
     if os.path.isdir(path):
         for root, dirs, files in os.walk(path):
-            dirs[:] = [name for name in dirs if name not in excluded_dirs]
+            dirs[:] = filter_index_walk_dirs(
+                root,
+                dirs,
+                excluded_dirs=config.excluded_dirs,
+            )
             files.sort()
             for filename in files:
                 full_path = os.path.join(root, filename)
@@ -1198,14 +1205,13 @@ def _collect_index_skipped_extension_diagnostics(
                     continue
                 _record(full_path)
     else:
-        normalized = os.path.normpath(path)
-        segments = {segment for segment in normalized.split(os.sep) if segment}
-        if any(excluded in segments for excluded in excluded_dirs):
+        if is_excluded_index_path(path, excluded_dirs=config.excluded_dirs):
             return _build_skipped_extension_diagnostics(
                 enabled=True,
                 counts=counts,
                 samples=samples,
             )
+        normalized = os.path.normpath(path)
         if not any(normalized.endswith(ext) for ext in supported_extensions):
             _record(path)
     return _build_skipped_extension_diagnostics(enabled=True, counts=counts, samples=samples)
@@ -1227,7 +1233,6 @@ def _collect_inspect_skipped_extension_diagnostics(
     counts: dict[str, int] = {}
     samples: list[str] = []
     supported_extensions = tuple(config.supported_extensions)
-    excluded_dirs = set(config.excluded_dirs)
 
     def _record(candidate_path: str) -> None:
         """Record one skipped path under its normalized extension bucket."""
@@ -1238,7 +1243,11 @@ def _collect_inspect_skipped_extension_diagnostics(
 
     if os.path.isdir(path):
         for root, dirs, files in os.walk(path):
-            dirs[:] = [name for name in dirs if name not in excluded_dirs]
+            dirs[:] = filter_index_walk_dirs(
+                root,
+                dirs,
+                excluded_dirs=config.excluded_dirs,
+            )
             files.sort()
             for filename in files:
                 full_path = os.path.join(root, filename)
@@ -1252,9 +1261,7 @@ def _collect_inspect_skipped_extension_diagnostics(
                     continue
                 _record(full_path)
     else:
-        normalized = os.path.normpath(os.path.abspath(path))
-        segments = {segment for segment in normalized.split(os.sep) if segment}
-        if any(excluded in segments for excluded in excluded_dirs):
+        if is_excluded_index_path(path, excluded_dirs=config.excluded_dirs):
             return _build_skipped_extension_diagnostics(
                 enabled=True,
                 counts=counts,
@@ -6402,7 +6409,11 @@ def inspect(
         for root, dirs, files in os.walk(path):
             dirs.sort()
             files.sort()
-            dirs[:] = [d for d in dirs if d not in config.excluded_dirs]
+            dirs[:] = filter_index_walk_dirs(
+                root,
+                dirs,
+                excluded_dirs=config.excluded_dirs,
+            )
             for filename in files:
                 full_path = os.path.join(root, filename)
                 if not any(full_path.endswith(ext) for ext in config.supported_extensions):
@@ -6417,8 +6428,7 @@ def inspect(
     elif not any(path.endswith(ext) for ext in config.supported_extensions):
         paths = []
     else:
-        segments = set(os.path.normpath(os.path.abspath(path)).split(os.sep))
-        if any(excluded in segments for excluded in config.excluded_dirs):
+        if is_excluded_index_path(path, excluded_dirs=config.excluded_dirs):
             paths = []
     skipped_extension_diagnostics = _collect_inspect_skipped_extension_diagnostics(
         path=path,

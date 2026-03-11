@@ -12,7 +12,7 @@ from click.testing import CliRunner
 from gloggur.cli import main as cli_main
 from gloggur.config import GloggurConfig
 from gloggur.io_failures import StorageIOError
-from gloggur.models import IndexMetadata, Symbol
+from gloggur.models import Symbol
 
 
 def _payload(output: str) -> dict[str, object]:
@@ -607,6 +607,48 @@ def test_inspect_json_skips_excluded_single_file_path(
         cache_dir=str(tmp_path / "cache"),
         embedding_provider="test",
         excluded_dirs=["excluded"],
+    )
+
+    class FakeCache:
+        def get_audit_file_metadata(self, _path: str) -> None:
+            return None
+
+        def delete_audit_reports_for_file(self, _path: str) -> None:
+            pass
+
+        def set_audit_report(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def upsert_audit_file_metadata(self, metadata: object) -> None:
+            pass
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: FakeCache())
+    monkeypatch.setattr(cli_main, "_create_embedding_provider_for_command", lambda _cfg: None)
+    monkeypatch.setattr(cli_main, "audit_docstrings", lambda *args, **kwargs: [])
+
+    result = runner.invoke(cli_main.cli, ["inspect", str(target), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["files_considered"] == 0
+    assert payload["reports_total"] == 0
+
+
+def test_inspect_json_skips_structural_virtualenv_single_file_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    env_root = tmp_path / "python-runtime"
+    (env_root / "bin").mkdir(parents=True)
+    (env_root / "bin" / "python").write_text("", encoding="utf8")
+    target = env_root / "lib" / "python3.13" / "site-packages" / "sample.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def sample() -> None:\n    pass\n", encoding="utf8")
+    config = GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
     )
 
     class FakeCache:
