@@ -774,6 +774,13 @@ def _decorate_payload_with_security_metadata(
     embedding: EmbeddingProvider | None = None,
 ) -> dict[str, object]:
     """Attach config trust/source metadata to JSON payloads."""
+    trace_session = current_trace_session()
+    if trace_session is not None:
+        payload["warning_codes"] = _merge_string_codes(
+            payload.get("warning_codes"),
+            trace_session.warning_codes(),
+        )
+
     active_config = config or _ACTIVE_JSON_CONFIG
     if active_config is None:
         return payload

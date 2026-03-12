@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import faulthandler
 import json
 import os
@@ -9,12 +10,14 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
+from uuid import uuid4
 
 from gloggur.byte_spans import discover_repo_root
-from gloggur.io_failures import wrap_io_error
+from gloggur.io_failures import StorageIOError, wrap_io_error
 
 SUPPORT_RUNTIME_CONFIG_PATH = ".gloggur/config.toml"
 DEFAULT_LOG_BYTES = 5 * 1024 * 1024
@@ -24,6 +27,7 @@ _REPO_ROOT_PLACEHOLDER = "<REPO_ROOT>"
 _HOME_PLACEHOLDER = "<HOME>"
 _REDACTED_PLACEHOLDER = "<REDACTED>"
 _SECRET_KEY_RE = re.compile(r"(?:^|_)(?:key|token|secret|password)$", re.IGNORECASE)
+SUPPORT_RUNTIME_DEGRADED_WARNING_CODE = "support_runtime_degraded"
 
 _ACTIVE_TRACE_SESSION: CommandTraceSession | None = None
 
@@ -84,6 +88,11 @@ class CommandTraceSession:
         self.stack_dump_path = self.command_dir / "stackdump.log"
         self.meta_path = self.command_dir / "meta.json"
         self._lock = threading.Lock()
+        self._metadata_io_lock = threading.Lock()
+        self._capture_enabled = threading.Event()
+        self._capture_enabled.set()
+        self._degrade_warning_emitted = False
+        self._warning_codes: list[str] = []
         self._stop_event = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
         self._stdout_base: TextIO | None = None
@@ -124,32 +133,64 @@ class CommandTraceSession:
 
     def __enter__(self) -> CommandTraceSession:
         global _ACTIVE_TRACE_SESSION
-        self.command_dir.mkdir(parents=True, exist_ok=True)
-        self._install_streams()
-        self._install_stack_dump_handler()
+        self._run_capture_operation(
+            action="create support runtime directory",
+            callback=lambda: self.command_dir.mkdir(parents=True, exist_ok=True),
+        )
+        self._run_capture_operation(
+            action="install support runtime streams",
+            callback=self._install_streams,
+        )
+        self._run_capture_operation(
+            action="install support runtime stack dump handler",
+            callback=self._install_stack_dump_handler,
+        )
         self._write_metadata()
-        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        self._heartbeat_thread.start()
+        if self._capture_enabled.is_set():
+            self._run_capture_operation(
+                action="start support runtime heartbeat thread",
+                callback=self._start_heartbeat_thread,
+            )
         _ACTIVE_TRACE_SESSION = self
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         global _ACTIVE_TRACE_SESSION
-        self._stop_event.set()
-        if self._heartbeat_thread is not None:
-            self._heartbeat_thread.join(timeout=0.2)
-        self._uninstall_streams()
-        self._uninstall_stack_dump_handler()
-        with self._lock:
-            if self._metadata.get("status") == "running":
-                exit_code = int(self._metadata.get("exit_code") or 0)
-                self._metadata["status"] = "completed" if exit_code == 0 else "failed"
-            self._metadata["completed_at"] = _utc_now_iso()
-            self._metadata["updated_at"] = _utc_now_iso()
-        self._enrich_failure_from_stdout()
-        self._write_metadata()
-        self._move_to_recent()
-        _ACTIVE_TRACE_SESSION = None
+        try:
+            self._stop_event.set()
+            self._run_capture_operation(
+                action="join support runtime heartbeat thread",
+                callback=self._join_heartbeat_thread,
+                require_enabled=False,
+            )
+            self._run_capture_operation(
+                action="uninstall support runtime streams",
+                callback=self._uninstall_streams,
+                require_enabled=False,
+            )
+            self._run_capture_operation(
+                action="uninstall support runtime stack dump handler",
+                callback=self._uninstall_stack_dump_handler,
+                require_enabled=False,
+            )
+            with self._lock:
+                if self._metadata.get("status") == "running":
+                    exit_code = int(self._metadata.get("exit_code") or 0)
+                    self._metadata["status"] = "completed" if exit_code == 0 else "failed"
+                self._metadata["completed_at"] = _utc_now_iso()
+                self._metadata["updated_at"] = _utc_now_iso()
+            self._run_capture_operation(
+                action="enrich support runtime failure payload",
+                callback=self._enrich_failure_from_stdout,
+            )
+            self._write_metadata()
+            self._run_capture_operation(
+                action="rotate support runtime trace to recent history",
+                callback=self._move_to_recent,
+                require_enabled=False,
+            )
+        finally:
+            _ACTIVE_TRACE_SESSION = None
 
     def set_exit_code(self, exit_code: int) -> None:
         with self._lock:
@@ -157,6 +198,10 @@ class CommandTraceSession:
             self._metadata["status"] = "completed" if int(exit_code) == 0 else "failed"
             self._metadata["updated_at"] = _utc_now_iso()
         self._write_metadata()
+
+    def warning_codes(self) -> list[str]:
+        with self._lock:
+            return list(self._warning_codes)
 
     def record_failure(
         self,
@@ -194,11 +239,15 @@ class CommandTraceSession:
         self._write_metadata()
 
     def append_output(self, stream_name: str, value: str) -> None:
-        if not value:
+        if not value or not self._capture_enabled.is_set():
             return
         sanitized = _sanitize_text(value, self.repo_root)
         path = self.stdout_path if stream_name == "stdout" else self.stderr_path
-        _append_bounded_text(path, sanitized, max_bytes=self.config.max_log_bytes)
+        try:
+            _append_bounded_text(path, sanitized, max_bytes=self.config.max_log_bytes)
+        except Exception as exc:
+            self._degrade_capture(action="write support runtime output log", exc=exc)
+            return
         timestamp = _utc_now_iso()
         with self._lock:
             self._metadata["updated_at"] = timestamp
@@ -206,6 +255,8 @@ class CommandTraceSession:
         self._write_metadata()
 
     def note_capture_warning(self, warning: str) -> None:
+        if not self._capture_enabled.is_set():
+            return
         with self._lock:
             warnings = list(self._metadata.get("capture_warnings", []))
             if warning not in warnings:
@@ -215,6 +266,8 @@ class CommandTraceSession:
         self._write_metadata()
 
     def mark_stack_dump_requested(self) -> None:
+        if not self._capture_enabled.is_set():
+            return
         with self._lock:
             stack_dump = dict(self._metadata.get("stack_dump", {}))
             stack_dump["last_requested_at"] = _utc_now_iso()
@@ -223,6 +276,8 @@ class CommandTraceSession:
         self._write_metadata()
 
     def mark_stack_dump_captured(self) -> None:
+        if not self._capture_enabled.is_set():
+            return
         with self._lock:
             stack_dump = dict(self._metadata.get("stack_dump", {}))
             stack_dump["last_captured_at"] = _utc_now_iso()
@@ -232,12 +287,23 @@ class CommandTraceSession:
 
     def _heartbeat_loop(self) -> None:
         while not self._stop_event.wait(HEARTBEAT_INTERVAL_SECONDS):
+            if not self._capture_enabled.is_set():
+                return
             with self._lock:
                 if self._metadata.get("status") != "running":
                     return
                 self._metadata["heartbeat_at"] = _utc_now_iso()
                 self._metadata["updated_at"] = _utc_now_iso()
             self._write_metadata()
+
+    def _start_heartbeat_thread(self) -> None:
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+
+    def _join_heartbeat_thread(self) -> None:
+        if self._heartbeat_thread is None:
+            return
+        self._heartbeat_thread.join(timeout=0.2)
 
     def _install_streams(self) -> None:
         if self._installed_streams:
@@ -310,7 +376,69 @@ class CommandTraceSession:
         _prune_recent_commands(self.paths.recent_root, limit=self.config.recent_limit)
 
     def _write_metadata(self) -> None:
-        _atomic_write_json(self.meta_path, self._metadata)
+        if not self._capture_enabled.is_set():
+            return
+        try:
+            with self._lock:
+                snapshot = copy.deepcopy(self._metadata)
+        except Exception as exc:
+            self._degrade_capture(action="snapshot support runtime metadata", exc=exc)
+            return
+        try:
+            with self._metadata_io_lock:
+                if not self._capture_enabled.is_set():
+                    return
+                _atomic_write_json(self.meta_path, snapshot)
+        except Exception as exc:
+            self._degrade_capture(action="write support runtime metadata", exc=exc)
+
+    def _run_capture_operation(
+        self,
+        *,
+        action: str,
+        callback: Callable[[], None],
+        require_enabled: bool = True,
+    ) -> None:
+        if require_enabled and not self._capture_enabled.is_set():
+            return
+        try:
+            callback()
+        except Exception as exc:
+            self._degrade_capture(action=action, exc=exc)
+
+    def _degrade_capture(self, *, action: str, exc: Exception) -> None:
+        normalized = _unwrap_storage_io_error(exc)
+        detail = f"{type(normalized).__name__}: {normalized}"
+        should_emit_warning = False
+        with self._lock:
+            self._capture_enabled.clear()
+            if SUPPORT_RUNTIME_DEGRADED_WARNING_CODE not in self._warning_codes:
+                self._warning_codes.append(SUPPORT_RUNTIME_DEGRADED_WARNING_CODE)
+                self._warning_codes.sort()
+            warnings = list(self._metadata.get("capture_warnings", []))
+            if SUPPORT_RUNTIME_DEGRADED_WARNING_CODE not in warnings:
+                warnings.append(SUPPORT_RUNTIME_DEGRADED_WARNING_CODE)
+                self._metadata["capture_warnings"] = warnings
+                self._metadata["updated_at"] = _utc_now_iso()
+            if not self._degrade_warning_emitted:
+                self._degrade_warning_emitted = True
+                should_emit_warning = True
+        if should_emit_warning:
+            self._emit_runtime_warning(
+                "warning: support runtime tracing degraded while attempting to "
+                f"{action}; continuing command execution without support trace writes "
+                f"({detail})"
+            )
+
+    def _emit_runtime_warning(self, message: str) -> None:
+        stream: TextIO | None = self._stderr_base
+        if stream is None:
+            stream = sys.__stderr__ if getattr(sys, "__stderr__", None) is not None else sys.stderr
+        try:
+            stream.write(message + "\n")
+            stream.flush()
+        except Exception:
+            return
 
 
 def support_runtime_paths(repo_root: Path) -> SupportRuntimePaths:
@@ -610,13 +738,26 @@ def _append_bounded_text(path: Path, value: str, *, max_bytes: int) -> None:
         raise wrap_io_error(exc, operation="write support runtime log", path=str(path)) from exc
 
 
+def _unwrap_storage_io_error(exc: Exception) -> Exception:
+    if isinstance(exc, StorageIOError) and isinstance(exc.__cause__, Exception):
+        return exc.__cause__
+    return exc
+
+
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path = path.with_name(
+        f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}"
+    )
     try:
         temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf8")
         temp_path.replace(path)
     except OSError as exc:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
         raise wrap_io_error(
             exc,
             operation="write support runtime metadata",

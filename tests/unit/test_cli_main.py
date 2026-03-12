@@ -14,6 +14,7 @@ from click.testing import CliRunner
 import gloggur.indexer.cache as cache_module
 import gloggur.storage.metadata_store as metadata_store_module
 import gloggur.storage.vector_store as vector_store_module
+import gloggur.support_runtime as support_runtime_module
 from gloggur.cli import main as cli_main
 from gloggur.cli.main import (
     CLI_FAILURE_REMEDIATION,
@@ -38,6 +39,7 @@ from gloggur.io_failures import StorageIOError
 from gloggur.models import EdgeRecord, IndexMetadata, Symbol, SymbolChunk
 from gloggur.search import attach_legacy_search_contract
 from gloggur.search.router.types import ContextHit, ContextPack, ContextSpan
+from gloggur.support_runtime import SUPPORT_RUNTIME_DEGRADED_WARNING_CODE, write_support_runtime_config
 
 
 @pytest.fixture(autouse=True)
@@ -2161,6 +2163,61 @@ def test_status_json_marks_explicit_config_as_trusted(tmp_path: Path) -> None:
     warning_codes = payload["security_warning_codes"]
     assert isinstance(warning_codes, list)
     assert "untrusted_repo_config" not in warning_codes
+
+
+def test_decorate_payload_includes_trace_warning_codes_without_active_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trace warnings should be additive even when config metadata is unavailable."""
+
+    class _FakeTraceSession:
+        def warning_codes(self) -> list[str]:
+            return [SUPPORT_RUNTIME_DEGRADED_WARNING_CODE]
+
+    monkeypatch.setattr(cli_main, "current_trace_session", lambda: _FakeTraceSession())
+    payload = cli_main._decorate_payload_with_security_metadata({})
+    assert payload["warning_codes"] == [SUPPORT_RUNTIME_DEGRADED_WARNING_CODE]
+
+
+def test_status_json_remains_successful_when_support_runtime_metadata_write_degrades(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Support-runtime metadata write failures should degrade tracing, not fail status."""
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / ".git").mkdir()
+    write_support_runtime_config(repo, enabled=True)
+    monkeypatch.chdir(repo)
+
+    def _raise_runtime_metadata_write(path: Path, payload: dict[str, object]) -> None:
+        _ = payload
+        if path.name == "meta.json":
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
+        raise AssertionError(f"unexpected path passed to _atomic_write_json: {path}")
+
+    monkeypatch.setattr(
+        support_runtime_module,
+        "_atomic_write_json",
+        _raise_runtime_metadata_write,
+    )
+    result = runner.invoke(
+        cli_main.cli,
+        ["status", "--json"],
+        env={"GLOGGUR_CACHE_DIR": str(tmp_path / "cache")},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    warning_codes = payload.get("warning_codes")
+    assert isinstance(warning_codes, list)
+    assert SUPPORT_RUNTIME_DEGRADED_WARNING_CODE in warning_codes
+    assert "FileNotFoundError" in result.output
+    assert "support runtime tracing degraded" in result.output
+    if "error" in payload:
+        error = payload["error"]
+        assert not (isinstance(error, dict) and error.get("type") == "io_failure")
 
 
 def test_status_supports_tilde_expanded_config_path(tmp_path: Path) -> None:
