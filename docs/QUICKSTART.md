@@ -15,11 +15,17 @@ If `status --json` returns `"resume_decision": "reindex_required"`, run:
 scripts/gloggur index . --json
 ```
 
+Default indexing embeds symbol chunks only. Graph edges are still extracted and
+stored for traversal, but `embedded_edge_vectors` stays `0` unless you opt in
+with `scripts/gloggur index . --json --embed-graph-edges` or
+`GLOGGUR_EMBED_GRAPH_EDGES=true`.
+
 `status --json` now separates raw on-disk rows from reusable search state:
 
 - `build_state`: active/incomplete build metadata when a writer is building or was interrupted
 - `raw_total_symbols`: raw symbol rows observed on disk
 - `total_symbols`: searchable symbol count, forced to `0` whenever `resume_decision != "resume_ok"`
+- `index_stats`: persisted symbol/chunk/graph totals plus embedded vector totals
 
 Workspace note:
 - cache/state defaults to `.gloggur-cache` in the current workspace
@@ -87,6 +93,8 @@ Run commands from repo root:
 
 ```bash
 scripts/gloggur index . --json
+# opt in if you explicitly want semantic edge vectors too
+scripts/gloggur index . --json --embed-graph-edges
 scripts/gloggur watch init . --json
 scripts/gloggur watch start --daemon --json
 scripts/gloggur watch status --json
@@ -117,7 +125,7 @@ When the cache is not reusable, `search --json` exits non-zero with:
 ## Current gotchas
 
 - `scripts/gloggur inspect . --json` focuses on source paths by default; add `--include-tests` and `--include-scripts` when you want a broader repo audit.
-- Parser support is baseline rather than uniform. Run `scripts/gloggur parsers check --json` before depending on symbol fidelity for JavaScript/TypeScript arrow assignments, TypeScript type aliases or enums, named Go types, Rust impl methods, or Java records/enums.
+- Parser support is baseline rather than uniform. Run `scripts/gloggur parsers check --json` before depending on symbol fidelity for TypeScript type aliases or enums, named Go types, Rust impl methods, or Java records/enums.
 - After `scripts/gloggur init . --json` or `scripts/gloggur watch init . --json`, later commands may include `security_warning_codes: ["untrusted_repo_config"]` because the repo-local config is auto-discovered and treated as untrusted by default.
 - This repo's `scripts/run_quickstart_smoke.py` harness and most deterministic CI checks use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.
 

@@ -49,9 +49,7 @@ def test_index_and_search_use_selected_provider_with_mocked_embeddings(
         class FakeProvider:
             provider = "unknown"
 
-            def __init__(
-                self, model: str, api_key: str | None = None, **kwargs: object
-            ) -> None:
+            def __init__(self, model: str, api_key: str | None = None, **kwargs: object) -> None:
                 _ = api_key, kwargs
                 observed_models.append(model)
 
@@ -108,8 +106,7 @@ def test_missing_provider_credentials_fail_without_traceback_and_with_json_paylo
     repo.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(repo)
     (repo / "sample.py").write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
     env = {
@@ -225,8 +222,7 @@ def test_single_file_index_provider_failures_keep_embedding_provider_error_contr
     monkeypatch.chdir(repo)
     file_path = repo / "sample.py"
     file_path.write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
 
@@ -291,9 +287,7 @@ def test_gemini_profile_not_overwritten_by_different_provider(
         class FakeGeminiProvider:
             provider = "gemini"
 
-            def __init__(
-                self, model: str, api_key: str | None = None, **kwargs: object
-            ) -> None:
+            def __init__(self, model: str, api_key: str | None = None, **kwargs: object) -> None:
                 _ = model, api_key, kwargs
 
             def embed_text(self, text: str) -> list[float]:
@@ -308,9 +302,7 @@ def test_gemini_profile_not_overwritten_by_different_provider(
         class FakeOpenAIProvider:
             provider = "openai"
 
-            def __init__(
-                self, model: str, api_key: str | None = None, **kwargs: object
-            ) -> None:
+            def __init__(self, model: str, api_key: str | None = None, **kwargs: object) -> None:
                 _ = model, api_key, kwargs
 
             def embed_text(self, text: str) -> list[float]:
@@ -322,8 +314,12 @@ def test_gemini_profile_not_overwritten_by_different_provider(
             def get_dimension(self) -> int:
                 return 3
 
-        monkeypatch.setattr("gloggur.embeddings.factory.GeminiEmbeddingProvider", FakeGeminiProvider)
-        monkeypatch.setattr("gloggur.embeddings.factory.OpenAIEmbeddingProvider", FakeOpenAIProvider)
+        monkeypatch.setattr(
+            "gloggur.embeddings.factory.GeminiEmbeddingProvider", FakeGeminiProvider
+        )
+        monkeypatch.setattr(
+            "gloggur.embeddings.factory.OpenAIEmbeddingProvider", FakeOpenAIProvider
+        )
 
         # Step 1: Index with Gemini profile into gemini_cache
         gemini_env = {
@@ -351,9 +347,9 @@ def test_gemini_profile_not_overwritten_by_different_provider(
 
         # Step 3: Assert Gemini cache files are untouched
         gemini_files_after = set(gemini_cache.rglob("*"))
-        assert gemini_files_before == gemini_files_after, (
-            "Gemini cache files were modified when indexing with OpenAI profile"
-        )
+        assert (
+            gemini_files_before == gemini_files_after
+        ), "Gemini cache files were modified when indexing with OpenAI profile"
 
         # Assert the two cache dirs are distinct
         assert gemini_cache != openai_cache
@@ -390,9 +386,7 @@ def test_index_uses_gemini_model_and_key_from_dotenv(
         class FakeGeminiProvider:
             provider = "gemini"
 
-            def __init__(
-                self, model: str, api_key: str | None = None, **kwargs: object
-            ) -> None:
+            def __init__(self, model: str, api_key: str | None = None, **kwargs: object) -> None:
                 _ = kwargs
                 observed["model"] = model
                 observed["api_key"] = api_key

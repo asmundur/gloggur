@@ -35,11 +35,7 @@ def _publish_step(name: str) -> dict[str, object]:
     steps = publish.get("steps")
     assert isinstance(steps, list)
     step = next(
-        (
-            item
-            for item in steps
-            if isinstance(item, dict) and item.get("name") == name
-        ),
+        (item for item in steps if isinstance(item, dict) and item.get("name") == name),
         None,
     )
     assert isinstance(step, dict), f"missing step: {name}"

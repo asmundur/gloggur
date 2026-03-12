@@ -52,11 +52,7 @@ def test_performance_workflow_runs_non_blocking_benchmark_and_pytest() -> None:
     assert isinstance(steps, list)
 
     setup_step = next(
-        (
-            step
-            for step in steps
-            if isinstance(step, dict) and step.get("name") == "Set up Python"
-        ),
+        (step for step in steps if isinstance(step, dict) and step.get("name") == "Set up Python"),
         None,
     )
     assert isinstance(setup_step, dict)

@@ -7,7 +7,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_GLOGGUR = REPO_ROOT / "scripts" / "gloggur"
 VALID_WATCH_STATUSES = {"stopped", "running", "running_with_errors"}
@@ -160,7 +159,9 @@ def run_startup_readiness() -> tuple[int, dict[str, object]]:
     status_command = [str(SCRIPTS_GLOGGUR), "status", "--json"]
     status_completed = _probe(status_command)
     if status_completed.returncode != 0:
-        detail = (status_completed.stderr or status_completed.stdout or "").strip() or "status probe failed"
+        detail = (
+            status_completed.stderr or status_completed.stdout or ""
+        ).strip() or "status probe failed"
         return 1, _failure("startup_status_probe_failed", detail, command=status_command)
 
     try:
@@ -176,7 +177,9 @@ def run_startup_readiness() -> tuple[int, dict[str, object]]:
     watch_command = [str(SCRIPTS_GLOGGUR), "watch", "status", "--json"]
     watch_completed = _probe(watch_command)
     if watch_completed.returncode != 0:
-        detail = (watch_completed.stderr or watch_completed.stdout or "").strip() or "watch status probe failed"
+        detail = (
+            watch_completed.stderr or watch_completed.stdout or ""
+        ).strip() or "watch status probe failed"
         return 1, _failure("startup_watch_status_probe_failed", detail, command=watch_command)
 
     try:
@@ -223,7 +226,9 @@ def run_startup_readiness() -> tuple[int, dict[str, object]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate startup readiness for a local gloggur worktree.")
+    parser = argparse.ArgumentParser(
+        description="Validate startup readiness for a local gloggur worktree."
+    )
     parser.add_argument("--format", choices=["json", "text"], default="text")
     args = parser.parse_args()
 

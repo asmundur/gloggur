@@ -66,6 +66,7 @@ class GloggurConfig:
     """Config dataclass for embeddings, indexing paths, and docstring audit thresholds."""
 
     embedding_provider: str = "local"
+    embed_graph_edges: bool = False
     local_embedding_model: str = "microsoft/codebert-base"
     openai_embedding_model: str = "text-embedding-3-large"
     openai_api_key: str | None = None
@@ -150,7 +151,7 @@ class GloggurConfig:
             model = self.local_embedding_model
         else:
             model = "unknown"
-        return f"{provider}:{model}"
+        return f"{provider}:{model}|embed_graph_edges={int(self.embed_graph_edges)}"
 
     def adapter_module_override(self, category: str, adapter_id: str) -> str | None:
         """Return optional module-path override for one adapter category/id pair."""
@@ -341,6 +342,9 @@ class GloggurConfig:
 
         if _env_value("GLOGGUR_EMBEDDING_PROVIDER"):
             data["embedding_provider"] = _env_value("GLOGGUR_EMBEDDING_PROVIDER")
+        embed_graph_edges = _env_bool("GLOGGUR_EMBED_GRAPH_EDGES")
+        if embed_graph_edges is not None:
+            data["embed_graph_edges"] = embed_graph_edges
         if _env_value("GLOGGUR_LOCAL_MODEL"):
             data["local_embedding_model"] = _env_value("GLOGGUR_LOCAL_MODEL")
         if _env_value("GLOGGUR_OPENAI_MODEL"):

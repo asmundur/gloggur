@@ -7,7 +7,9 @@ import sys
 from pathlib import Path
 
 
-def _run_reference_agent(args: list[str], *, timeout: float = 240.0) -> subprocess.CompletedProcess[str]:
+def _run_reference_agent(
+    args: list[str], *, timeout: float = 240.0
+) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parents[2]
     command = [sys.executable, "scripts/run_reference_agent_eval.py", "--format", "json", *args]
     return subprocess.run(

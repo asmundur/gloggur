@@ -5,6 +5,10 @@ from gloggur.parsers.treesitter_parser import TreeSitterParser
 from scripts.verification.fixtures import TestFixtures
 
 
+def _symbols_by_fqname(symbols):
+    return {symbol.fqname or symbol.name: symbol for symbol in symbols}
+
+
 def test_parser_registry_supports_known_extensions() -> None:
     """Parser registry should resolve known extensions."""
     registry = ParserRegistry()
@@ -204,3 +208,96 @@ func test_when_user_logs_in() int {
     target = next(s for s in symbols if s.name == "test_when_user_logs_in")
     assert target.kind == "function"
     assert target.implicit_contract is None
+
+
+def test_treesitter_parser_extracts_javascript_assignment_bound_symbols() -> None:
+    """JavaScript parser should recover assignment-bound canonical fqnames and owners."""
+    source = """
+exports.send = function send() {};
+module.exports.json = function () {};
+proto.use = function (fn) {};
+Router.prototype.route = function route(path) {};
+app.listen = function listen() {};
+const api = { send() {}, json: function () {}, end: () => {} };
+const render = () => {};
+const listen = function () {};
+items.map(function (x) { return x; });
+"""
+    parser = TreeSitterParser("javascript")
+    symbols = parser.extract_symbols("sample.js", source)
+    by_fqname = _symbols_by_fqname(symbols)
+
+    assert set(by_fqname) == {
+        "exports.send",
+        "module.exports.json",
+        "proto.use",
+        "Router.prototype.route",
+        "app.listen",
+        "api.send",
+        "api.json",
+        "api.end",
+        "render",
+        "listen",
+    }
+
+    assert by_fqname["exports.send"].kind == "function"
+    assert by_fqname["exports.send"].name == "send"
+    assert by_fqname["exports.send"].container_fqname == "exports"
+    assert by_fqname["exports.send"].attributes["binding_style"] == "export_assignment"
+
+    assert by_fqname["module.exports.json"].kind == "function"
+    assert by_fqname["module.exports.json"].container_fqname == "module.exports"
+    assert by_fqname["module.exports.json"].attributes["binding_style"] == "export_assignment"
+
+    assert by_fqname["proto.use"].kind == "method"
+    assert by_fqname["proto.use"].container_fqname == "proto"
+    assert by_fqname["proto.use"].attributes["binding_style"] == "member_assignment"
+
+    assert by_fqname["Router.prototype.route"].kind == "method"
+    assert by_fqname["Router.prototype.route"].container_fqname == "Router.prototype"
+    assert by_fqname["Router.prototype.route"].attributes["binding_style"] == (
+        "prototype_assignment"
+    )
+
+    assert by_fqname["api.send"].kind == "method"
+    assert by_fqname["api.send"].container_fqname == "api"
+    assert by_fqname["api.send"].attributes["binding_style"] == "object_binding_property"
+    assert by_fqname["render"].kind == "function"
+    assert by_fqname["render"].container_fqname is None
+    assert by_fqname["render"].attributes["binding_style"] == "variable_assignment"
+    assert "map" not in {symbol.name for symbol in symbols}
+
+
+def test_treesitter_parser_extracts_typescript_assignment_bound_symbols() -> None:
+    """TypeScript parser should recover typed arrow assignments and bound object helpers."""
+    source = """
+const add: (a: number, b: number) => number = (a, b) => a + b;
+const api = { json: function (): void {}, end: (): void => {} };
+"""
+    parser = TreeSitterParser("typescript")
+    symbols = parser.extract_symbols("sample.ts", source)
+    by_fqname = _symbols_by_fqname(symbols)
+
+    assert set(by_fqname) == {"add", "api.json", "api.end"}
+    assert by_fqname["add"].kind == "function"
+    assert by_fqname["add"].attributes["binding_style"] == "variable_assignment"
+    assert by_fqname["api.json"].kind == "method"
+    assert by_fqname["api.json"].container_fqname == "api"
+    assert by_fqname["api.end"].attributes["binding_style"] == "object_binding_property"
+
+
+def test_treesitter_parser_extracts_tsx_assignment_bound_symbols() -> None:
+    """TSX parser should recover arrow component and bound object helper symbols."""
+    source = """
+const Inline = () => <span>x</span>;
+const api = { render: () => <div /> };
+"""
+    parser = TreeSitterParser("tsx")
+    symbols = parser.extract_symbols("sample.tsx", source)
+    by_fqname = _symbols_by_fqname(symbols)
+
+    assert set(by_fqname) == {"Inline", "api.render"}
+    assert by_fqname["Inline"].kind == "function"
+    assert by_fqname["Inline"].attributes["binding_style"] == "variable_assignment"
+    assert by_fqname["api.render"].kind == "method"
+    assert by_fqname["api.render"].container_fqname == "api"

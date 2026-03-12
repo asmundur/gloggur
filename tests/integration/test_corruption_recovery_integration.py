@@ -77,8 +77,7 @@ def test_corruption_recovery_commands_work_in_simulated_no_faiss_runtime(
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a: int, b: int) -> int:\n"
-        "    return a + b\n",
+        "def add(a: int, b: int) -> int:\n" "    return a + b\n",
         encoding="utf8",
     )
     cache_dir = tmp_path / "cache"

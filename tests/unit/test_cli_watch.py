@@ -55,7 +55,9 @@ def _install_immediate_watch_daemon_ready(
         Path(state_path).write_text(json.dumps(state, indent=2), encoding="utf8")
         return state
 
-    monkeypatch.setattr("gloggur.cli.main._wait_for_watch_daemon_ready", fake_wait_for_watch_daemon_ready)
+    monkeypatch.setattr(
+        "gloggur.cli.main._wait_for_watch_daemon_ready", fake_wait_for_watch_daemon_ready
+    )
     return ready_at
 
 

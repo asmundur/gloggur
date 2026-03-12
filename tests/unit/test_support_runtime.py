@@ -42,7 +42,9 @@ def test_write_support_runtime_config_preserves_existing_sections(tmp_path: Path
     assert "enabled = false" in text
 
 
-def test_command_trace_session_moves_completed_command_to_recent(tmp_path: Path, monkeypatch) -> None:
+def test_command_trace_session_moves_completed_command_to_recent(
+    tmp_path: Path, monkeypatch
+) -> None:
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     write_support_runtime_config(repo, enabled=True)

@@ -33,6 +33,7 @@ from scripts.verification.report_templates import (
 @dataclass(frozen=True)
 class _PhaseDefinition:
     """Metadata describing a verification phase."""
+
     title: str
     script: Path
 
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 class SuiteRunner:
     """Orchestrate running verification phases."""
+
     def __init__(
         self,
         phases: Optional[List[int]] = None,
@@ -78,7 +80,9 @@ class SuiteRunner:
         for report in reports:
             if report.phase == phase_num:
                 return report
-        return _missing_phase_report(phase_num, PHASE_DEFINITIONS[phase_num].title, "Phase output missing.")
+        return _missing_phase_report(
+            phase_num, PHASE_DEFINITIONS[phase_num].title, "Phase output missing."
+        )
 
     def generate_comprehensive_report(self, report: VerificationReport) -> str:
         """Render the full report as markdown."""
@@ -206,7 +210,9 @@ def _execute_phase_script(
     """Execute a phase script and parse its JSON output."""
     if not script_path.exists():
         return [
-            _missing_phase_report(phase, fallback_titles.get(phase, f"Phase {phase}"), "Phase script missing.")
+            _missing_phase_report(
+                phase, fallback_titles.get(phase, f"Phase {phase}"), "Phase script missing."
+            )
             for phase in requested_phases
         ]
 
@@ -259,7 +265,9 @@ def _execute_phase_script(
         payload = _parse_json_output(completed.stderr)
 
     if payload is None:
-        message = _format_execution_error(cmd, completed.returncode, completed.stdout, completed.stderr)
+        message = _format_execution_error(
+            cmd, completed.returncode, completed.stdout, completed.stderr
+        )
         return [
             _missing_phase_report(phase, fallback_titles.get(phase, f"Phase {phase}"), message)
             for phase in requested_phases
@@ -338,7 +346,9 @@ def _phase_report_from_payload(
     tests = _tests_from_payload(payload)
     summary = _summary_from_payload(payload, tests)
     status = _status_from_summary(summary)
-    performance = payload.get("performance") if isinstance(payload.get("performance"), dict) else None
+    performance = (
+        payload.get("performance") if isinstance(payload.get("performance"), dict) else None
+    )
     issues = payload.get("issues") if isinstance(payload.get("issues"), list) else None
     duration = float(payload.get("duration_ms", duration_ms) or duration_ms)
 
@@ -404,7 +414,9 @@ def _test_from_payload(payload: Dict[str, object]) -> TestCaseResult:
     return TestCaseResult(name=name, status=status, message=message, details=details)
 
 
-def _summary_from_payload(payload: Dict[str, object], tests: List[TestCaseResult]) -> Dict[str, int]:
+def _summary_from_payload(
+    payload: Dict[str, object], tests: List[TestCaseResult]
+) -> Dict[str, int]:
     """Build a summary dict from payload or derived tests."""
     summary = payload.get("summary")
     if isinstance(summary, dict):
@@ -501,15 +513,23 @@ def _parse_phases(raw: Optional[str]) -> Optional[List[int]]:
 def main() -> int:
     """CLI entrypoint for running all phases."""
     parser = argparse.ArgumentParser(description="Run all gloggur verification phases.")
-    parser.add_argument("--phases", type=str, default=None, help="Comma-separated phase list, e.g. 2,3,4")
+    parser.add_argument(
+        "--phases", type=str, default=None, help="Comma-separated phase list, e.g. 2,3,4"
+    )
     parser.add_argument("--output", type=str, default=None, help="Write report to file.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
-    parser.add_argument("--quick", action="store_true", help="Run quick verification (phase 2 only).")
+    parser.add_argument(
+        "--quick", action="store_true", help="Run quick verification (phase 2 only)."
+    )
     parser.add_argument("--serial", action="store_true", help="Disable parallel phase execution.")
-    parser.add_argument("--jobs", type=int, default=None, help="Max parallel workers for phase execution.")
+    parser.add_argument(
+        "--jobs", type=int, default=None, help="Max parallel workers for phase execution."
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
-    parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    parser.add_argument(
+        "--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR)."
+    )
     parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
     parser.add_argument("--trace-id", type=str, default=None, help="Trace ID for log correlation.")
     args = parser.parse_args()
@@ -536,7 +556,11 @@ def main() -> int:
     )
     report = runner.run_all_phases()
 
-    output = render_markdown(report) if args.format == "markdown" else json.dumps(render_json(report), indent=2)
+    output = (
+        render_markdown(report)
+        if args.format == "markdown"
+        else json.dumps(render_json(report), indent=2)
+    )
     if args.output:
         Path(args.output).write_text(output, encoding="utf8")
     else:

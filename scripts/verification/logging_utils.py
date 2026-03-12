@@ -14,6 +14,7 @@ _CONFIGURED = False
 
 class TraceIdFilter(logging.Filter):
     """Inject a trace id into log records."""
+
     def filter(self, record: logging.LogRecord) -> bool:
         """Attach trace id to the log record."""
         record.trace_id = _TRACE_ID.get()

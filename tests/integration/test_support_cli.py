@@ -49,7 +49,9 @@ def test_support_run_search_json_creates_session_and_preserves_exit_code(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         cache_dir = tmp_path / "cache"
         env = _test_env(cache_dir)
@@ -79,7 +81,9 @@ def test_support_run_failure_auto_creates_bundle(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         env = _test_env(tmp_path / "cache")
         monkeypatch.chdir(repo)
@@ -105,7 +109,9 @@ def test_support_collect_manual_snapshot_includes_runtime_logs(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         cache_dir = tmp_path / "cache"
         env = _test_env(cache_dir)
@@ -153,7 +159,9 @@ def test_support_collect_include_cache_adds_cache_and_symbol_artifacts(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         cache_dir = tmp_path / "cache"
         env = _test_env(cache_dir)
@@ -189,7 +197,9 @@ def test_support_collect_allow_sensitive_data_sets_acknowledgement_marker(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         cache_dir = tmp_path / "cache"
         env = _test_env(cache_dir)
@@ -217,7 +227,9 @@ def test_support_collect_destination_collision_fails_closed(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         env = _test_env(tmp_path / "cache")
         monkeypatch.chdir(repo)
@@ -250,7 +262,9 @@ def test_support_collect_missing_session_fails_closed(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         env = _test_env(tmp_path / "cache")
         monkeypatch.chdir(repo)
@@ -275,7 +289,9 @@ def test_support_collect_degrades_gracefully_without_betatester_support(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         env = _test_env(tmp_path / "cache")
         monkeypatch.chdir(repo)
@@ -294,7 +310,9 @@ def test_support_collect_bundles_recent_runtime_traces_after_init(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         env = _test_env(tmp_path / "cache")
         monkeypatch.chdir(repo)
@@ -335,14 +353,15 @@ def test_support_collect_captures_active_index_trace_and_stack_dump(
 ) -> None:
     runner = CliRunner()
     with TestFixtures() as fixtures:
-        repo = fixtures.create_temp_repo({"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"})
+        repo = fixtures.create_temp_repo(
+            {"sample.py": "def add(a: int, b: int) -> int:\n    return a + b\n"}
+        )
         (repo / ".git").mkdir(exist_ok=True)
         env = _test_env(tmp_path / "cache")
         monkeypatch.chdir(repo)
         _init_betatester_support(runner, repo, env)
 
-        script = textwrap.dedent(
-            """
+        script = textwrap.dedent("""
             import json
             import os
             import time
@@ -372,8 +391,7 @@ def test_support_collect_captures_active_index_trace_and_stack_dump(
                 print("index still running")
                 while True:
                     time.sleep(0.5)
-            """
-        )
+            """)
         proc_env = dict(env)
         proc_env["TEST_REPO"] = str(repo)
         process = subprocess.Popen(
@@ -407,9 +425,7 @@ def test_support_collect_captures_active_index_trace_and_stack_dump(
             with tarfile.open(bundle_path, "r:gz") as archive:
                 names = set(archive.getnames())
                 session_id = str(payload["session_id"])
-                active_meta = (
-                    f"support/{session_id}/runtime/active/{active_dirs[0].name}/meta.json"
-                )
+                active_meta = f"support/{session_id}/runtime/active/{active_dirs[0].name}/meta.json"
                 active_stack = (
                     f"support/{session_id}/runtime/active/{active_dirs[0].name}/stackdump.log"
                 )

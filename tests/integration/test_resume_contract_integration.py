@@ -76,9 +76,10 @@ def test_resume_markers_persist_across_fresh_processes() -> None:
         assert status_first.returncode == 0, f"{status_first.stderr}\n{status_first.stdout}"
         first_payload = _parse_json_payload(status_first.stdout)
         assert first_payload["resume_decision"] == "resume_ok"
-        assert first_payload["last_success_resume_fingerprint"] == first_payload[
-            "expected_resume_fingerprint"
-        ]
+        assert (
+            first_payload["last_success_resume_fingerprint"]
+            == first_payload["expected_resume_fingerprint"]
+        )
         assert first_payload["last_success_resume_fingerprint_match"] is True
         assert isinstance(first_payload["tool_version"], str)
         assert first_payload["last_success_tool_version"] == first_payload["tool_version"]
@@ -123,7 +124,7 @@ def test_resume_fingerprint_stable_across_unchanged_reindex() -> None:
         # First index run
         index_run_1 = _run_cli(["index", str(repo), "--json"], env)
         assert index_run_1.returncode == 0, f"{index_run_1.stderr}\n{index_run_1.stdout}"
-        
+
         status_1 = _run_cli(["status", "--json"], env)
         assert status_1.returncode == 0, f"{status_1.stderr}\n{status_1.stdout}"
         payload_1 = _parse_json_payload(status_1.stdout)
@@ -132,7 +133,7 @@ def test_resume_fingerprint_stable_across_unchanged_reindex() -> None:
         # Second index run (unchanged files, so should just re-verify)
         index_run_2 = _run_cli(["index", str(repo), "--json"], env)
         assert index_run_2.returncode == 0, f"{index_run_2.stderr}\n{index_run_2.stdout}"
-        
+
         status_2 = _run_cli(["status", "--json"], env)
         assert status_2.returncode == 0, f"{status_2.stderr}\n{status_2.stdout}"
         payload_2 = _parse_json_payload(status_2.stdout)
@@ -212,8 +213,10 @@ def test_resume_profile_alias_treats_hf_snapshot_and_short_name_as_compatible() 
         assert payload["resume_decision"] == "resume_ok"
         assert payload["needs_reindex"] is False
         assert "embedding_profile_changed" not in set(payload["resume_reason_codes"])
-        assert payload["expected_index_profile"] == "test:microsoft/codebert-base"
-        assert payload["cached_index_profile"] == "test:microsoft/codebert-base"
+        assert (
+            payload["expected_index_profile"] == "test:microsoft/codebert-base|embed_graph_edges=0"
+        )
+        assert payload["cached_index_profile"] == "test:microsoft/codebert-base|embed_graph_edges=0"
 
         search_run = _run_cli(["search", "add", "--json"], env)
         assert search_run.returncode == 0, f"{search_run.stderr}\n{search_run.stdout}"
@@ -268,8 +271,9 @@ def test_resume_warns_when_last_success_tool_version_is_tampered() -> None:
         assert metadata["resume_decision"] == "resume_ok"
 
 
-def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_marker_drifts(
-) -> None:
+def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_marker_drifts() -> (
+    None
+):
     """A successful no-op reindex should repair marker-only tool-version drift."""
     source = TestFixtures.create_sample_python_file()
     with TestFixtures() as fixtures:
@@ -283,14 +287,14 @@ def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_ma
         }
 
         first_index_run = _run_cli(["index", str(repo), "--json"], env)
-        assert first_index_run.returncode == 0, (
-            f"{first_index_run.stderr}\n{first_index_run.stdout}"
-        )
+        assert (
+            first_index_run.returncode == 0
+        ), f"{first_index_run.stderr}\n{first_index_run.stdout}"
 
         status_before_run = _run_cli(["status", "--json"], env)
-        assert status_before_run.returncode == 0, (
-            f"{status_before_run.stderr}\n{status_before_run.stdout}"
-        )
+        assert (
+            status_before_run.returncode == 0
+        ), f"{status_before_run.stderr}\n{status_before_run.stdout}"
         status_before_payload = _parse_json_payload(status_before_run.stdout)
         assert status_before_payload["resume_decision"] == "resume_ok"
         assert status_before_payload["resume_reason_codes"] == []
@@ -302,9 +306,9 @@ def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_ma
         _set_cache_meta(cache_dir, "last_success_tool_version", "tampered-version")
 
         status_drift_run = _run_cli(["status", "--json"], env)
-        assert status_drift_run.returncode == 0, (
-            f"{status_drift_run.stderr}\n{status_drift_run.stdout}"
-        )
+        assert (
+            status_drift_run.returncode == 0
+        ), f"{status_drift_run.stderr}\n{status_drift_run.stdout}"
         status_drift_payload = _parse_json_payload(status_drift_run.stdout)
         assert status_drift_payload["resume_decision"] == "resume_ok"
         assert status_drift_payload["resume_reason_codes"] == []
@@ -314,18 +318,18 @@ def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_ma
         assert status_drift_payload["last_success_tool_version_match"] is False
 
         second_index_run = _run_cli(["index", str(repo), "--json"], env)
-        assert second_index_run.returncode == 0, (
-            f"{second_index_run.stderr}\n{second_index_run.stdout}"
-        )
+        assert (
+            second_index_run.returncode == 0
+        ), f"{second_index_run.stderr}\n{second_index_run.stdout}"
         second_index_payload = _parse_json_payload(second_index_run.stdout)
         assert int(second_index_payload["indexed_files"]) == 0
         assert int(second_index_payload["skipped_files"]) == 1
         assert int(second_index_payload["failed"]) == 0
 
         status_after_run = _run_cli(["status", "--json"], env)
-        assert status_after_run.returncode == 0, (
-            f"{status_after_run.stderr}\n{status_after_run.stdout}"
-        )
+        assert (
+            status_after_run.returncode == 0
+        ), f"{status_after_run.stderr}\n{status_after_run.stdout}"
         status_after_payload = _parse_json_payload(status_after_run.stdout)
         assert status_after_payload["resume_decision"] == "resume_ok"
         assert status_after_payload["resume_reason_codes"] == []
@@ -334,9 +338,10 @@ def test_resume_recovers_after_successful_noop_reindex_when_only_tool_version_ma
         assert status_after_payload["last_success_resume_fingerprint"] == first_fingerprint
         assert status_after_payload["expected_resume_fingerprint"] == first_fingerprint
         assert status_after_payload["last_success_resume_at"] == first_resume_at
-        assert status_after_payload["last_success_tool_version"] == status_after_payload[
-            "tool_version"
-        ]
+        assert (
+            status_after_payload["last_success_tool_version"]
+            == status_after_payload["tool_version"]
+        )
         assert status_after_payload["last_success_tool_version_match"] is True
 
 

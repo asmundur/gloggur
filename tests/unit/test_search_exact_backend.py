@@ -93,8 +93,7 @@ def test_run_exact_backend_ranks_source_definitions_above_docs_and_tests(
     src_file = tmp_path / "src" / "http.py"
     src_file.parent.mkdir(parents=True, exist_ok=True)
     src_file.write_text(
-        "def escape_leading_slashes(path: str) -> str:\n"
-        "    return path\n",
+        "def escape_leading_slashes(path: str) -> str:\n" "    return path\n",
         encoding="utf8",
     )
     docs_file = tmp_path / "docs" / "changelog.md"
@@ -148,8 +147,7 @@ def test_run_exact_backend_keeps_repo_relative_path_filters_when_repo_root_colla
     repo_root.mkdir(parents=True, exist_ok=True)
     sample = repo_root / "a_auth_token.py"
     sample.write_text(
-        "def refresh_auth_state():\n"
-        "    return 'token-auth'\n",
+        "def refresh_auth_state():\n" "    return 'token-auth'\n",
         encoding="utf8",
     )
 

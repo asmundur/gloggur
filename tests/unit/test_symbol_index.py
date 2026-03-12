@@ -21,7 +21,9 @@ def _config(tmp_path, *, include_minified_js: bool = False) -> GloggurConfig:
 def test_symbol_index_creates_expected_db_path(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "sample.py").write_text("def alpha(x: int) -> int:\n    return x + 1\n", encoding="utf8")
+    (repo / "sample.py").write_text(
+        "def alpha(x: int) -> int:\n    return x + 1\n", encoding="utf8"
+    )
     indexer = SymbolIndexer(
         repo_root=repo,
         config=_config(tmp_path),
@@ -39,7 +41,9 @@ def test_symbol_index_creates_expected_db_path(tmp_path) -> None:
 def test_symbol_index_skips_unchanged_files_incrementally(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "sample.py").write_text("def alpha(x: int) -> int:\n    return x + 1\n", encoding="utf8")
+    (repo / "sample.py").write_text(
+        "def alpha(x: int) -> int:\n    return x + 1\n", encoding="utf8"
+    )
     indexer = SymbolIndexer(
         repo_root=repo,
         config=_config(tmp_path),
@@ -203,14 +207,54 @@ def test_symbol_index_defs_refs_shape_and_dedup(tmp_path) -> None:
     assert (alpha_ref.start_byte, alpha_ref.end_byte) == span_index.span_for_lines(4, 4)
 
 
+def test_symbol_index_preserves_js_assignment_owner_paths(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    path = repo / "sample.js"
+    path.write_text(
+        "exports.send = function send() {};\n"
+        "module.exports.json = function () {};\n"
+        "proto.use = function (fn) {};\n"
+        "Router.prototype.route = function route(path) {};\n"
+        "app.listen = function listen() {};\n"
+        "const api = { close() {}, parse: function () {}, end: () => {} };\n"
+        "const render = () => {};\n"
+        "items.map(function (x) { return x; });\n",
+        encoding="utf8",
+    )
+    indexer = SymbolIndexer(
+        repo_root=repo,
+        config=_config(tmp_path),
+        parser_registry=ParserRegistry(),
+    )
+    store = SymbolIndexStore(SymbolIndexStoreConfig(repo_root=repo))
+
+    result = indexer.index_path(str(repo))
+
+    defs = [item for item in store.list_occurrences() if item.kind == "def"]
+    tuples = {(item.symbol, item.container) for item in defs}
+    assert result.files_considered == 1
+    assert result.files_changed == 1
+    assert tuples == {
+        ("send", "exports"),
+        ("json", "module.exports"),
+        ("use", "proto"),
+        ("route", "Router.prototype"),
+        ("listen", "app"),
+        ("close", "api"),
+        ("parse", "api"),
+        ("end", "api"),
+        ("render", None),
+    }
+
+
 def test_symbol_index_store_rebuilds_old_schema_when_writable(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     db_path = repo / ".gloggur" / "index" / "symbols.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE occurrences (
                 symbol TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -224,8 +268,7 @@ def test_symbol_index_store_rebuilds_old_schema_when_writable(tmp_path) -> None:
                 language TEXT,
                 last_indexed TEXT NOT NULL
             );
-            """
-        )
+            """)
 
     store = SymbolIndexStore(SymbolIndexStoreConfig(repo_root=repo))
 
@@ -244,8 +287,7 @@ def test_symbol_index_store_marks_old_schema_unavailable_without_rebuild(tmp_pat
     db_path = repo / ".gloggur" / "index" / "symbols.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE occurrences (
                 symbol TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -259,8 +301,7 @@ def test_symbol_index_store_marks_old_schema_unavailable_without_rebuild(tmp_pat
                 language TEXT,
                 last_indexed TEXT NOT NULL
             );
-            """
-        )
+            """)
 
     store = SymbolIndexStore(
         SymbolIndexStoreConfig(repo_root=repo),

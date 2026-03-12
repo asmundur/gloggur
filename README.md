@@ -37,6 +37,7 @@ Gloggur goes beyond search by providing a **reference graph**.  The `graph` comm
 * `search <natural-language>` – retrieve symbols connected through graph edges that best match a description.
 
 Edges have deterministic IDs and types (`CONTAINS`, `DEFINES`, `IMPORTS`, `CALLS`, `REFERENCES`, `TESTS`) to help you traverse and visualise how code elements relate.  This is especially useful when planning refactors or porting subsystems to another language.
+Reference-graph edges are always extracted and stored, but they remain structural metadata by default. Index runs embed symbol chunks eagerly and only embed edge text when you opt in with `gloggur index . --json --embed-graph-edges` or `embed_graph_edges: true`.
 
 ### Semantic reranking
 
@@ -59,6 +60,8 @@ Index your repository from the project root:
 
 ```bash
 gloggur index . --json
+# opt in if you explicitly want semantic edge vectors too
+gloggur index . --json --embed-graph-edges
 ```
 
 Run searches in different modes:
@@ -105,12 +108,13 @@ gloggur inspect . --json
 
 ## Configuration
 
-Place a `.gloggur.yaml` or `.gloggur.json` file in your project root to customise embedding providers, cache location, watch settings and supported file extensions. By default, minified JavaScript (`*.min.js`) is excluded from index/watch runs to avoid noisy vendor artifacts; set `include_minified_js: true` when you explicitly need those files indexed. Environment variables can override any option.  Here is a minimal example:
+Place a `.gloggur.yaml` or `.gloggur.json` file in your project root to customise embedding providers, cache location, watch settings and supported file extensions. By default, minified JavaScript (`*.min.js`) is excluded from index/watch runs to avoid noisy vendor artifacts, and graph edges are stored structurally without semantic embeddings; set `include_minified_js: true` when you explicitly need those files indexed, or `embed_graph_edges: true` (or `GLOGGUR_EMBED_GRAPH_EDGES=true`) when you explicitly want edge vectors. Environment variables can override any option.  Here is a minimal example:
 
 ```yaml
 embedding_provider: openai       # or 'gemini' or 'local'
 cache_dir: .gloggur-cache
 watch_enabled: false
+embed_graph_edges: false         # set true to restore edge embeddings
 include_minified_js: false       # set true to include `*.min.js` files
 supported_extensions:
   - .py
@@ -169,6 +173,8 @@ gloggur extract sample.py 0 42 --json
 
 `extract` requires repo-relative paths under the active workspace root and reads exact raw bytes before decoding with UTF-8 replacement.
 
+`index --json` and `status --json` also include `index_stats`, which separates structural graph counts from embedded vector counts (`graph_edge_count`, `embedded_symbol_vectors`, `embedded_edge_vectors`, `embedded_vector_count`).
+
 Graph commands return `edge_id`, `edge_type`, `from_id`, `to_id`, `file_path`, `line` and `confidence`.  Inspect commands return audit findings per symbol with categories such as missing docstring, parameter mismatch and summary quality.
 
 ## Language Support Contract
@@ -195,7 +201,7 @@ gloggur inspect . --json --warn-on-skipped-extensions
 
 ## Current gotchas
 
-- Language support is baseline, not uniform. Current known construct gaps include JavaScript/TypeScript arrow or assigned function forms, TypeScript type aliases and enums, Go named struct/interface declarations, Rust impl/trait method forms, and Java record/enum declarations. Use `gloggur status --json` or `gloggur parsers check --json` when symbol fidelity matters for a workflow.
+- Language support is baseline, not uniform. Current known construct gaps include TypeScript type aliases and enums, Go named struct/interface declarations, Rust impl/trait method forms, and Java record/enum declarations. Use `gloggur status --json` or `gloggur parsers check --json` when symbol fidelity matters for a workflow.
 - `gloggur inspect . --json` audits source paths by default. Add `--include-tests` and `--include-scripts` when you need a wider repo audit.
 - `gloggur init . --betatester-support --json` enables repo-local support tracing. `gloggur watch init . --json` stays watch-specific. Either command writes repo-local config, so later commands in that workspace may report `security_warning_codes=["untrusted_repo_config"]` because auto-discovered repo config is treated as untrusted by default.
 - This repo's quickstart smoke and most deterministic CI verification use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.

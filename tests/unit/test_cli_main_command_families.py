@@ -875,9 +875,32 @@ def test_inspect_json_symbol_filter_can_reduce_file_to_empty_result(
 @pytest.mark.parametrize(
     ("command", "method_name", "args"),
     [
-        ("neighbors", "neighbors", ["graph", "neighbors", "sym:id", "--json", "--edge-type", "calls", "--direction", "incoming", "--k", "7"]),
-        ("incoming", "incoming", ["graph", "incoming", "sym:id", "--json", "--edge-type", "calls", "--k", "5"]),
-        ("outgoing", "outgoing", ["graph", "outgoing", "sym:id", "--json", "--edge-type", "calls", "--k", "4"]),
+        (
+            "neighbors",
+            "neighbors",
+            [
+                "graph",
+                "neighbors",
+                "sym:id",
+                "--json",
+                "--edge-type",
+                "calls",
+                "--direction",
+                "incoming",
+                "--k",
+                "7",
+            ],
+        ),
+        (
+            "incoming",
+            "incoming",
+            ["graph", "incoming", "sym:id", "--json", "--edge-type", "calls", "--k", "5"],
+        ),
+        (
+            "outgoing",
+            "outgoing",
+            ["graph", "outgoing", "sym:id", "--json", "--edge-type", "calls", "--k", "4"],
+        ),
     ],
 )
 def test_graph_cli_commands_route_to_graph_service(
@@ -892,11 +915,15 @@ def test_graph_cli_commands_route_to_graph_service(
     calls: dict[str, object] = {}
 
     class FakeGraphService:
-        def __init__(self, metadata_store: object, embedding_provider: object | None = None) -> None:
+        def __init__(
+            self, metadata_store: object, embedding_provider: object | None = None
+        ) -> None:
             calls["metadata_store"] = metadata_store
             calls["embedding_provider"] = embedding_provider
 
-        def neighbors(self, symbol_id: str, *, edge_type: str | None, direction: str, k: int) -> dict[str, object]:
+        def neighbors(
+            self, symbol_id: str, *, edge_type: str | None, direction: str, k: int
+        ) -> dict[str, object]:
             calls["neighbors"] = (symbol_id, edge_type, direction, k)
             return {"command": command}
 
@@ -930,7 +957,9 @@ def test_graph_search_uses_provider_override_and_routes_to_service(
     captured: dict[str, object] = {}
 
     class FakeGraphService:
-        def __init__(self, metadata_store: object, embedding_provider: object | None = None) -> None:
+        def __init__(
+            self, metadata_store: object, embedding_provider: object | None = None
+        ) -> None:
             captured["metadata_store"] = metadata_store
             captured["embedding_provider"] = embedding_provider
 
@@ -1196,7 +1225,9 @@ def test_run_coverage_import_wraps_write_failures(
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
-    monkeypatch.setattr(cli_main, "create_coverage_importer", lambda *_args, **_kwargs: FakeImporter())
+    monkeypatch.setattr(
+        cli_main, "create_coverage_importer", lambda *_args, **_kwargs: FakeImporter()
+    )
     monkeypatch.setattr("builtins.open", _fail_output)
 
     with pytest.raises(StorageIOError) as exc_info:
@@ -1229,11 +1260,21 @@ def test_coverage_import_plain_output_reports_summary(
             }
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
-    monkeypatch.setattr(cli_main, "create_coverage_importer", lambda *_args, **_kwargs: FakeImporter())
+    monkeypatch.setattr(
+        cli_main, "create_coverage_importer", lambda *_args, **_kwargs: FakeImporter()
+    )
 
     result = runner.invoke(
         cli_main.cli,
-        ["coverage", "import", str(source_file), "--importer", "json", "--output", str(output_file)],
+        [
+            "coverage",
+            "import",
+            str(source_file),
+            "--importer",
+            "json",
+            "--output",
+            str(output_file),
+        ],
     )
 
     assert result.exit_code == 0, result.output

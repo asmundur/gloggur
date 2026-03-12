@@ -1334,20 +1334,91 @@ def _canonicalize_embedding_profile(profile: str | None) -> str | None:
     if not separator:
         return normalized
     normalized_provider = provider.strip()
-    normalized_model = model.strip()
+    normalized_model, option_separator, raw_options = model.strip().partition("|")
     if normalized_provider.lower() in {"local", "test"}:
         normalized_model = _canonicalize_hf_snapshot_model(normalized_model)
-    return f"{normalized_provider}:{normalized_model}"
+    if not option_separator:
+        return f"{normalized_provider}:{normalized_model}"
+    normalized_options = sorted(
+        option.strip() for option in raw_options.split("|") if option.strip()
+    )
+    if not normalized_options:
+        return f"{normalized_provider}:{normalized_model}"
+    return f"{normalized_provider}:{normalized_model}|{'|'.join(normalized_options)}"
+
+
+def _embedding_profile_parts(profile: str | None) -> tuple[str, str, tuple[str, ...]] | None:
+    """Split a canonical embedding profile into provider, model, and sorted options."""
+    normalized = _canonicalize_embedding_profile(profile)
+    if normalized is None:
+        return None
+    provider, separator, model_and_options = normalized.partition(":")
+    if not separator:
+        return normalized, "", ()
+    model, option_separator, raw_options = model_and_options.partition("|")
+    if not option_separator:
+        return provider, model, ()
+    options = tuple(sorted(option for option in raw_options.split("|") if option))
+    return provider, model, options
+
+
+def _legacy_unsuffixed_edge_profile_is_compatible(
+    cached_profile: str | None,
+    expected_profile: str,
+) -> bool:
+    """Treat pre-flag cache profiles as readable when only embed_graph_edges is missing."""
+    cached_parts = _embedding_profile_parts(cached_profile)
+    expected_parts = _embedding_profile_parts(expected_profile)
+    if cached_parts is None or expected_parts is None:
+        return False
+
+    cached_provider, cached_model, cached_options = cached_parts
+    expected_provider, expected_model, expected_options = expected_parts
+    if (cached_provider, cached_model) != (expected_provider, expected_model):
+        return False
+    if any(option.startswith("embed_graph_edges=") for option in cached_options):
+        return False
+
+    expected_non_edge_options = tuple(
+        option for option in expected_options if not option.startswith("embed_graph_edges=")
+    )
+    return (
+        cached_options == expected_non_edge_options
+        and expected_non_edge_options != expected_options
+    )
+
+
+def _normalized_cached_embedding_profile(
+    cached_profile: str | None,
+    expected_profile: str,
+    *,
+    allow_legacy_unsuffixed_edges: bool = False,
+) -> str | None:
+    """Normalize cached profiles, optionally aliasing legacy unsuffixed edge profiles."""
+    normalized_cached = _canonicalize_embedding_profile(cached_profile)
+    normalized_expected = _canonicalize_embedding_profile(expected_profile) or expected_profile
+    if allow_legacy_unsuffixed_edges and _legacy_unsuffixed_edge_profile_is_compatible(
+        normalized_cached,
+        normalized_expected,
+    ):
+        return normalized_expected
+    return normalized_cached
 
 
 def _profile_reindex_reason(
     metadata_present: bool,
     cached_profile: str | None,
     expected_profile: str,
+    *,
+    allow_legacy_unsuffixed_edges: bool = False,
 ) -> str | None:
     """Return a reason why cached index data should be rebuilt."""
     normalized_expected = _canonicalize_embedding_profile(expected_profile) or expected_profile
-    normalized_cached = _canonicalize_embedding_profile(cached_profile)
+    normalized_cached = _normalized_cached_embedding_profile(
+        cached_profile,
+        normalized_expected,
+        allow_legacy_unsuffixed_edges=allow_legacy_unsuffixed_edges,
+    )
     if cached_profile is None:
         if metadata_present:
             return "cached embedding profile is unknown"
@@ -1562,7 +1633,11 @@ def _build_resume_contract(
     normalized_expected_profile = (
         _canonicalize_embedding_profile(expected_profile) or expected_profile
     )
-    normalized_cached_profile = _canonicalize_embedding_profile(cached_profile)
+    normalized_cached_profile = _normalized_cached_embedding_profile(
+        cached_profile,
+        normalized_expected_profile,
+        allow_legacy_unsuffixed_edges=True,
+    )
     normalized_build_state = _normalize_build_state_payload(build_state)
     metadata_present = metadata is not None
     metadata_signal = _metadata_reindex_signal(
@@ -1577,6 +1652,7 @@ def _build_resume_contract(
         metadata_present,
         normalized_cached_profile,
         normalized_expected_profile,
+        allow_legacy_unsuffixed_edges=True,
     )
     tool_version_reason = _tool_version_reindex_reason(
         last_success_tool_version=last_success_tool_version,
@@ -1758,7 +1834,11 @@ def _build_search_health_snapshot(
     get_build_state = getattr(cache, "get_build_state", None)
     raw_build_state = get_build_state() if callable(get_build_state) else None
     build_state, stale_build_state = _classify_build_state_for_health(raw_build_state)
-    cached_profile = _canonicalize_embedding_profile(cache.get_index_profile())
+    cached_profile = _normalized_cached_embedding_profile(
+        cache.get_index_profile(),
+        expected_profile,
+        allow_legacy_unsuffixed_edges=True,
+    )
     last_success_tool_version = cache.get_last_success_tool_version()
     metadata_reason = _metadata_reindex_reason(
         metadata is not None,
@@ -1769,6 +1849,7 @@ def _build_search_health_snapshot(
         metadata_present=metadata is not None,
         cached_profile=cached_profile,
         expected_profile=expected_profile,
+        allow_legacy_unsuffixed_edges=True,
     )
     tool_version_reason = _tool_version_reindex_reason(
         last_success_tool_version=last_success_tool_version,
@@ -2859,6 +2940,7 @@ def _build_status_payload(
         "language_support_contract": build_language_support_contract(config=config),
         "raw_total_symbols": raw_total_symbols,
         "total_symbols": total_symbols,
+        "index_stats": _cache_index_stats(cache),
         **resume_contract,
     }
     return _decorate_payload_with_security_metadata(payload, config=config)
@@ -2870,6 +2952,30 @@ def _cache_total_symbols(cache: CacheManager) -> int:
     if callable(count_symbols):
         return int(count_symbols())
     return len(cache.list_symbols())
+
+
+def _cache_index_stats(cache: object) -> dict[str, int]:
+    """Return normalized index stats with compatibility for cache test doubles."""
+    get_index_stats = getattr(cache, "get_index_stats", None)
+    if callable(get_index_stats):
+        raw_payload = get_index_stats()
+        if isinstance(raw_payload, dict):
+            return {
+                "symbol_count": int(raw_payload.get("symbol_count", 0) or 0),
+                "chunk_count": int(raw_payload.get("chunk_count", 0) or 0),
+                "graph_edge_count": int(raw_payload.get("graph_edge_count", 0) or 0),
+                "embedded_symbol_vectors": int(raw_payload.get("embedded_symbol_vectors", 0) or 0),
+                "embedded_edge_vectors": int(raw_payload.get("embedded_edge_vectors", 0) or 0),
+                "embedded_vector_count": int(raw_payload.get("embedded_vector_count", 0) or 0),
+            }
+    return {
+        "symbol_count": _cache_total_symbols(cache),
+        "chunk_count": 0,
+        "graph_edge_count": 0,
+        "embedded_symbol_vectors": 0,
+        "embedded_edge_vectors": 0,
+        "embedded_vector_count": 0,
+    }
 
 
 def _create_status_payload(
@@ -3917,6 +4023,11 @@ def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str,
 @click.option("--json", "as_json", is_flag=True, default=False)
 @click.option("--embedding-provider", type=str, default=None)
 @click.option(
+    "--embed-graph-edges/--no-embed-graph-edges",
+    default=None,
+    help="Override whether graph edges are embedded during indexing.",
+)
+@click.option(
     "--allow-partial",
     is_flag=True,
     default=False,
@@ -3940,6 +4051,7 @@ def index(
     config_path: str | None,
     as_json: bool,
     embedding_provider: str | None,
+    embed_graph_edges: bool | None,
     allow_partial: bool,
     debug_timings: bool,
     warn_on_skipped_extensions: bool,
@@ -3950,6 +4062,8 @@ def index(
     config = _normalize_watch_paths(_load_config(resolved_config_path), resolved_config_path)
     if embedding_provider:
         config.embedding_provider = embedding_provider
+    if embed_graph_edges is not None:
+        config.embed_graph_edges = embed_graph_edges
     skipped_extension_diagnostics = _collect_index_skipped_extension_diagnostics(
         path=path,
         config=config,
@@ -4171,6 +4285,8 @@ def index(
                     }
                     payload["duration_ms"] = command_duration_ms
                     payload["stages"] = stage_recorder.as_payload()
+                    if active_cache is not None:
+                        payload["index_stats"] = _cache_index_stats(active_cache)
                     if as_json and debug_timings:
                         payload["slow_files"] = _build_slow_files_payload(result.file_timings)
                     _attach_skipped_extension_diagnostics(
@@ -4461,6 +4577,8 @@ def index(
                 }
                 result["duration_ms"] = command_duration_ms
                 result["stages"] = stage_recorder.as_payload()
+                if active_cache is not None:
+                    result["index_stats"] = _cache_index_stats(active_cache)
                 if as_json and debug_timings and execution_timing is not None:
                     result["slow_files"] = [execution_timing.as_payload()]
                 _attach_skipped_extension_diagnostics(

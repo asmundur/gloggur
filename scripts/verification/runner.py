@@ -22,9 +22,11 @@ from scripts.verification.reporter import Reporter, TestResult
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class RetryConfig:
     """Retry configuration for command execution."""
+
     max_attempts: int = 1  # 1 means no retry
     initial_backoff_ms: float = 1000.0
     max_backoff_ms: float = 30000.0
@@ -37,6 +39,7 @@ class RetryConfig:
 @dataclass
 class CommandResult:
     """Result of a command execution."""
+
     command: List[str]
     stdout: str
     stderr: str
@@ -51,6 +54,7 @@ class CommandResult:
 
 class MissingDependencyError(RuntimeError):
     """Raised when a required dependency is missing."""
+
     def __init__(self, module: str, message: str) -> None:
         """Store missing module details and message."""
         super().__init__(message)
@@ -59,6 +63,7 @@ class MissingDependencyError(RuntimeError):
 
 class CommandRunner:
     """Run CLI commands with retries and JSON parsing."""
+
     def __init__(
         self,
         base_cmd: Optional[List[str]] = None,
@@ -257,7 +262,9 @@ class CommandRunner:
         stdout = "".join(stdout_lines)
         stderr = "".join(stderr_lines)
         if timed_out:
-            stderr = f"WARNING: Command timed out after {timeout}s; partial output captured.\n{stderr}"
+            stderr = (
+                f"WARNING: Command timed out after {timeout}s; partial output captured.\n{stderr}"
+            )
         return stdout, stderr, timed_out
 
     def _execute_with_retry(
@@ -268,6 +275,7 @@ class CommandRunner:
         capture_json: bool,
     ) -> CommandResult:
         """Execute a command with retry logic."""
+
         def should_retry_exit_code(exit_code: int) -> bool:
             """Return True if the exit code should trigger a retry."""
             predicate = self.retry_config.retryable_exit_codes
@@ -284,7 +292,8 @@ class CommandRunner:
         def sleep_backoff(attempt_index: int) -> None:
             """Sleep using exponential backoff."""
             backoff_delay = min(
-                self.retry_config.initial_backoff_ms * (self.retry_config.backoff_multiplier**attempt_index),
+                self.retry_config.initial_backoff_ms
+                * (self.retry_config.backoff_multiplier**attempt_index),
                 self.retry_config.max_backoff_ms,
             )
             time.sleep(backoff_delay / 1000)
@@ -318,7 +327,11 @@ class CommandRunner:
                 is_success = completed.returncode == 0
                 should_retry = (not is_success) and should_retry_exit_code(completed.returncode)
                 if should_retry and attempt + 1 < max_attempts:
-                    logger.warning("Command failed (exit %s), retrying attempt %d", completed.returncode, attempt + 2)
+                    logger.warning(
+                        "Command failed (exit %s), retrying attempt %d",
+                        completed.returncode,
+                        attempt + 2,
+                    )
                     sleep_backoff(attempt)
                     continue
                 json_data = None
@@ -351,7 +364,9 @@ class CommandRunner:
                         command=full_cmd,
                         duration_ms=duration_ms,
                         timeout_s=timeout,
-                        stdout=stdout if isinstance(stdout, str) else stdout.decode("utf8", "ignore"),
+                        stdout=(
+                            stdout if isinstance(stdout, str) else stdout.decode("utf8", "ignore")
+                        ),
                         stderr=stderr_text,
                     )
                 logger.error("Command timed out after %.2fs", timeout)
@@ -381,19 +396,28 @@ class CommandRunner:
             raise last_exc
         raise RuntimeError("Command execution failed without returning a result.")
 
-    def run_index(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+    def run_index(
+        self, path: str, timeout: Optional[float] = None, **kwargs: object
+    ) -> Dict[str, object]:
         """Run the index command and return JSON output."""
         cmd = ["index", path, "--json"]
         config_path = kwargs.get("config_path")
         embedding_provider = kwargs.get("embedding_provider")
+        embed_graph_edges = kwargs.get("embed_graph_edges")
         if config_path:
             cmd += ["--config", str(config_path)]
         if embedding_provider:
             cmd += ["--embedding-provider", str(embedding_provider)]
+        if embed_graph_edges is True:
+            cmd += ["--embed-graph-edges"]
+        elif embed_graph_edges is False:
+            cmd += ["--no-embed-graph-edges"]
         result = self.run_command(cmd, capture_json=True, timeout=timeout)
         return self._require_json(result)
 
-    def run_search(self, query: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+    def run_search(
+        self, query: str, timeout: Optional[float] = None, **kwargs: object
+    ) -> Dict[str, object]:
         """Run the search command and return JSON output."""
         cmd = ["search", query, "--json"]
         config_path = kwargs.get("config_path")
@@ -421,7 +445,9 @@ class CommandRunner:
         payload = self._require_json(result)
         return self._with_search_compat(payload)
 
-    def run_inspect(self, path: str, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+    def run_inspect(
+        self, path: str, timeout: Optional[float] = None, **kwargs: object
+    ) -> Dict[str, object]:
         """Run the inspect command and return JSON output."""
         cmd = ["inspect", path, "--json"]
         config_path = kwargs.get("config_path")
@@ -439,7 +465,9 @@ class CommandRunner:
         result = self.run_command(cmd, capture_json=True, timeout=timeout)
         return self._require_json(result)
 
-    def run_clear_cache(self, timeout: Optional[float] = None, **kwargs: object) -> Dict[str, object]:
+    def run_clear_cache(
+        self, timeout: Optional[float] = None, **kwargs: object
+    ) -> Dict[str, object]:
         """Run the clear-cache command and return JSON output."""
         cmd = ["clear-cache", "--json"]
         config_path = kwargs.get("config_path")
@@ -502,9 +530,7 @@ class CommandRunner:
                 raise MissingDependencyError(module, message)
             timeout_info = ""
             if result.timed_out:
-                timeout_info = (
-                    f"Timeout: Command timed out after {result.timeout_used}s. Partial output may be available.\n"
-                )
+                timeout_info = f"Timeout: Command timed out after {result.timeout_used}s. Partial output may be available.\n"
             retry_info = ""
             if result.retry_attempts > 0:
                 retry_info = f"Retry Attempts: {result.retry_attempts}\n"
@@ -569,7 +595,11 @@ class CommandRunner:
                         "error": str(exc),
                     }
                 )
-        response: Dict[str, object] = {"stream": True, "hits": results, "parsing_errors": parsing_errors}
+        response: Dict[str, object] = {
+            "stream": True,
+            "hits": results,
+            "parsing_errors": parsing_errors,
+        }
         if total_lines > 0 and parsing_errors:
             failure_rate = len(parsing_errors) / total_lines
             if failure_rate > 0.10:
@@ -647,6 +677,7 @@ class CommandRunner:
 @dataclass(frozen=True)
 class TestTask:
     """Unit of work for the suite orchestrator."""
+
     name: str
     run: Callable[[], TestResult]
     section: str = "General"
@@ -655,6 +686,7 @@ class TestTask:
 @dataclass(frozen=True)
 class TestOutcome:
     """Outcome of a test task."""
+
     name: str
     result: TestResult
     section: str
@@ -662,6 +694,7 @@ class TestOutcome:
 
 class TestOrchestrator:
     """Run verification tasks sequentially or in parallel."""
+
     def __init__(self, reporter: Reporter, max_workers: Optional[int] = None) -> None:
         """Initialize the orchestrator."""
         self.reporter = reporter
@@ -674,7 +707,9 @@ class TestOrchestrator:
         if self.max_workers == 1:
             for task in tasks:
                 outcome = self._run_task(task)
-                self.reporter.add_test_result_to_section(outcome.section, outcome.name, outcome.result)
+                self.reporter.add_test_result_to_section(
+                    outcome.section, outcome.name, outcome.result
+                )
                 outcomes.append(outcome)
                 self._logger.info("Task completed: %s (section=%s)", outcome.name, outcome.section)
             return outcomes
@@ -686,7 +721,9 @@ class TestOrchestrator:
                 future_map[future] = task
             for future in as_completed(future_map):
                 outcome = future.result()
-                self.reporter.add_test_result_to_section(outcome.section, outcome.name, outcome.result)
+                self.reporter.add_test_result_to_section(
+                    outcome.section, outcome.name, outcome.result
+                )
                 outcomes.append(outcome)
                 self._logger.info("Task completed: %s (section=%s)", outcome.name, outcome.section)
         return outcomes

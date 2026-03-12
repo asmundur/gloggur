@@ -404,9 +404,9 @@ def test_interrupted_index_run_preserves_needs_reindex_signal() -> None:
                     assert payload["needs_reindex"] is False
                     break
                 time.sleep(0.05)
-            assert saw_building_state, (
-                "Did not observe staged build state after metadata-delete pause sentinel"
-            )
+            assert (
+                saw_building_state
+            ), "Did not observe staged build state after metadata-delete pause sentinel"
         finally:
             interrupted.terminate()
             interrupted.wait(timeout=15)

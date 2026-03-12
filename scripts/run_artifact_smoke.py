@@ -271,9 +271,7 @@ class ArtifactSmokeHarness:
             raise StageFailure(
                 code=spec.failure_code,
                 remediation=spec.remediation,
-                detail=(
-                    f"Command timed out after {self._timeout_seconds:.1f}s: {' '.join(cmd)}"
-                ),
+                detail=(f"Command timed out after {self._timeout_seconds:.1f}s: {' '.join(cmd)}"),
                 context={"args": args, "timeout_seconds": self._timeout_seconds},
             ) from exc
 
@@ -563,7 +561,9 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run artifact publish/restore smoke workflow with stage-specific diagnostics."
     )
-    parser.add_argument("--repo", type=Path, default=None, help="Optional existing repository path.")
+    parser.add_argument(
+        "--repo", type=Path, default=None, help="Optional existing repository path."
+    )
     parser.add_argument("--format", choices=("json",), default="json")
     parser.add_argument(
         "--keep-artifacts",

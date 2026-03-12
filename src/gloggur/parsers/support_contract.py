@@ -23,8 +23,11 @@ _LANGUAGE_CONSTRUCT_TIERS: dict[str, dict[str, str]] = {
         "function_declaration": "baseline",
         "class_declaration": "baseline",
         "method_definition": "baseline",
-        "arrow_function_assignment": "known_gap",
-        "function_expression_assignment": "known_gap",
+        "arrow_function_assignment": "baseline",
+        "function_expression_assignment": "baseline",
+        "commonjs_export_assignment": "baseline",
+        "prototype_member_assignment": "baseline",
+        "object_binding_property": "baseline",
     },
     "typescript": {
         "function_declaration": "baseline",
@@ -32,11 +35,11 @@ _LANGUAGE_CONSTRUCT_TIERS: dict[str, dict[str, str]] = {
         "class_declaration": "baseline",
         "type_alias": "known_gap",
         "enum_declaration": "known_gap",
-        "typed_arrow_function_assignment": "known_gap",
+        "typed_arrow_function_assignment": "baseline",
     },
     "tsx": {
         "function_declaration_component": "baseline",
-        "arrow_component_assignment": "known_gap",
+        "arrow_component_assignment": "baseline",
     },
     "go": {
         "function_declaration": "baseline",
@@ -62,18 +65,12 @@ _KNOWN_GAPS_BY_LANGUAGE: dict[str, list[str]] = {
     "python": [
         "decorated methods such as @property may be classified as function instead of method",
     ],
-    "javascript": [
-        "arrow functions assigned to variables are not extracted as symbols",
-        "function expressions assigned to variables are not extracted as symbols",
-    ],
+    "javascript": [],
     "typescript": [
         "type alias declarations are not extracted as symbols",
         "enum declarations are not extracted as symbols",
-        "typed arrow functions assigned to variables are not extracted as symbols",
     ],
-    "tsx": [
-        "arrow function components assigned to variables are not extracted as symbols",
-    ],
+    "tsx": [],
     "go": [
         "named struct/interface type declarations are not extracted as symbols",
         "receiver methods do not include receiver type in fqname",
@@ -142,7 +139,30 @@ _PARSER_CHECK_CASES: tuple[ParserCheckCase, ...] = (
         path="sample.js",
         source="const add = (a, b) => a + b;\n",
         expected_symbols=(("function", "add"),),
-        known_gap=True,
+    ),
+    ParserCheckCase(
+        case_id="javascript.commonjs_and_member_assignments",
+        language="javascript",
+        path="sample.js",
+        source=(
+            "exports.send = function send() {};\n"
+            "module.exports.json = function () {};\n"
+            "proto.use = function (fn) {};\n"
+            "Router.prototype.route = function route(path) {};\n"
+        ),
+        expected_symbols=(
+            ("function", "send"),
+            ("function", "json"),
+            ("method", "use"),
+            ("method", "route"),
+        ),
+    ),
+    ParserCheckCase(
+        case_id="javascript.object_binding_methods",
+        language="javascript",
+        path="sample.js",
+        source="const api = { send() {}, json: function () {}, end: () => {} };\n",
+        expected_symbols=(("method", "send"), ("method", "json"), ("method", "end")),
     ),
     ParserCheckCase(
         case_id="typescript.interface_and_function",
@@ -175,7 +195,13 @@ _PARSER_CHECK_CASES: tuple[ParserCheckCase, ...] = (
         path="sample.tsx",
         source="const Inline = () => <span>x</span>;\n",
         expected_symbols=(("function", "Inline"),),
-        known_gap=True,
+    ),
+    ParserCheckCase(
+        case_id="typescript.typed_arrow_assignment",
+        language="typescript",
+        path="sample.ts",
+        source="const add: (a: number, b: number) => number = (a, b) => a + b;\n",
+        expected_symbols=(("function", "add"),),
     ),
     ParserCheckCase(
         case_id="go.function_and_method",

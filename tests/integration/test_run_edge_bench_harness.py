@@ -84,7 +84,10 @@ def test_run_edge_bench_reports_threshold_failure_code(tmp_path: Path) -> None:
                         "cold_index_duration": {"duration_ms": 1.0},
                         "unchanged_incremental_duration": {"duration_ms": 1.0},
                         "search_average_latency": {"duration_ms": 1.0},
-                        "index_throughput": {"throughput": 100000.0, "throughput_unit": "symbols/s"},
+                        "index_throughput": {
+                            "throughput": 100000.0,
+                            "throughput_unit": "symbols/s",
+                        },
                     }
                 }
             }

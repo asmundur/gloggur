@@ -419,6 +419,51 @@ class CacheManager:
             row = conn.execute("SELECT COUNT(*) AS count FROM symbols").fetchone()
             return int(row["count"] if row else 0)
 
+    def count_chunks(self) -> int:
+        """Return the number of cached symbol chunks."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM chunks").fetchone()
+            return int(row["count"] if row else 0)
+
+    def count_edges(self) -> int:
+        """Return the number of cached graph edges."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM edges").fetchone()
+            return int(row["count"] if row else 0)
+
+    def count_embedded_chunks(self) -> int:
+        """Return the number of chunk rows with persisted embedding vectors."""
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT COUNT(*) AS count
+                FROM chunks
+                WHERE embedding_vector IS NOT NULL AND embedding_vector != ''
+                """).fetchone()
+            return int(row["count"] if row else 0)
+
+    def count_embedded_edges(self) -> int:
+        """Return the number of edge rows with persisted embedding vectors."""
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT COUNT(*) AS count
+                FROM edges
+                WHERE embedding_vector IS NOT NULL AND embedding_vector != ''
+                """).fetchone()
+            return int(row["count"] if row else 0)
+
+    def get_index_stats(self) -> dict[str, int]:
+        """Return persisted symbol/chunk/edge/vector totals for the active cache."""
+        embedded_symbol_vectors = self.count_embedded_chunks()
+        embedded_edge_vectors = self.count_embedded_edges()
+        return {
+            "symbol_count": self.count_symbols(),
+            "chunk_count": self.count_chunks(),
+            "graph_edge_count": self.count_edges(),
+            "embedded_symbol_vectors": embedded_symbol_vectors,
+            "embedded_edge_vectors": embedded_edge_vectors,
+            "embedded_vector_count": embedded_symbol_vectors + embedded_edge_vectors,
+        }
+
     def list_file_paths(self) -> list[str]:
         """Return all indexed file paths in deterministic order."""
         with self._connect() as conn:

@@ -19,9 +19,9 @@ def my_function(data):
     return result
 """
     symbols = python_parser.extract_symbols("test.py", source)
-    
+
     assert len(symbols) == 1
     func_symbol = symbols[0]
-    
+
     expected_calls = ["helper", "json.loads", "print"]
     assert func_symbol.calls == expected_calls

@@ -771,7 +771,9 @@ def test_search_router_search_constraints_adapter_preserves_parity(
         config=SearchRouterConfig(enabled_backends=("exact",)),
     )
     intent = SearchIntent(path_prefix="src", max_snippets=1, max_files=1, time_budget_ms=200)
-    constraints = SearchConstraints(path_prefix="src", max_snippets=1, max_files=1, time_budget_ms=200)
+    constraints = SearchConstraints(
+        path_prefix="src", max_snippets=1, max_files=1, time_budget_ms=200
+    )
 
     pack_with_intent = router.search(query="parity", intent=intent, mode="exact")
     pack_with_constraints = router.search(query="parity", constraints=constraints, mode="exact")

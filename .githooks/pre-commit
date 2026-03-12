@@ -4,7 +4,7 @@ set -eu
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
 
-TARGET_FILE="gloggur/embeddings/base.py"
+TARGET_FILE="src/gloggur/embeddings/base.py"
 OUTPUT_FILE="docs/semantic-search-embedding-breakdown-base.md"
 
 if [ ! -x ".venv/bin/python" ]; then
@@ -17,13 +17,16 @@ else
   fi
 
   if git diff --cached --name-only --diff-filter=ACMR | grep -Eq \
-    '^(generate_embedding_breakdown\.py|gloggur/embeddings/base\.py|gloggur/indexer/indexer\.py|gloggur/parsers/treesitter_parser\.py|gloggur/embeddings/(base|factory|local|openai|gemini)\.py|gloggur/config\.py)$'; then
+    '^(generate_embedding_breakdown\.py|src/gloggur/embeddings/base\.py|src/gloggur/indexer/indexer\.py|src/gloggur/parsers/treesitter_parser\.py|src/gloggur/embeddings/(base|factory|local|openai|gemini)\.py|src/gloggur/config\.py)$'; then
     NEEDS_REFRESH=1
   fi
 
   if [ "${NEEDS_REFRESH}" -ne 0 ]; then
     echo "Refreshing semantic embedding trace for ${TARGET_FILE}..."
-    .venv/bin/python generate_embedding_breakdown.py "${TARGET_FILE}" --output "${OUTPUT_FILE}"
+    .venv/bin/python generate_embedding_breakdown.py \
+      "${TARGET_FILE}" \
+      --embedding-provider test \
+      --output "${OUTPUT_FILE}"
     git add "${OUTPUT_FILE}"
     echo "Updated and auto-staged ${OUTPUT_FILE}"
   fi

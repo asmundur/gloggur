@@ -4,7 +4,11 @@ import subprocess
 
 import pytest
 
-from scripts.run_reference_agent_eval import _build_eval_summary, _expand_top_k, execute_reference_loop
+from scripts.run_reference_agent_eval import (
+    _build_eval_summary,
+    _expand_top_k,
+    execute_reference_loop,
+)
 
 
 def test_execute_reference_loop_retries_once_then_succeeds() -> None:

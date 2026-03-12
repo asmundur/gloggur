@@ -349,7 +349,9 @@ class SmokeHarness:
                     detail=f"Unknown stage requested: {spec.name}",
                 )
             duration_ms = int((time.perf_counter() - start) * 1000)
-            return StageResult(name=spec.name, status="passed", duration_ms=duration_ms, context=context)
+            return StageResult(
+                name=spec.name, status="passed", duration_ms=duration_ms, context=context
+            )
         except StageFailure as failure:
             duration_ms = int((time.perf_counter() - start) * 1000)
             return StageResult(
@@ -455,7 +457,9 @@ class SmokeHarness:
                     break
 
                 error_count = int(last_payload.get("error_count", 0))
-                batch_failed = int(last_batch.get("failed", 0)) if isinstance(last_batch, dict) else 0
+                batch_failed = (
+                    int(last_batch.get("failed", 0)) if isinstance(last_batch, dict) else 0
+                )
                 if error_count > 0 or batch_failed > 0:
                     raise StageFailure(
                         code=spec.failure_code,
@@ -611,14 +615,18 @@ class SmokeHarness:
                 )
                 stage_results, failed = _execute_stage_plan(
                     STAGE_SPECS,
-                    lambda spec: first_failure if spec.name == first.name else StageResult(
-                        name=spec.name,
-                        status="not_run",
-                        duration_ms=0,
-                        failure_code="blocked_by_prior_stage_failure",
-                        remediation="Fix the previous failed stage and rerun the smoke harness.",
-                        detail=f"Blocked by {first.name} ({first_failure.failure_code})",
-                        context={"blocked_by_stage": first.name},
+                    lambda spec: (
+                        first_failure
+                        if spec.name == first.name
+                        else StageResult(
+                            name=spec.name,
+                            status="not_run",
+                            duration_ms=0,
+                            failure_code="blocked_by_prior_stage_failure",
+                            remediation="Fix the previous failed stage and rerun the smoke harness.",
+                            detail=f"Blocked by {first.name} ({first_failure.failure_code})",
+                            context={"blocked_by_stage": first.name},
+                        )
                     ),
                 )
         finally:
@@ -685,7 +693,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run full Gloggur smoke workflow with stage-specific diagnostics."
     )
-    parser.add_argument("--repo", type=Path, default=None, help="Use an existing repo path instead of fixture generation.")
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=None,
+        help="Use an existing repo path instead of fixture generation.",
+    )
     parser.add_argument("--format", choices=["json", "markdown"], default="markdown")
     parser.add_argument("--output", type=Path, default=None, help="Write output to a file path.")
     parser.add_argument(

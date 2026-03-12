@@ -76,8 +76,7 @@ def test_core_commands_fail_loudly_when_cache_parent_is_not_writable(
     repo = root / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "sample.py").write_text(
-        "def add(a, b):\n"
-        "    return a + b\n",
+        "def add(a, b):\n" "    return a + b\n",
         encoding="utf8",
     )
 

@@ -98,6 +98,7 @@ class GraphEdgeExtractor:
         candidate_symbols: list[Symbol],
         repo_id: str,
         commit: str,
+        include_text: bool = True,
     ) -> list[EdgeRecord]:
         """Extract DEFINES/CONTAINS/IMPORTS/CALLS/REFERENCES/TESTS edges for one file."""
         combined = self._build_symbol_index(
@@ -127,7 +128,7 @@ class GraphEdgeExtractor:
             to_kind: str,
             line: int,
             confidence: float,
-            text: str,
+            text: str | None,
         ) -> None:
             key = (edge_type, from_id, to_id, path, line)
             if key in seen:
@@ -168,13 +169,17 @@ class GraphEdgeExtractor:
                 to_kind=symbol.kind,
                 line=symbol.start_line,
                 confidence=1.0,
-                text=self._edge_text(
-                    edge_type="DEFINES",
-                    from_id=file_node_id,
-                    to_id=symbol.id,
-                    file_path=path,
-                    line=symbol.start_line,
-                    confidence=1.0,
+                text=(
+                    self._edge_text(
+                        edge_type="DEFINES",
+                        from_id=file_node_id,
+                        to_id=symbol.id,
+                        file_path=path,
+                        line=symbol.start_line,
+                        confidence=1.0,
+                    )
+                    if include_text
+                    else None
                 ),
             )
             if symbol.container_id:
@@ -186,13 +191,17 @@ class GraphEdgeExtractor:
                     to_kind=symbol.kind,
                     line=symbol.start_line,
                     confidence=1.0,
-                    text=self._edge_text(
-                        edge_type="CONTAINS",
-                        from_id=symbol.container_id,
-                        to_id=symbol.id,
-                        file_path=path,
-                        line=symbol.start_line,
-                        confidence=1.0,
+                    text=(
+                        self._edge_text(
+                            edge_type="CONTAINS",
+                            from_id=symbol.container_id,
+                            to_id=symbol.id,
+                            file_path=path,
+                            line=symbol.start_line,
+                            confidence=1.0,
+                        )
+                        if include_text
+                        else None
                     ),
                 )
 
@@ -212,13 +221,17 @@ class GraphEdgeExtractor:
                     to_kind=resolved.target_kind,
                     line=symbol.start_line,
                     confidence=resolved.confidence,
-                    text=self._edge_text(
-                        edge_type="CALLS",
-                        from_id=symbol.id,
-                        to_id=resolved.target_id,
-                        file_path=path,
-                        line=symbol.start_line,
-                        confidence=resolved.confidence,
+                    text=(
+                        self._edge_text(
+                            edge_type="CALLS",
+                            from_id=symbol.id,
+                            to_id=resolved.target_id,
+                            file_path=path,
+                            line=symbol.start_line,
+                            confidence=resolved.confidence,
+                        )
+                        if include_text
+                        else None
                     ),
                 )
 
@@ -241,13 +254,17 @@ class GraphEdgeExtractor:
                     to_kind=resolved_reference.target_kind,
                     line=symbol.start_line,
                     confidence=reference_confidence,
-                    text=self._edge_text(
-                        edge_type="REFERENCES",
-                        from_id=symbol.id,
-                        to_id=resolved_reference.target_id,
-                        file_path=path,
-                        line=symbol.start_line,
-                        confidence=reference_confidence,
+                    text=(
+                        self._edge_text(
+                            edge_type="REFERENCES",
+                            from_id=symbol.id,
+                            to_id=resolved_reference.target_id,
+                            file_path=path,
+                            line=symbol.start_line,
+                            confidence=reference_confidence,
+                        )
+                        if include_text
+                        else None
                     ),
                 )
 
@@ -267,13 +284,17 @@ class GraphEdgeExtractor:
                     to_kind=symbol.kind,
                     line=symbol.start_line,
                     confidence=resolved_test.confidence,
-                    text=self._edge_text(
-                        edge_type="TESTS",
-                        from_id=resolved_test.target_id,
-                        to_id=symbol.id,
-                        file_path=path,
-                        line=symbol.start_line,
-                        confidence=resolved_test.confidence,
+                    text=(
+                        self._edge_text(
+                            edge_type="TESTS",
+                            from_id=resolved_test.target_id,
+                            to_id=symbol.id,
+                            file_path=path,
+                            line=symbol.start_line,
+                            confidence=resolved_test.confidence,
+                        )
+                        if include_text
+                        else None
                     ),
                 )
 
@@ -294,13 +315,17 @@ class GraphEdgeExtractor:
                 to_kind=resolved_import.target_kind,
                 line=import_line,
                 confidence=max(0.2, resolved_import.confidence),
-                text=self._edge_text(
-                    edge_type="IMPORTS",
-                    from_id=file_node_id,
-                    to_id=resolved_import.target_id,
-                    file_path=path,
-                    line=import_line,
-                    confidence=max(0.2, resolved_import.confidence),
+                text=(
+                    self._edge_text(
+                        edge_type="IMPORTS",
+                        from_id=file_node_id,
+                        to_id=resolved_import.target_id,
+                        file_path=path,
+                        line=import_line,
+                        confidence=max(0.2, resolved_import.confidence),
+                    )
+                    if include_text
+                    else None
                 ),
             )
 

@@ -35,7 +35,7 @@ from gloggur.cli.main import (
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.io_failures import StorageIOError
-from gloggur.models import IndexMetadata, Symbol
+from gloggur.models import EdgeRecord, IndexMetadata, Symbol, SymbolChunk
 from gloggur.search import attach_legacy_search_contract
 from gloggur.search.router.types import ContextHit, ContextPack, ContextSpan
 
@@ -105,6 +105,17 @@ def test_profile_reindex_reason_hf_snapshot_alias_matches_short_model() -> None:
     assert reason is None
 
 
+def test_profile_reindex_reason_allows_legacy_unsuffixed_edge_profiles_for_reads() -> None:
+    """Read-path compatibility should accept legacy cache profiles that predate embed_graph_edges."""
+    reason = _profile_reindex_reason(
+        metadata_present=True,
+        cached_profile="local:microsoft/codebert-base",
+        expected_profile="local:microsoft/codebert-base|embed_graph_edges=0",
+        allow_legacy_unsuffixed_edges=True,
+    )
+    assert reason is None
+
+
 def test_profile_reindex_reason_non_hf_local_path_stays_strict() -> None:
     """Non-HuggingFace local model paths should continue to require exact profile matches."""
     reason = _profile_reindex_reason(
@@ -139,13 +150,14 @@ def test_build_status_payload_surfaces_missing_search_integrity_markers(tmp_path
     )
     cache = CacheManager(CacheConfig(cache_dir))
     cache.set_index_metadata(IndexMetadata(version="1", total_symbols=2, indexed_files=1))
-    cache.set_index_profile("local:microsoft/codebert-base")
+    cache.set_index_profile(config.embedding_profile())
 
     payload = cli_main._build_status_payload(config, cache)
 
     assert payload["semantic_search_allowed"] is False
     assert "vector_integrity_missing" in payload["warning_codes"]
     assert "chunk_span_integrity_missing" in payload["warning_codes"]
+    assert payload["index_stats"]["embedded_edge_vectors"] == 0
     assert payload["extension_policy"]["valid"] is True
     assert payload["language_support_contract"]["schema_version"] == "1"
     assert ".jsx" in payload["language_support_contract"]["supported_extensions"]
@@ -193,6 +205,8 @@ def test_build_status_payload_zeroes_total_symbols_for_non_ready_cache(tmp_path:
     assert payload["resume_reason_codes"] == ["build_in_progress", "missing_index_metadata"]
     assert payload["raw_total_symbols"] == 1
     assert payload["total_symbols"] == 0
+    assert payload["index_stats"]["symbol_count"] == 1
+    assert payload["index_stats"]["embedded_edge_vectors"] == 0
     assert payload["build_state"] == {
         "state": "building",
         "build_id": "build-1",
@@ -201,6 +215,85 @@ def test_build_status_payload_zeroes_total_symbols_for_non_ready_cache(tmp_path:
         "updated_at": "2026-03-07T00:00:01+00:00",
         "stage": "embed_chunks",
         "cleanup_pending": False,
+    }
+
+
+def test_build_status_payload_includes_index_stats(tmp_path: Path) -> None:
+    """Status should surface chunk, edge, and embedded-vector counts separately."""
+    cache_dir = str(tmp_path / "cache")
+    config = cli_main.GloggurConfig(
+        cache_dir=cache_dir,
+        embedding_provider="test",
+        local_embedding_model="model-a",
+        embed_graph_edges=True,
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    cache.upsert_symbols(
+        [
+            Symbol(
+                id="sym-1",
+                name="alpha",
+                kind="function",
+                file_path="sample.py",
+                start_line=1,
+                end_line=3,
+                signature="def alpha() -> None:",
+                body_hash="body-1",
+            )
+        ]
+    )
+    cache.upsert_chunks(
+        [
+            SymbolChunk(
+                chunk_id="chunk-1",
+                symbol_id="sym-1",
+                chunk_part_index=1,
+                chunk_part_total=1,
+                text="alpha body",
+                file_path="sample.py",
+                start_line=1,
+                end_line=3,
+                start_byte=0,
+                end_byte=10,
+                embedding_vector=[0.1, 0.2],
+            )
+        ]
+    )
+    cache.upsert_edges(
+        [
+            EdgeRecord(
+                edge_id="edge-1",
+                edge_type="CALLS",
+                from_id="sym-1",
+                to_id="sym-2",
+                from_kind="function",
+                to_kind="function",
+                file_path="sample.py",
+                line=2,
+                confidence=0.8,
+                text="EDGE_TYPE: CALLS",
+                embedding_vector=[0.3, 0.4],
+            )
+        ]
+    )
+    cache.set_index_metadata(IndexMetadata(version="1", total_symbols=1, indexed_files=1))
+    cache.set_index_profile(config.embedding_profile())
+    cache.set_search_integrity(
+        {
+            "vector_cache": {"status": "passed", "reason_codes": []},
+            "chunk_span": {"status": "passed", "reason_codes": []},
+        }
+    )
+
+    payload = cli_main._build_status_payload(config, cache)
+
+    assert payload["index_stats"] == {
+        "symbol_count": 1,
+        "chunk_count": 1,
+        "graph_edge_count": 1,
+        "embedded_symbol_vectors": 1,
+        "embedded_edge_vectors": 1,
+        "embedded_vector_count": 2,
     }
 
 
@@ -1197,7 +1290,7 @@ def test_resume_contract_hf_snapshot_alias_is_resume_compatible() -> None:
     payload = _build_resume_contract(
         metadata=metadata,
         schema_version="2",
-        expected_profile="local:microsoft/codebert-base",
+        expected_profile="local:microsoft/codebert-base|embed_graph_edges=0",
         cached_profile=(
             "local:/Users/example/.cache/huggingface/hub/"
             "models--microsoft--codebert-base/snapshots/abc123"
@@ -1211,6 +1304,7 @@ def test_resume_contract_hf_snapshot_alias_is_resume_compatible() -> None:
     assert payload["resume_decision"] == "resume_ok"
     assert payload["resume_reason_codes"] == []
     assert payload["resume_fingerprint_match"] is True
+    assert payload["cached_resume_fingerprint"] == payload["expected_resume_fingerprint"]
 
 
 def test_resume_contract_missing_metadata_has_machine_reason_code() -> None:
@@ -1485,7 +1579,7 @@ def test_persist_last_success_resume_state_no_change_reindex_is_idempotent() -> 
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> str | None:
             return self._fingerprint
@@ -1612,8 +1706,9 @@ def test_persist_last_success_resume_state_repairs_only_tool_version_marker() ->
     assert cache._at == original_resume_at
 
 
-def test_persist_last_success_resume_state_rewrites_legacy_fingerprint_without_timestamp_bump(
-) -> None:
+def test_persist_last_success_resume_state_rewrites_legacy_fingerprint_without_timestamp_bump() -> (
+    None
+):
     """Legacy tool-version-inclusive fingerprints should be rewritten in-place on no-op index."""
 
     writes: list[tuple[str, str]] = []
@@ -1699,8 +1794,9 @@ def test_persist_last_success_resume_state_rewrites_legacy_fingerprint_without_t
     assert cache._tool_version == cli_main.GLOGGUR_VERSION
 
 
-def test_persist_last_success_resume_state_repairs_tool_version_drift_with_stale_fingerprint(
-) -> None:
+def test_persist_last_success_resume_state_repairs_tool_version_drift_with_stale_fingerprint() -> (
+    None
+):
     """Pure tool-version drift with stale/missing last-success state should repair all markers."""
 
     writes: list[tuple[str, str]] = []
@@ -1797,7 +1893,7 @@ def test_build_status_payload_warns_on_tool_version_drift_without_requiring_rein
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_tool_version(self) -> str:
             return "0.0.1"
@@ -1846,7 +1942,7 @@ def test_build_status_payload_accepts_tool_version_override_input_as_noop() -> N
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_tool_version(self) -> str:
             return "0.0.1"
@@ -2049,8 +2145,7 @@ def test_status_json_marks_explicit_config_as_trusted(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "cache_dir: cache\n"
-        "embedding_provider: openai\n",
+        "cache_dir: cache\n" "embedding_provider: openai\n",
         encoding="utf8",
     )
 
@@ -2736,7 +2831,7 @@ def test_clear_cache_json_profile_filter_miss_keeps_cache_intact(
     runner = CliRunner()
     cache_dir = tmp_path / "cache"
     cache = CacheManager(CacheConfig(str(cache_dir)))
-    cache.set_index_profile("local:microsoft/codebert-base")
+    cache.set_index_profile("local:microsoft/codebert-base|embed_graph_edges=0")
 
     result = runner.invoke(
         cli_main.cli,
@@ -2748,9 +2843,9 @@ def test_clear_cache_json_profile_filter_miss_keeps_cache_intact(
     payload = _parse_json_output(result.output)
     assert payload["cleared"] is False
     assert payload["reason"] == "profile_filter_miss"
-    assert payload["cached_index_profile"] == "local:microsoft/codebert-base"
+    assert payload["cached_index_profile"] == "local:microsoft/codebert-base|embed_graph_edges=0"
     reloaded = CacheManager(CacheConfig(str(cache_dir)))
-    assert reloaded.get_index_profile() == "local:microsoft/codebert-base"
+    assert reloaded.get_index_profile() == "local:microsoft/codebert-base|embed_graph_edges=0"
 
 
 def test_clear_cache_json_profile_filter_match_clears_cache(
@@ -2760,7 +2855,7 @@ def test_clear_cache_json_profile_filter_match_clears_cache(
     runner = CliRunner()
     cache_dir = tmp_path / "cache"
     cache = CacheManager(CacheConfig(str(cache_dir)))
-    cache.set_index_profile("local:microsoft/codebert-base")
+    cache.set_index_profile("local:microsoft/codebert-base|embed_graph_edges=0")
 
     result = runner.invoke(
         cli_main.cli,
@@ -2771,7 +2866,7 @@ def test_clear_cache_json_profile_filter_match_clears_cache(
     assert result.exit_code == 0
     payload = _parse_json_output(result.output)
     assert payload["cleared"] is True
-    assert payload["cached_index_profile"] == "local:microsoft/codebert-base"
+    assert payload["cached_index_profile"] == "local:microsoft/codebert-base|embed_graph_edges=0"
     reloaded = CacheManager(CacheConfig(str(cache_dir)))
     assert reloaded.get_index_profile() is None
 
@@ -2829,7 +2924,7 @@ def test_search_json_reports_missing_embedding_provider_configuration(
     )
     cache = CacheManager(CacheConfig(str(cache_dir)))
     cache.set_index_metadata(IndexMetadata(version="1", total_symbols=0, indexed_files=0))
-    cache.set_index_profile(":unknown")
+    cache.set_index_profile(":unknown|embed_graph_edges=0")
 
     result = runner.invoke(
         cli_main.cli,
@@ -2864,7 +2959,7 @@ def test_search_json_allows_tool_version_drift_by_default(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3115,7 +3210,7 @@ def test_search_json_accepts_tool_version_drift_override_input_as_noop(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3220,7 +3315,7 @@ def test_search_json_retries_once_for_low_confidence_and_emits_metadata(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3332,7 +3427,7 @@ def test_search_json_requery_is_bounded_by_max_attempts(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3440,7 +3535,7 @@ def test_search_json_disable_bounded_requery_skips_retry(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3547,7 +3642,7 @@ def test_search_json_rejects_invalid_confidence_threshold(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3656,7 +3751,7 @@ def test_search_json_opt_in_evidence_trace_and_validation_pass(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3761,7 +3856,7 @@ def test_search_json_fail_on_ungrounded_exits_nonzero_with_contract(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3851,7 +3946,7 @@ def test_search_json_default_is_backward_compatible_without_trace_payload(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -3949,7 +4044,7 @@ def test_search_json_source_first_ranking_mode_is_forwarded_and_reflected(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -4052,7 +4147,7 @@ def test_search_json_context_radius_is_forwarded_and_reflected(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -4146,7 +4241,7 @@ def test_search_json_wraps_metadata_store_connect_failure(
             return "2"
 
         def get_index_profile(self) -> str:
-            return "local:microsoft/codebert-base"
+            return config.embedding_profile()
 
         def get_last_success_resume_fingerprint(self) -> None:
             return None
@@ -4251,9 +4346,11 @@ def _make_context_pack(
         query=query,
         summary=summary,
         hits=hits,
-        debug=debug
-        if debug is not None
-        else {"backend_scores": {"exact": 0.99}, "backend_errors": {}},
+        debug=(
+            debug
+            if debug is not None
+            else {"backend_scores": {"exact": 0.99}, "backend_errors": {}}
+        ),
     )
 
 
@@ -4584,7 +4681,9 @@ def test_find_unprocessed_query_tokens_infer_file_scope(
     target.parent.mkdir(parents=True)
     target.write_text("def make_response():\n    return None\n", encoding="utf8")
     monkeypatch.chdir(tmp_path)
-    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+    _install_routed_search_runtime(
+        monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures
+    )
 
     result = runner.invoke(
         cli_main.cli,
@@ -4606,7 +4705,9 @@ def test_find_unprocessed_rg_tokens_infer_directory_scope(
     source_dir = tmp_path / "src"
     source_dir.mkdir()
     monkeypatch.chdir(tmp_path)
-    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+    _install_routed_search_runtime(
+        monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures
+    )
 
     result = runner.invoke(
         cli_main.cli,
@@ -4630,7 +4731,9 @@ def test_find_explicit_scope_disables_implicit_trailing_path_inference(
     trailing = tmp_path / "docs"
     trailing.mkdir()
     monkeypatch.chdir(tmp_path)
-    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+    _install_routed_search_runtime(
+        monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures
+    )
 
     result = runner.invoke(
         cli_main.cli,
@@ -4650,7 +4753,9 @@ def test_find_after_double_dash_preserves_query_tokens_named_like_cli_options(
     runner = CliRunner()
     captures: dict[str, object] = {}
     monkeypatch.chdir(tmp_path)
-    _install_routed_search_runtime(monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures)
+    _install_routed_search_runtime(
+        monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures
+    )
 
     result = runner.invoke(
         cli_main.cli,
@@ -4987,16 +5092,11 @@ def test_core_commands_wrap_non_mapping_config_payload_as_structured_io_failure(
     ("config_text", "detail_fragment"),
     [
         (
-            "supported_extensions:\n"
-            "  - .py\n"
-            "  - .mjs\n",
+            "supported_extensions:\n" "  - .py\n" "  - .mjs\n",
             "missing parser mappings",
         ),
         (
-            "supported_extensions:\n"
-            "  - .py\n"
-            "parser_extension_map:\n"
-            "  .mjs: javascript\n",
+            "supported_extensions:\n" "  - .py\n" "parser_extension_map:\n" "  .mjs: javascript\n",
             "missing from supported_extensions",
         ),
     ],

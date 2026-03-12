@@ -9,9 +9,11 @@ from scripts.verification.logging_utils import log_event
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class TestCaseResult:
     """Result of a single verification test case."""
+
     name: str
     status: str
     message: str
@@ -21,6 +23,7 @@ class TestCaseResult:
 @dataclass
 class PhaseReport:
     """Summary of a verification phase."""
+
     phase: int
     title: str
     status: str
@@ -34,6 +37,7 @@ class PhaseReport:
 @dataclass
 class VerificationReport:
     """Aggregate report across all verification phases."""
+
     generated_at: str
     status: str
     summary: Dict[str, int]

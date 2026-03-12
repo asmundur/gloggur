@@ -99,4 +99,3 @@ def test_validate_evidence_trace_fails_when_no_evidence() -> None:
     assert payload["reason_code"] == "grounding_evidence_missing"
     assert payload["matched_items"] == 0
     assert isinstance(payload["suggested_repair_action"], str)
-

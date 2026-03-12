@@ -273,14 +273,12 @@ def test_cache_auto_resets_legacy_tables() -> None:
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     db_path = os.path.join(cache_dir, "index.db")
     with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE validations (
                 symbol_id TEXT PRIMARY KEY,
                 warnings TEXT NOT NULL
             );
-            """
-        )
+            """)
     cache = CacheManager(CacheConfig(cache_dir))
     assert cache.last_reset_reason is not None
     assert "legacy tables present" in cache.last_reset_reason
@@ -291,8 +289,7 @@ def test_cache_auto_resets_when_chunks_table_missing_byte_columns() -> None:
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     db_path = os.path.join(cache_dir, "index.db")
     with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            """
+        conn.executescript("""
             CREATE TABLE files (
                 path TEXT PRIMARY KEY,
                 language TEXT,
@@ -366,8 +363,7 @@ def test_cache_auto_resets_when_chunks_table_missing_byte_columns() -> None:
             );
             CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO meta (key, value) VALUES ('schema_version', '6');
-            """
-        )
+            """)
 
     cache = CacheManager(CacheConfig(cache_dir))
 

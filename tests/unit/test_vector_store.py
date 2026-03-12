@@ -25,6 +25,7 @@ def _symbol(symbol_id: str, vector: list[float]) -> Symbol:
         language="python",
     )
 
+
 def test_vector_store_upsert_and_remove_ids_without_faiss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -168,10 +169,7 @@ def test_vector_store_defers_id_map_persistence_until_save_with_faiss_double(
             return distances, indices
 
     def _write_index(index: FakeFaissIndex, path: str) -> None:
-        payload = {
-            str(vector_id): vector.tolist()
-            for vector_id, vector in index._vectors.items()
-        }
+        payload = {str(vector_id): vector.tolist() for vector_id, vector in index._vectors.items()}
         Path(path).write_text(json.dumps(payload), encoding="utf8")
 
     def _read_index(path: str) -> FakeFaissIndex:

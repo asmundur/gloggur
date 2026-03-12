@@ -22,9 +22,7 @@ def test_main_returns_click_exit_code_from_click_exit(
     monkeypatch.setattr(
         cli_main.cli,
         "main",
-        lambda args, prog_name, standalone_mode: (_ for _ in ()).throw(
-            click.exceptions.Exit(3)
-        ),
+        lambda args, prog_name, standalone_mode: (_ for _ in ()).throw(click.exceptions.Exit(3)),
     )
 
     assert cli_main.main(["status"]) == 3

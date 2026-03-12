@@ -58,10 +58,12 @@ def test_none_for_dict_and_list_reports_specific_message() -> None:
     assert dict_result.details is not None
     assert list_result.details is not None
     assert any(
-        error["message"] == "expected dict, got None (NoneType)" for error in dict_result.details["errors"]
+        error["message"] == "expected dict, got None (NoneType)"
+        for error in dict_result.details["errors"]
     )
     assert any(
-        error["message"] == "expected list, got None (NoneType)" for error in list_result.details["errors"]
+        error["message"] == "expected list, got None (NoneType)"
+        for error in list_result.details["errors"]
     )
 
 

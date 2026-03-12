@@ -35,6 +35,7 @@ def _symbol(
 
 class FakeEmbeddingProvider(EmbeddingProvider):
     """Fake embedding provider for semantic similarity tests."""
+
     def embed_text(self, text: str) -> list[float]:
         """Return a deterministic embedding vector based on text."""
         lowered = text.lower()
@@ -56,6 +57,7 @@ class FakeEmbeddingProvider(EmbeddingProvider):
 # ---------------------------------------------------------------------------
 # Existing coverage (must remain green)
 # ---------------------------------------------------------------------------
+
 
 def test_audit_reports_missing_docstring() -> None:
     """Missing docstrings should emit warnings."""
@@ -98,6 +100,7 @@ def test_audit_flags_low_semantic_similarity() -> None:
 # ---------------------------------------------------------------------------
 # score_metadata explainability
 # ---------------------------------------------------------------------------
+
 
 def test_score_metadata_present_when_scored() -> None:
     """score_metadata should be populated with threshold and kind info when scored."""
@@ -143,6 +146,7 @@ def test_score_metadata_none_for_missing_docstring() -> None:
 # ---------------------------------------------------------------------------
 # Kind-aware threshold overrides
 # ---------------------------------------------------------------------------
+
 
 def test_kind_threshold_suppresses_class_warning() -> None:
     """Class-level threshold override should suppress borderline class warnings."""
@@ -228,6 +232,7 @@ def test_no_kind_threshold_uses_global() -> None:
 # semantic_min_code_chars filtering
 # ---------------------------------------------------------------------------
 
+
 def test_skip_scoring_for_short_code_body() -> None:
     """Symbols whose code body is shorter than min_code_chars should be skipped."""
     sym = _symbol(
@@ -282,6 +287,7 @@ def test_zero_min_code_chars_scores_all() -> None:
 # _assess_symbol unit tests
 # ---------------------------------------------------------------------------
 
+
 def test_assess_symbol_returns_no_metadata_for_unsupported_kind() -> None:
     """Non-inspected kinds return empty warnings and None metadata."""
     sym = _symbol(symbol_id="a1", name="CONST", kind="variable", docstring="A value.")
@@ -316,6 +322,7 @@ def test_assess_symbol_skip_reason_propagated() -> None:
 # ---------------------------------------------------------------------------
 # _compute_semantic_scores unit tests (min_code_chars parameter)
 # ---------------------------------------------------------------------------
+
 
 def test_compute_scores_skips_short_code_bodies() -> None:
     """Symbols with short code bodies are recorded in skip_reasons."""
@@ -355,9 +362,11 @@ def test_compute_scores_skips_short_docstrings() -> None:
 # Config calibration defaults
 # ---------------------------------------------------------------------------
 
+
 def test_default_config_kind_thresholds() -> None:
     """Calibrated GloggurConfig defaults include kind-aware thresholds."""
     from gloggur.config import GloggurConfig
+
     cfg = GloggurConfig()
     assert cfg.docstring_semantic_threshold == 0.10
     assert cfg.docstring_semantic_min_code_chars == 30
@@ -370,6 +379,7 @@ def test_default_config_kind_thresholds() -> None:
 def test_config_kind_thresholds_overridable() -> None:
     """kind_thresholds can be overridden via config overrides dict."""
     from gloggur.config import GloggurConfig
+
     cfg = GloggurConfig.load(overrides={"docstring_semantic_kind_thresholds": {"class": 0.15}})
     assert cfg.docstring_semantic_kind_thresholds == {"class": 0.15}
 
@@ -377,5 +387,6 @@ def test_config_kind_thresholds_overridable() -> None:
 def test_config_min_code_chars_overridable() -> None:
     """docstring_semantic_min_code_chars can be overridden."""
     from gloggur.config import GloggurConfig
+
     cfg = GloggurConfig.load(overrides={"docstring_semantic_min_code_chars": 50})
     assert cfg.docstring_semantic_min_code_chars == 50

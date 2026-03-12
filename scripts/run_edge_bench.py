@@ -126,7 +126,9 @@ def _make_large_repo(fixtures: TestFixtures, file_count: int) -> Path:
     return fixtures.create_temp_repo(files)
 
 
-def _make_benchmark_fixture(fixtures: TestFixtures, file_count: int = 32) -> Tuple[Path, Dict[str, object]]:
+def _make_benchmark_fixture(
+    fixtures: TestFixtures, file_count: int = 32
+) -> Tuple[Path, Dict[str, object]]:
     """Create a deterministic fixture repository for benchmark runs."""
     files: Dict[str, str] = {}
     for idx in range(file_count):
@@ -188,7 +190,9 @@ def _test_empty_repository(fixtures: TestFixtures) -> TestCaseResult:
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
         if not schema.ok:
-            return TestCaseResult(name="Test 3.1: Empty Repository", status="failed", message=schema.message)
+            return TestCaseResult(
+                name="Test 3.1: Empty Repository", status="failed", message=schema.message
+            )
         indexed_files = int(output.get("indexed_files", 0))
         indexed_symbols = int(output.get("indexed_symbols", 0))
         if indexed_files != 0 or indexed_symbols != 0:
@@ -223,7 +227,9 @@ def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
         if not schema.ok:
-            return TestCaseResult(name="Test 3.2: Unsupported Files", status="failed", message=schema.message)
+            return TestCaseResult(
+                name="Test 3.2: Unsupported Files", status="failed", message=schema.message
+            )
         indexed_files = int(output.get("indexed_files", 0))
         indexed_symbols = int(output.get("indexed_symbols", 0))
         if indexed_files != 0 or indexed_symbols != 0:
@@ -258,7 +264,9 @@ def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
         if not schema.ok:
-            return TestCaseResult(name="Test 3.3: Malformed Code", status="failed", message=schema.message)
+            return TestCaseResult(
+                name="Test 3.3: Malformed Code", status="failed", message=schema.message
+            )
         return TestCaseResult(
             name="Test 3.3: Malformed Code",
             status="passed",
@@ -283,7 +291,9 @@ def _test_large_repository(fixtures: TestFixtures, file_count: int = 500) -> Tes
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
         if not schema.ok:
-            return TestCaseResult(name="Test 3.4: Large Repository", status="failed", message=schema.message)
+            return TestCaseResult(
+                name="Test 3.4: Large Repository", status="failed", message=schema.message
+            )
         duration_ms = float(output.get("duration_ms", 0))
         indexed_files = int(output.get("indexed_files", 0))
         if indexed_files == 0:
@@ -409,7 +419,9 @@ def _benchmark_indexing_speed(repo_path: Path) -> Tuple[TestCaseResult, Benchmar
         schema = Checks.check_index_output(output)
         if not schema.ok:
             return (
-                TestCaseResult(name="Benchmark 4.1: Cold Index", status="failed", message=schema.message),
+                TestCaseResult(
+                    name="Benchmark 4.1: Cold Index", status="failed", message=schema.message
+                ),
                 BenchmarkMetric(name="cold_index_duration"),
             )
         indexed_files = int(output.get("indexed_files", 0))
@@ -504,7 +516,9 @@ def _benchmark_search_latency(repo_path: Path) -> Tuple[TestCaseResult, Benchmar
         _cleanup_cache_dir(cache_dir)
 
 
-def _benchmark_incremental_reindex(repo_path: Path) -> Tuple[TestCaseResult, BenchmarkMetric, BenchmarkMetric]:
+def _benchmark_incremental_reindex(
+    repo_path: Path,
+) -> Tuple[TestCaseResult, BenchmarkMetric, BenchmarkMetric]:
     """Benchmark unchanged incremental reindex speed and throughput."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     runner = _new_runner(cache_dir, timeout=300.0)
@@ -550,8 +564,10 @@ def _benchmark_incremental_reindex(repo_path: Path) -> Tuple[TestCaseResult, Ben
             status="failed",
             message=f"Incremental benchmark failed: {exc}",
         )
-        return failure, BenchmarkMetric(name="unchanged_incremental_duration"), BenchmarkMetric(
-            name="index_throughput"
+        return (
+            failure,
+            BenchmarkMetric(name="unchanged_incremental_duration"),
+            BenchmarkMetric(name="index_throughput"),
         )
     finally:
         _cleanup_cache_dir(cache_dir)
@@ -566,7 +582,9 @@ def _phase4_performance_payload(metrics: List[BenchmarkMetric]) -> Dict[str, obj
         elif metric.name == "unchanged_incremental_duration":
             payload["unchanged_incremental_duration_ms"] = metric.duration_ms
             if metric.details:
-                payload.update({k: v for k, v in metric.details.items() if k in {"first_ms", "ratio"}})
+                payload.update(
+                    {k: v for k, v in metric.details.items() if k in {"first_ms", "ratio"}}
+                )
         elif metric.name == "search_average_latency":
             payload["search_average_latency_ms"] = metric.duration_ms
             if metric.details and "samples" in metric.details:
@@ -688,7 +706,9 @@ def _run_phase4(
         tests.append(search_result)
         metrics.append(search_metric)
 
-        incremental_result, unchanged_metric, throughput_metric = _benchmark_incremental_reindex(benchmark_repo)
+        incremental_result, unchanged_metric, throughput_metric = _benchmark_incremental_reindex(
+            benchmark_repo
+        )
         tests.append(incremental_result)
         metrics.extend([unchanged_metric, throughput_metric])
 
@@ -785,14 +805,34 @@ def _build_output_payload(
 def main() -> int:
     """CLI entrypoint for phase 3/4 edge and bench runs."""
     parser = argparse.ArgumentParser(description="Run Phase 3 & 4 edge/bench checks for gloggur.")
-    parser.add_argument("--skip-large-repo", action="store_true", help="Skip large repo edge case test.")
-    parser.add_argument("--benchmark-only", action="store_true", help="Run only Phase 4 benchmarks.")
-    parser.add_argument("--baseline-file", type=Path, default=None, help="Compare benchmark results against a baseline JSON payload.")
-    parser.add_argument("--write-baseline", action="store_true", help="Write the benchmark baseline payload to --baseline-file.")
-    parser.add_argument("--repo", type=Path, default=None, help="Benchmark this repo instead of the deterministic generated fixture.")
+    parser.add_argument(
+        "--skip-large-repo", action="store_true", help="Skip large repo edge case test."
+    )
+    parser.add_argument(
+        "--benchmark-only", action="store_true", help="Run only Phase 4 benchmarks."
+    )
+    parser.add_argument(
+        "--baseline-file",
+        type=Path,
+        default=None,
+        help="Compare benchmark results against a baseline JSON payload.",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help="Write the benchmark baseline payload to --baseline-file.",
+    )
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=None,
+        help="Benchmark this repo instead of the deterministic generated fixture.",
+    )
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
-    parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    parser.add_argument(
+        "--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR)."
+    )
     parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
     parser.add_argument("--trace-id", type=str, default=None, help="Trace ID for log correlation.")
     args = parser.parse_args()
@@ -831,13 +871,50 @@ def main() -> int:
     phase4_metrics = generated_baseline.get("performance", {})
     baseline_contract = _apply_baseline_contract(
         [
-            BenchmarkMetric(name="cold_index_duration", duration_ms=phase4_metrics.get("metrics", {}).get("cold_index_duration", {}).get("duration_ms") if isinstance(phase4_metrics.get("metrics"), dict) else None),
-            BenchmarkMetric(name="unchanged_incremental_duration", duration_ms=phase4_metrics.get("metrics", {}).get("unchanged_incremental_duration", {}).get("duration_ms") if isinstance(phase4_metrics.get("metrics"), dict) else None),
-            BenchmarkMetric(name="search_average_latency", duration_ms=phase4_metrics.get("metrics", {}).get("search_average_latency", {}).get("duration_ms") if isinstance(phase4_metrics.get("metrics"), dict) else None),
+            BenchmarkMetric(
+                name="cold_index_duration",
+                duration_ms=(
+                    phase4_metrics.get("metrics", {})
+                    .get("cold_index_duration", {})
+                    .get("duration_ms")
+                    if isinstance(phase4_metrics.get("metrics"), dict)
+                    else None
+                ),
+            ),
+            BenchmarkMetric(
+                name="unchanged_incremental_duration",
+                duration_ms=(
+                    phase4_metrics.get("metrics", {})
+                    .get("unchanged_incremental_duration", {})
+                    .get("duration_ms")
+                    if isinstance(phase4_metrics.get("metrics"), dict)
+                    else None
+                ),
+            ),
+            BenchmarkMetric(
+                name="search_average_latency",
+                duration_ms=(
+                    phase4_metrics.get("metrics", {})
+                    .get("search_average_latency", {})
+                    .get("duration_ms")
+                    if isinstance(phase4_metrics.get("metrics"), dict)
+                    else None
+                ),
+            ),
             BenchmarkMetric(
                 name="index_throughput",
-                throughput=phase4_metrics.get("metrics", {}).get("index_throughput", {}).get("throughput") if isinstance(phase4_metrics.get("metrics"), dict) else None,
-                throughput_unit=phase4_metrics.get("metrics", {}).get("index_throughput", {}).get("throughput_unit") if isinstance(phase4_metrics.get("metrics"), dict) else None,
+                throughput=(
+                    phase4_metrics.get("metrics", {}).get("index_throughput", {}).get("throughput")
+                    if isinstance(phase4_metrics.get("metrics"), dict)
+                    else None
+                ),
+                throughput_unit=(
+                    phase4_metrics.get("metrics", {})
+                    .get("index_throughput", {})
+                    .get("throughput_unit")
+                    if isinstance(phase4_metrics.get("metrics"), dict)
+                    else None
+                ),
             ),
         ],
         baseline_payload,

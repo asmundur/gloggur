@@ -276,7 +276,12 @@ class PackagingSmokeHarness:
         """Resolve the smoke venv site-packages directory."""
         if os.name == "nt":
             return self.venv_dir / "Lib" / "site-packages"
-        return self.venv_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        return (
+            self.venv_dir
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
 
     def _outer_site_packages(self) -> List[str]:
         """Return current interpreter site-packages paths for dependency fallback."""
@@ -365,7 +370,9 @@ class PackagingSmokeHarness:
                     detail=f"Unknown stage requested: {spec.name}",
                 )
             duration_ms = int((time.perf_counter() - start) * 1000)
-            return StageResult(name=spec.name, status="passed", duration_ms=duration_ms, context=context)
+            return StageResult(
+                name=spec.name, status="passed", duration_ms=duration_ms, context=context
+            )
         except StageFailure as failure:
             duration_ms = int((time.perf_counter() - start) * 1000)
             return StageResult(
@@ -632,14 +639,18 @@ class PackagingSmokeHarness:
                 )
                 stage_results, failed = _execute_stage_plan(
                     specs,
-                    lambda spec: first_failure if spec.name == first.name else StageResult(
-                        name=spec.name,
-                        status="not_run",
-                        duration_ms=0,
-                        failure_code="blocked_by_prior_stage_failure",
-                        remediation="Fix the previous failed stage and rerun the packaging smoke harness.",
-                        detail=f"Blocked by {first.name} ({first_failure.failure_code})",
-                        context={"blocked_by_stage": first.name},
+                    lambda spec: (
+                        first_failure
+                        if spec.name == first.name
+                        else StageResult(
+                            name=spec.name,
+                            status="not_run",
+                            duration_ms=0,
+                            failure_code="blocked_by_prior_stage_failure",
+                            remediation="Fix the previous failed stage and rerun the packaging smoke harness.",
+                            detail=f"Blocked by {first.name} ({first_failure.failure_code})",
+                            context={"blocked_by_stage": first.name},
+                        )
                     ),
                 )
         finally:
@@ -697,8 +708,7 @@ def _render_markdown(payload: Dict[str, object]) -> str:
         if not isinstance(stage, dict):
             continue
         lines.append(
-            f"- `{stage.get('name')}`: {stage.get('status')} "
-            f"({stage.get('duration_ms')}ms)"
+            f"- `{stage.get('name')}`: {stage.get('status')} " f"({stage.get('duration_ms')}ms)"
         )
         if stage.get("failure_code"):
             lines.append(f"  - code: `{stage.get('failure_code')}`")

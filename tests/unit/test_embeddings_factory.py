@@ -12,6 +12,7 @@ def test_create_embedding_provider_local(monkeypatch: pytest.MonkeyPatch) -> Non
 
     class DummyLocal:
         """Dummy local provider capturing constructor args."""
+
         def __init__(
             self,
             model_name: str,
@@ -45,6 +46,7 @@ def test_create_embedding_provider_openai(monkeypatch: pytest.MonkeyPatch) -> No
 
     class DummyOpenAI:
         """Dummy OpenAI provider capturing constructor args."""
+
         def __init__(
             self,
             model: str,
@@ -96,6 +98,7 @@ def test_create_embedding_provider_gemini(monkeypatch: pytest.MonkeyPatch) -> No
 
     class DummyGemini:
         """Dummy Gemini provider capturing constructor args."""
+
         def __init__(self, model: str, api_key: str | None) -> None:
             """Record constructor arguments."""
             created["model"] = model

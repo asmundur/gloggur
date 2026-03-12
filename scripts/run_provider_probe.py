@@ -103,11 +103,15 @@ def _run_provider_test(
 
     cache_check = Checks.check_cache_exists(cache_dir)
     if not cache_check.ok:
-        return TestCaseResult(name=name, status="failed", message=cache_check.message, details=cache_check.details)
+        return TestCaseResult(
+            name=name, status="failed", message=cache_check.message, details=cache_check.details
+        )
 
     vectors_ok, vector_message, vector_details = _vector_store_stats(cache_dir)
     if not vectors_ok:
-        return TestCaseResult(name=name, status="failed", message=vector_message, details=vector_details)
+        return TestCaseResult(
+            name=name, status="failed", message=vector_message, details=vector_details
+        )
 
     try:
         search_output = runner.run_search(query, top_k=3)
@@ -145,7 +149,9 @@ def _load_repo_config(repo_root: Path) -> GloggurConfig:
     return GloggurConfig.load()
 
 
-def test_local_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool = False) -> TestCaseResult:
+def test_local_embeddings(
+    repo_root: Path, config: GloggurConfig, verbose: bool = False
+) -> TestCaseResult:
     """Check local embedding provider."""
     model_name = config.local_embedding_model
     with tempfile.TemporaryDirectory(prefix="gloggur-phase2-local-") as cache_dir:
@@ -177,7 +183,9 @@ def _missing_api_key_result(name: str, env_key: str) -> TestCaseResult:
     )
 
 
-def test_openai_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool = False) -> TestCaseResult:
+def test_openai_embeddings(
+    repo_root: Path, config: GloggurConfig, verbose: bool = False
+) -> TestCaseResult:
     """Check OpenAI embedding provider."""
     credential_env = None
     for candidate in ("OPENROUTER_API_KEY", "OPENAI_API_KEY"):
@@ -213,7 +221,9 @@ def test_openai_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool
         return result
 
 
-def test_gemini_embeddings(repo_root: Path, config: GloggurConfig, verbose: bool = False) -> TestCaseResult:
+def test_gemini_embeddings(
+    repo_root: Path, config: GloggurConfig, verbose: bool = False
+) -> TestCaseResult:
     """Check Gemini embedding provider."""
     env_key = None
     for candidate in ("GLOGGUR_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
@@ -293,12 +303,16 @@ def run_phase2(verbose: bool = False) -> VerificationReport:
 
 def main() -> int:
     """CLI entrypoint for phase 2 provider probes."""
-    parser = argparse.ArgumentParser(description="Run Phase 2 embedding provider tests for gloggur.")
+    parser = argparse.ArgumentParser(
+        description="Run Phase 2 embedding provider tests for gloggur."
+    )
     parser.add_argument("--output", type=str, default=None, help="Write report to a file.")
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--verbose", action="store_true", help="Print verbose test details.")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
-    parser.add_argument("--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR).")
+    parser.add_argument(
+        "--log-level", type=str, default=None, help="Log level (DEBUG, INFO, WARNING, ERROR)."
+    )
     parser.add_argument("--log-file", type=str, default=None, help="Write logs to file.")
     parser.add_argument("--trace-id", type=str, default=None, help="Trace ID for log correlation.")
     args = parser.parse_args()
@@ -313,7 +327,11 @@ def main() -> int:
     )
 
     report = run_phase2(verbose=args.verbose)
-    output = render_markdown(report) if args.format == "markdown" else json.dumps(render_json(report), indent=2)
+    output = (
+        render_markdown(report)
+        if args.format == "markdown"
+        else json.dumps(render_json(report), indent=2)
+    )
 
     if args.output:
         Path(args.output).write_text(output, encoding="utf8")

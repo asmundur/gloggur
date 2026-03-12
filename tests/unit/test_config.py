@@ -100,6 +100,7 @@ def test_load_env_values(monkeypatch) -> None:
     monkeypatch.setenv("GLOGGUR_GEMINI_API_KEY", "gemini-key")
     monkeypatch.setenv("GLOGGUR_CACHE_DIR", "cache-dir")
     monkeypatch.setenv("GLOGGUR_INCLUDE_MINIFIED_JS", "true")
+    monkeypatch.setenv("GLOGGUR_EMBED_GRAPH_EDGES", "true")
 
     config = GloggurConfig.load(path=None)
 
@@ -116,6 +117,7 @@ def test_load_env_values(monkeypatch) -> None:
     assert config.gemini_api_key == "gemini-key"
     assert config.cache_dir == "cache-dir"
     assert config.include_minified_js is True
+    assert config.embed_graph_edges is True
 
 
 def test_load_env_watch_values(monkeypatch) -> None:
@@ -154,11 +156,17 @@ def test_embedding_profile_uses_active_provider_model() -> None:
     openai = GloggurConfig(embedding_provider="openai", openai_embedding_model="openai-a")
     gemini = GloggurConfig(embedding_provider="gemini", gemini_embedding_model="gemini-a")
     test = GloggurConfig(embedding_provider="test", local_embedding_model="test-a")
+    with_edges = GloggurConfig(
+        embedding_provider="local",
+        local_embedding_model="local-a",
+        embed_graph_edges=True,
+    )
 
-    assert local.embedding_profile() == "local:local-a"
-    assert openai.embedding_profile() == "openai:openai-a"
-    assert gemini.embedding_profile() == "gemini:gemini-a"
-    assert test.embedding_profile() == "test:test-a"
+    assert local.embedding_profile() == "local:local-a|embed_graph_edges=0"
+    assert openai.embedding_profile() == "openai:openai-a|embed_graph_edges=0"
+    assert gemini.embedding_profile() == "gemini:gemini-a|embed_graph_edges=0"
+    assert test.embedding_profile() == "test:test-a|embed_graph_edges=0"
+    assert with_edges.embedding_profile() == "local:local-a|embed_graph_edges=1"
 
 
 def test_load_env_reads_dotenv_when_process_env_unset(tmp_path, monkeypatch) -> None:
@@ -207,8 +215,7 @@ def test_dotenv_model_mapping_for_gemini(tmp_path, monkeypatch) -> None:
     """Gemini model from .env should flow into embedding profile computation."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
-        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n"
-        "GLOGGUR_GEMINI_MODEL=sentinel-gemini-model\n",
+        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n" "GLOGGUR_GEMINI_MODEL=sentinel-gemini-model\n",
         encoding="utf8",
     )
     monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)
@@ -218,7 +225,14 @@ def test_dotenv_model_mapping_for_gemini(tmp_path, monkeypatch) -> None:
 
     assert config.embedding_provider == "gemini"
     assert config.gemini_embedding_model == "sentinel-gemini-model"
-    assert config.embedding_profile() == "gemini:sentinel-gemini-model"
+    assert config.embedding_profile() == "gemini:sentinel-gemini-model|embed_graph_edges=0"
+
+
+def test_embed_graph_edges_defaults_to_false() -> None:
+    """Graph edge embeddings should stay opt-in by default."""
+    config = GloggurConfig()
+
+    assert config.embed_graph_edges is False
 
 
 def test_dotenv_ignores_malformed_lines(tmp_path, monkeypatch) -> None:
@@ -243,9 +257,7 @@ def test_dotenv_empty_values_do_not_override(tmp_path, monkeypatch) -> None:
     """Empty .env values should behave like unset variables."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
-        "GLOGGUR_EMBEDDING_PROVIDER=\n"
-        "GLOGGUR_GEMINI_MODEL=\n"
-        "GLOGGUR_GEMINI_API_KEY=\n",
+        "GLOGGUR_EMBEDDING_PROVIDER=\n" "GLOGGUR_GEMINI_MODEL=\n" "GLOGGUR_GEMINI_API_KEY=\n",
         encoding="utf8",
     )
     monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)
@@ -263,8 +275,7 @@ def test_load_repo_dotenv_is_classified_untrusted(tmp_path, monkeypatch) -> None
     """Repo-local dotenv-only config should still be classified as untrusted in auto mode."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
-        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n"
-        "GLOGGUR_GEMINI_API_KEY=dotenv-gemini-key\n",
+        "GLOGGUR_EMBEDDING_PROVIDER=gemini\n" "GLOGGUR_GEMINI_API_KEY=dotenv-gemini-key\n",
         encoding="utf8",
     )
     monkeypatch.delenv("GLOGGUR_EMBEDDING_PROVIDER", raising=False)

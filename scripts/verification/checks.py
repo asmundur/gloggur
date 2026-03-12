@@ -11,12 +11,15 @@ from typing import Any, Dict, List, Optional as TypingOptional, Tuple, Union
 @dataclass
 class CheckResult:
     """Result of schema or output checks."""
+
     ok: bool
     message: str
     details: TypingOptional[Dict[str, object]] = None
 
     @staticmethod
-    def success(message: str = "ok", details: TypingOptional[Dict[str, object]] = None) -> "CheckResult":
+    def success(
+        message: str = "ok", details: TypingOptional[Dict[str, object]] = None
+    ) -> "CheckResult":
         """Create a successful check result."""
         return CheckResult(ok=True, message=message, details=details)
 
@@ -28,6 +31,7 @@ class CheckResult:
 
 class Optional:
     """Optional wrapper for schema elements."""
+
     def __init__(self, schema: "SchemaType") -> None:
         """Store the wrapped schema."""
         self.schema = schema
@@ -39,6 +43,7 @@ class Optional:
 
 class Range:
     """Numeric range constraint for schema values."""
+
     def __init__(
         self,
         min_value: TypingOptional[Union[int, float]] = None,
@@ -62,7 +67,9 @@ SchemaType = Union[type, Tuple[type, ...], Dict[str, Any], List[Any], Optional, 
 
 class Checks:
     """Static helpers for checking schema outputs."""
+
     logger = logging.getLogger(__name__)
+
     @staticmethod
     def check_index_output(output: Dict[str, object]) -> CheckResult:
         """Check index command output schema."""
@@ -338,7 +345,11 @@ class Checks:
                             {
                                 "path": path,
                                 "message": "type mismatch",
-                                "expected": _format_expected_type(expected) if not optional_expected else _format_expected_type(Optional(expected)),
+                                "expected": (
+                                    _format_expected_type(expected)
+                                    if not optional_expected
+                                    else _format_expected_type(Optional(expected))
+                                ),
                                 "actual": type(value).__name__,
                                 "value_preview": _preview_value(value),
                             }
@@ -349,7 +360,11 @@ class Checks:
                         {
                             "path": path,
                             "message": "type mismatch",
-                            "expected": _format_expected_type(expected) if not optional_expected else _format_expected_type(Optional(expected)),
+                            "expected": (
+                                _format_expected_type(expected)
+                                if not optional_expected
+                                else _format_expected_type(Optional(expected))
+                            ),
                             "actual": type(value).__name__,
                             "value_preview": _preview_value(value),
                         }

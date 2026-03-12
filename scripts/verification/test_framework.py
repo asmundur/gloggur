@@ -82,9 +82,15 @@ def test_reporter_outputs() -> None:
 def test_reporter_performance_markdown_with_baseline_trends() -> None:
     """Ensure performance markdown includes baseline comparisons."""
     reporter = Reporter()
-    reporter.add_performance_metric("Phase 1 Total", duration_ms=1500.0, throughput=2.0, throughput_unit="tests/s")
+    reporter.add_performance_metric(
+        "Phase 1 Total", duration_ms=1500.0, throughput=2.0, throughput_unit="tests/s"
+    )
     reporter.set_baseline_metrics(
-        {"Phase 1 Total": PerformanceMetric(name="Phase 1 Total", duration_ms=1200.0, throughput=2.5)}
+        {
+            "Phase 1 Total": PerformanceMetric(
+                name="Phase 1 Total", duration_ms=1200.0, throughput=2.5
+            )
+        }
     )
     reporter.add_baseline_trends()
     markdown = reporter.render_performance_markdown()

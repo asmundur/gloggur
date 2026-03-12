@@ -181,7 +181,9 @@ def test_index_directory_merges_symbol_failures_and_caps_samples(
             )
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
-    monkeypatch.setattr(cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
     monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
     monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
@@ -202,7 +204,9 @@ def test_index_directory_merges_symbol_failures_and_caps_samples(
             "duration_ms": 5,
         },
     )
-    monkeypatch.setattr(cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
 
     result = runner.invoke(cli_main.cli, ["index", str(repo), "--json"])
 
@@ -240,7 +244,9 @@ def test_index_directory_ignores_non_mapping_failure_reasons_and_non_list_sample
             )
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
-    monkeypatch.setattr(cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
     monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
     monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
@@ -261,7 +267,9 @@ def test_index_directory_ignores_non_mapping_failure_reasons_and_non_list_sample
             "duration_ms": 5,
         },
     )
-    monkeypatch.setattr(cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
 
     result = runner.invoke(cli_main.cli, ["index", str(repo), "--json", "--allow-partial"])
 
@@ -270,6 +278,75 @@ def test_index_directory_ignores_non_mapping_failure_reasons_and_non_list_sample
     assert payload["failed"] == 2
     assert payload["failed_reasons"] == {"repo_error": 1}
     assert payload["failed_samples"] == ["repo-error-sample"]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--embed-graph-edges"], True),
+        (["--no-embed-graph-edges"], False),
+    ],
+)
+def test_index_cli_overrides_embed_graph_edges_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    args: list[str],
+    expected: bool,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = GloggurConfig(
+        cache_dir=str(tmp_path / "cache"),
+        embedding_provider="test",
+        embed_graph_edges=not expected,
+    )
+    active_cache = _FakeActiveCache(tmp_path / "staged")
+    stage_cache = _FakeStageCache()
+    seen_configs: list[GloggurConfig] = []
+
+    class FakeIndexer:
+        def __init__(self, **kwargs: object) -> None:
+            config_obj = kwargs.get("config")
+            assert isinstance(config_obj, GloggurConfig)
+            seen_configs.append(config_obj)
+            self._stage_callback = None
+            self._scan_callback = None
+            self._progress_callback = None
+
+        def index_repository(self, _path: str) -> SimpleNamespace:
+            return _fake_directory_result()
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli_main,
+        "_create_embedding_provider_for_command",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
+    monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
+    monkeypatch.setattr(
+        cli_main,
+        "_initialize_runtime",
+        lambda stage_config, **_kwargs: (stage_config, stage_cache, object()),
+    )
+    monkeypatch.setattr(cli_main, "ParserRegistry", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_main, "Indexer", FakeIndexer)
+    monkeypatch.setattr(
+        cli_main,
+        "_run_symbol_index",
+        lambda **_kwargs: {"failed": 0, "duration_ms": 0},
+    )
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
+
+    result = runner.invoke(cli_main.cli, ["index", str(repo), "--json", *args])
+
+    assert result.exit_code == 0, result.output
+    assert seen_configs
+    assert seen_configs[0].embed_graph_edges is expected
 
 
 @pytest.mark.parametrize(
@@ -316,7 +393,9 @@ def test_index_single_file_noops_for_excluded_or_unsupported_paths(
             raise AssertionError("consistency should not run for skipped files")
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
-    monkeypatch.setattr(cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
     monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
     monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
@@ -332,7 +411,9 @@ def test_index_single_file_noops_for_excluded_or_unsupported_paths(
         "_run_symbol_index",
         lambda **kwargs: symbol_calls.append(kwargs) or {"failed": 0, "duration_ms": 0},
     )
-    monkeypatch.setattr(cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
 
     result = runner.invoke(cli_main.cli, ["index", str(target), "--json"])
 
@@ -397,7 +478,9 @@ def test_index_single_file_warns_on_skipped_extensions_when_enabled(
         "_run_symbol_index",
         lambda **kwargs: symbol_calls.append(kwargs) or {"failed": 0, "duration_ms": 0},
     )
-    monkeypatch.setattr(cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
 
     result = runner.invoke(
         cli_main.cli,
@@ -459,7 +542,9 @@ def test_index_single_file_debug_timings_adds_slow_file_and_missing_integrity_ma
             return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
-    monkeypatch.setattr(cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
     monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
     monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
@@ -475,7 +560,9 @@ def test_index_single_file_debug_timings_adds_slow_file_and_missing_integrity_ma
         "_run_symbol_index",
         lambda **_kwargs: {"failed": 0, "duration_ms": 6},
     )
-    monkeypatch.setattr(cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
 
     result = runner.invoke(cli_main.cli, ["index", str(target), "--json", "--debug-timings"])
 
@@ -519,7 +606,9 @@ def test_index_interrupt_handler_marks_build_interrupted_and_terminates_children
         yield
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
-    monkeypatch.setattr(cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
     monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
     monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
     monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
@@ -535,14 +624,18 @@ def test_index_interrupt_handler_marks_build_interrupted_and_terminates_children
         "_run_symbol_index",
         lambda **_kwargs: {"failed": 0, "duration_ms": 0},
     )
-    monkeypatch.setattr(cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
     monkeypatch.setattr(cli_main, "_index_signal_guard", _fake_guard)
     monkeypatch.setattr(
         cli_main,
         "_write_cache_build_state",
         lambda _cache, **kwargs: build_state_calls.append(kwargs),
     )
-    monkeypatch.setattr(cli_main, "_terminate_index_children", lambda: interrupted.append("terminated") or {})
+    monkeypatch.setattr(
+        cli_main, "_terminate_index_children", lambda: interrupted.append("terminated") or {}
+    )
 
     result = runner.invoke(cli_main.cli, ["index", str(repo), "--json"])
 

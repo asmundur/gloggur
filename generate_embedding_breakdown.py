@@ -7,16 +7,23 @@ from pathlib import Path
 from typing import Any
 
 THIS_FILE = Path(__file__).resolve()
-if (THIS_FILE.parent / "gloggur").exists():
+if (THIS_FILE.parent / "src" / "gloggur").exists():
     PROJECT_ROOT = THIS_FILE.parent
+    IMPORT_ROOT = PROJECT_ROOT / "src"
+elif (THIS_FILE.parent / "gloggur").exists():
+    PROJECT_ROOT = THIS_FILE.parent
+    IMPORT_ROOT = PROJECT_ROOT
 else:
     PROJECT_ROOT = THIS_FILE.parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+    IMPORT_ROOT = PROJECT_ROOT / "src" if (PROJECT_ROOT / "src" / "gloggur").exists() else PROJECT_ROOT
+if str(IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(IMPORT_ROOT))
 
+from gloggur.byte_spans import LineByteSpanIndex  # noqa: E402
 from gloggur.config import GloggurConfig  # noqa: E402
 from gloggur.embeddings.factory import create_embedding_provider  # noqa: E402
 from gloggur.indexer.indexer import Indexer  # noqa: E402
+from gloggur.models import Symbol, SymbolChunk  # noqa: E402
 from gloggur.parsers.registry import ParserRegistry  # noqa: E402
 
 
@@ -64,27 +71,52 @@ def _provider_runtime(provider: Any, vectors: list[list[float]]) -> dict[str, An
     return info
 
 
+def _build_symbol_chunks(
+    config: GloggurConfig,
+    *,
+    source_key: str,
+    source: str,
+    symbols: list[Symbol],
+) -> list[SymbolChunk]:
+    """Build chunk rows using the same implementation as the live indexer."""
+    indexer = object.__new__(Indexer)
+    indexer.config = config
+    span_index = LineByteSpanIndex.from_bytes(source.encode("utf8"))
+    return Indexer._build_symbol_chunks(
+        indexer,
+        path=source_key,
+        source=source,
+        symbols=symbols,
+        commit="",
+        span_index=span_index,
+    )
+
+
 def _chunk_payload(
-    symbol: Any, lines: list[str], vector: list[float], preview: int
+    chunk: SymbolChunk,
+    symbol: Symbol | None,
+    vector: list[float],
+    preview: int,
 ) -> dict[str, Any]:
-    """Build one report payload entry for a symbol and its embedding."""
-    snippet_start = max(0, symbol.start_line - 1)
-    snippet_end = min(len(lines), snippet_start + 3)
-    chunk_text = Indexer._symbol_text(symbol, lines)
+    """Build one report payload entry for an embedding chunk."""
     return {
-        "id": symbol.id,
-        "name": symbol.name,
-        "kind": symbol.kind,
-        "file_path": symbol.file_path,
-        "start_line": symbol.start_line,
-        "end_line": symbol.end_line,
-        "signature": symbol.signature,
-        "docstring": symbol.docstring,
-        "body_hash": symbol.body_hash,
-        "language": symbol.language,
-        "snippet_start_line": snippet_start + 1,
-        "snippet_end_line": snippet_end,
-        "chunk_text": chunk_text,
+        "chunk_id": chunk.chunk_id,
+        "symbol_id": chunk.symbol_id,
+        "name": symbol.name if symbol is not None else chunk.symbol_id,
+        "kind": symbol.kind if symbol is not None else None,
+        "fqname": symbol.fqname if symbol is not None else None,
+        "file_path": chunk.file_path,
+        "start_line": chunk.start_line,
+        "end_line": chunk.end_line,
+        "start_byte": chunk.start_byte,
+        "end_byte": chunk.end_byte,
+        "chunk_part_index": chunk.chunk_part_index,
+        "chunk_part_total": chunk.chunk_part_total,
+        "signature": symbol.signature if symbol is not None else None,
+        "docstring": symbol.docstring if symbol is not None else None,
+        "body_hash": symbol.body_hash if symbol is not None else None,
+        "language": chunk.language,
+        "chunk_text": chunk.text,
         "embedding_dimension": len(vector),
         "embedding_preview_first_n": [round(value, 6) for value in vector[:preview]],
         "embedding_vector": vector,
@@ -123,41 +155,50 @@ def _render_markdown(
     lines.append("")
     lines.append("## Chunking Rule")
     lines.append("")
-    lines.append("One embedding chunk is produced per extracted symbol. The chunk text is:")
+    lines.append(
+        "The report uses the same chunk builder as the live indexer. A symbol may produce one"
+        " or more chunks when its body exceeds the configured chunk-size budget."
+    )
     lines.append("")
     lines.append("```text")
-    lines.append(
-        "chunk_text = join_non_empty([signature, docstring, "
-        "3_line_snippet_from_start_line])"
-    )
+    lines.append("chunk_text = join_non_empty([")
+    lines.append("  fqname/kind/file/line header,")
+    lines.append("  signature block,")
+    lines.append("  imports-in-scope block (when present),")
+    lines.append("  bounded body slice")
+    lines.append("])")
     lines.append("```")
     lines.append("")
-    lines.append(f"## Per-Symbol Chunks ({len(chunks)})")
+    lines.append(f"## Chunks ({len(chunks)})")
     lines.append("")
     for index, chunk in enumerate(chunks, start=1):
-        lines.append(f"### Chunk {index}: `{chunk['name']}` ({chunk['kind']})")
+        kind_suffix = f" ({chunk['kind']})" if chunk.get("kind") else ""
+        lines.append(f"### Chunk {index}: `{chunk['name']}`{kind_suffix}")
         lines.append("")
         lines.append("- Annotations:")
         annotation_keys = [
-            "id",
+            "chunk_id",
+            "symbol_id",
             "name",
             "kind",
+            "fqname",
             "file_path",
             "start_line",
             "end_line",
+            "start_byte",
+            "end_byte",
+            "chunk_part_index",
+            "chunk_part_total",
             "signature",
             "docstring",
             "body_hash",
             "language",
-            "snippet_start_line",
-            "snippet_end_line",
             "embedding_dimension",
         ]
         for key in annotation_keys:
             lines.append(f"  - `{key}`: `{chunk[key]}`")
         lines.append(
-            f"  - `embedding_preview_first_{preview}`: "
-            f"`{chunk['embedding_preview_first_n']}`"
+            f"  - `embedding_preview_first_{preview}`: " f"`{chunk['embedding_preview_first_n']}`"
         )
         lines.append("")
         lines.append("- `chunk_text`:")
@@ -177,11 +218,10 @@ def _render_markdown(
 
 
 def main() -> int:
-    """Generate a markdown report that shows embedding chunk inputs per symbol."""
+    """Generate a markdown report that shows embedding chunk inputs for one file."""
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a semantic-search embedding breakdown markdown report "
-            "for one source file."
+            "Generate a semantic-search embedding breakdown markdown report " "for one source file."
         )
     )
     parser.add_argument(
@@ -195,7 +235,7 @@ def main() -> int:
         "--embedding-provider",
         type=str,
         default=None,
-        choices=["local", "openai", "gemini"],
+        choices=["local", "openai", "gemini", "test"],
         help="Override configured embedding provider.",
     )
     parser.add_argument(
@@ -228,19 +268,20 @@ def main() -> int:
 
     source = source_file.read_text(encoding="utf8")
     symbols = parser_entry.parser.extract_symbols(source_key, source)
-    lines = source.splitlines()
-    chunk_texts = [Indexer._symbol_text(symbol, lines) for symbol in symbols]
+    chunks = _build_symbol_chunks(config, source_key=source_key, source=source, symbols=symbols)
+    chunk_texts = [chunk.text for chunk in chunks]
 
     provider = create_embedding_provider(config)
     vectors = provider.embed_batch(chunk_texts) if chunk_texts else []
-    if len(vectors) != len(symbols):
+    if len(vectors) != len(chunks):
         raise SystemExit(
-            f"Embedding provider returned {len(vectors)} vectors for {len(symbols)} symbols."
+            f"Embedding provider returned {len(vectors)} vectors for {len(chunks)} chunks."
         )
 
-    chunks = [
-        _chunk_payload(symbol, lines, vector, args.vector_preview)
-        for symbol, vector in zip(symbols, vectors, strict=True)
+    symbol_by_id = {symbol.id: symbol for symbol in symbols}
+    chunk_payloads = [
+        _chunk_payload(chunk, symbol_by_id.get(chunk.symbol_id), vector, args.vector_preview)
+        for chunk, vector in zip(chunks, vectors, strict=True)
     ]
 
     runtime = _provider_runtime(provider, vectors)
@@ -248,7 +289,7 @@ def main() -> int:
         source_path=source_key,
         config=config,
         runtime=runtime,
-        chunks=chunks,
+        chunks=chunk_payloads,
         preview=args.vector_preview,
         include_vectors=args.include_full_vectors,
     )

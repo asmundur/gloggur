@@ -39,7 +39,9 @@ def default_surface_code_map() -> Dict[str, List[str]]:
     return {
         "cli_preflight": sorted(CLI_FAILURE_REMEDIATION),
         "embedding_provider": ["embedding_provider_error"],
-        "index_watch_incremental": sorted(set(FAILURE_REMEDIATION) | set(WATCH_FAILURE_REMEDIATION)),
+        "index_watch_incremental": sorted(
+            set(FAILURE_REMEDIATION) | set(WATCH_FAILURE_REMEDIATION)
+        ),
         "inspect_file": sorted(INSPECT_FAILURE_REMEDIATION),
         "watch_status": sorted(WATCH_STATUS_FAILURE_REMEDIATION),
         "resume": sorted(RESUME_REMEDIATION),

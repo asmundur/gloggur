@@ -146,11 +146,13 @@ def test_cli_index_search_status_and_clear_cache() -> None:
         index_payload = _parse_json_output(index_result.output)
         assert index_payload["indexed_files"] == 1
         assert index_payload["indexed_symbols"] > 0
+        assert index_payload["index_stats"]["embedded_edge_vectors"] == 0
 
         status_result = runner.invoke(cli, ["status", "--json"], env=env)
         assert status_result.exit_code == 0
         status_payload = _parse_json_output(status_result.output)
         assert status_payload["total_symbols"] > 0
+        assert status_payload["index_stats"]["embedded_edge_vectors"] == 0
 
         search_result = runner.invoke(cli, ["search", "add", "--json", "--top-k", "3"], env=env)
         assert search_result.exit_code == 0
@@ -183,6 +185,62 @@ def test_cli_index_json_includes_stages_by_default() -> None:
         assert isinstance(stages, list)
         assert [stage["name"] for stage in stages] == list(cli_main.INDEX_STAGE_ORDER)
         assert all(stage["status"] == "completed" for stage in stages)
+
+
+def test_cli_index_disables_graph_edge_embeddings_by_default_and_opt_in_restores_them() -> None:
+    """Default indexing should keep graph edges structural-only unless explicitly enabled."""
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        files = {
+            f"pkg/module_{idx}.py": (
+                "from pkg.shared import helper\n\n"
+                f"def worker_{idx}(value: int) -> int:\n"
+                "    interim = helper(value)\n"
+                "    return helper(interim)\n\n"
+                f"def coordinator_{idx}(value: int) -> int:\n"
+                f"    return worker_{idx}(value)\n"
+            )
+            for idx in range(12)
+        }
+        files["pkg/shared.py"] = "def helper(value: int) -> int:\n" "    return value + 1\n"
+        repo = fixtures.create_temp_repo(files)
+
+        default_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        default_env = {
+            "GLOGGUR_CACHE_DIR": default_cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        default_result = runner.invoke(cli, ["index", str(repo), "--json"], env=default_env)
+        assert default_result.exit_code == 0, default_result.output
+        default_payload = _parse_json_output(default_result.output)
+        default_stats = default_payload["index_stats"]
+        assert default_stats["graph_edge_count"] > default_stats["embedded_symbol_vectors"]
+        assert default_stats["embedded_edge_vectors"] == 0
+        assert default_stats["embedded_vector_count"] == default_stats["embedded_symbol_vectors"]
+
+        default_status = runner.invoke(cli, ["status", "--json"], env=default_env)
+        assert default_status.exit_code == 0, default_status.output
+        default_status_payload = _parse_json_output(default_status.output)
+        assert default_status_payload["index_stats"] == default_stats
+
+        opt_in_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        opt_in_env = {
+            "GLOGGUR_CACHE_DIR": opt_in_cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        opt_in_result = runner.invoke(
+            cli,
+            ["index", str(repo), "--json", "--embed-graph-edges"],
+            env=opt_in_env,
+        )
+        assert opt_in_result.exit_code == 0, opt_in_result.output
+        opt_in_payload = _parse_json_output(opt_in_result.output)
+        opt_in_stats = opt_in_payload["index_stats"]
+
+        assert opt_in_stats["graph_edge_count"] == default_stats["graph_edge_count"]
+        assert opt_in_stats["embedded_symbol_vectors"] == default_stats["embedded_symbol_vectors"]
+        assert opt_in_stats["embedded_edge_vectors"] > 0
+        assert opt_in_stats["embedded_vector_count"] > default_stats["embedded_vector_count"]
 
 
 def test_cli_index_skips_django_vendor_minified_js_by_default() -> None:
@@ -279,7 +337,55 @@ def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
         assert "results" not in payload
         assert "metadata" not in payload
         assert all(hit.get("path") == "sample.py" for hit in hits if isinstance(hit, dict))
-        assert all("start_byte" in hit and "end_byte" in hit for hit in hits if isinstance(hit, dict))
+        assert all(
+            "start_byte" in hit and "end_byte" in hit for hit in hits if isinstance(hit, dict)
+        )
+
+
+def test_cli_search_by_fqname_finds_js_assignment_bound_symbols() -> None:
+    runner = CliRunner()
+    source = (
+        "module.exports.json = function () { return 1; };\n"
+        "const api = { send() { return module.exports.json(); } };\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.js": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        api_result = runner.invoke(
+            cli,
+            ["search", "api.send", "--json", "--search-mode", "by_fqname", "--top-k", "3"],
+            env=env,
+        )
+        assert api_result.exit_code == 0, api_result.output
+        api_payload = json.loads(api_result.output)
+        assert api_payload["hits"]
+        assert api_payload["hits"][0]["path"] == "sample.js"
+
+        exports_result = runner.invoke(
+            cli,
+            [
+                "search",
+                "module.exports.json",
+                "--json",
+                "--search-mode",
+                "by_fqname",
+                "--top-k",
+                "3",
+            ],
+            env=env,
+        )
+        assert exports_result.exit_code == 0, exports_result.output
+        exports_payload = json.loads(exports_result.output)
+        assert exports_payload["hits"]
+        assert exports_payload["hits"][0]["path"] == "sample.js"
 
 
 def test_cli_search_auto_declaration_query_finds_definition_without_exact_mode() -> None:
@@ -288,8 +394,7 @@ def test_cli_search_auto_declaration_query_finds_definition_without_exact_mode()
         repo = fixtures.create_temp_repo(
             {
                 "src/http.py": (
-                    "def escape_leading_slashes(url: str) -> str:\n"
-                    "    return url.lstrip('/')\n"
+                    "def escape_leading_slashes(url: str) -> str:\n" "    return url.lstrip('/')\n"
                 ),
                 "src/views.py": (
                     "from src.http import escape_leading_slashes\n\n"
@@ -517,8 +622,7 @@ def test_cli_symbol_queries_return_def_and_ref_tags() -> None:
         router_config_dir = repo / ".gloggur"
         router_config_dir.mkdir(exist_ok=True)
         (router_config_dir / "config.toml").write_text(
-            "[search_router]\n"
-            'enabled_backends = ["symbol"]\n',
+            "[search_router]\n" 'enabled_backends = ["symbol"]\n',
             encoding="utf8",
         )
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -541,9 +645,7 @@ def test_cli_symbol_queries_return_def_and_ref_tags() -> None:
         definition_hits = definition_payload.get("hits")
         assert isinstance(definition_hits, list)
         assert any(
-            "symbol_def" in hit.get("tags", [])
-            for hit in definition_hits
-            if isinstance(hit, dict)
+            "symbol_def" in hit.get("tags", []) for hit in definition_hits if isinstance(hit, dict)
         )
 
         references = runner.invoke(
@@ -556,11 +658,11 @@ def test_cli_symbol_queries_return_def_and_ref_tags() -> None:
         reference_hits = references_payload.get("hits")
         assert isinstance(reference_hits, list)
         assert any(
-            "symbol_ref" in hit.get("tags", [])
-            for hit in reference_hits
-            if isinstance(hit, dict)
+            "symbol_ref" in hit.get("tags", []) for hit in reference_hits if isinstance(hit, dict)
         )
-        assert all(hit.get("path") == "sample.py" for hit in reference_hits if isinstance(hit, dict))
+        assert all(
+            hit.get("path") == "sample.py" for hit in reference_hits if isinstance(hit, dict)
+        )
         assert all(
             isinstance(hit.get("start_byte"), int) and isinstance(hit.get("end_byte"), int)
             for hit in reference_hits
@@ -677,8 +779,7 @@ def test_cli_search_extract_round_trip_for_exact_semantic_and_symbol_modes() -> 
             semantic_hit = semantic_payload["hits"][0]
 
             (router_config_dir / "config.toml").write_text(
-                "[search_router]\n"
-                'enabled_backends = ["symbol"]\n',
+                "[search_router]\n" 'enabled_backends = ["symbol"]\n',
                 encoding="utf8",
             )
             symbol_result = runner.invoke(
@@ -857,10 +958,7 @@ def test_cli_find_about_combines_grep_query_with_semantic_ranking(
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
             {
-                "src/a_auth_token.py": (
-                    "def refresh_auth_state():\n"
-                    "    return 'token-auth'\n"
-                ),
+                "src/a_auth_token.py": ("def refresh_auth_state():\n" "    return 'token-auth'\n"),
                 "src/z_cache_token.py": (
                     "def warm_cache_state():\n"
                     '    """cache warmup token for startup state."""\n'
@@ -975,10 +1073,7 @@ def test_cli_search_file_filter_prefix_boundary_and_context_radius() -> None:
         "    token = token + '-e'\n"
         "    return token\n"
     )
-    source_src2 = (
-        "def src2_target() -> str:\n"
-        "    return 'src2-token'\n"
-    )
+    source_src2 = "def src2_target() -> str:\n" "    return 'src2-token'\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
             {
@@ -1004,10 +1099,11 @@ def test_cli_search_file_filter_prefix_boundary_and_context_radius() -> None:
             src_payload = _parse_json_output(src_filter_result.output)
             src_results = src_payload["results"]
             assert isinstance(src_results, list) and src_results
-            assert all(str(item["file"]).replace("\\", "/").startswith("src/") for item in src_results)
             assert all(
-                not str(item["file"]).replace("\\", "/").startswith("src2/")
-                for item in src_results
+                str(item["file"]).replace("\\", "/").startswith("src/") for item in src_results
+            )
+            assert all(
+                not str(item["file"]).replace("\\", "/").startswith("src2/") for item in src_results
             )
             src_metadata = src_payload["metadata"]
             assert src_metadata["file_filter"] == "src"
@@ -1170,9 +1266,7 @@ def test_calls_covered_target():
         covered_line = int(covered_symbol.start_line)
 
         test_path = str(repo / "test_service.py")
-        test_symbols = {
-            symbol.name: symbol for symbol in cache.list_symbols_for_file(test_path)
-        }
+        test_symbols = {symbol.name: symbol for symbol in cache.list_symbols_for_file(test_path)}
         test_symbol_id = test_symbols["test_calls_covered_target"].id
 
         coverage_payload = {test_symbol_id: {service_path: [covered_line]}}
@@ -1243,20 +1337,22 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_before.exit_code == 0
         status_before_payload = _parse_json_output(status_before.output)
         assert status_before_payload["needs_reindex"] is False
-        assert status_before_payload["expected_index_profile"] == "test:model-a"
-        assert status_before_payload["cached_index_profile"] == "test:model-a"
+        assert status_before_payload["expected_index_profile"] == "test:model-a|embed_graph_edges=0"
+        assert status_before_payload["cached_index_profile"] == "test:model-a|embed_graph_edges=0"
         assert status_before_payload["resume_decision"] == "resume_ok"
         assert status_before_payload["resume_reason_codes"] == []
         assert status_before_payload["resume_fingerprint_match"] is True
-        assert status_before_payload["last_success_resume_fingerprint"] == status_before_payload[
-            "expected_resume_fingerprint"
-        ]
+        assert (
+            status_before_payload["last_success_resume_fingerprint"]
+            == status_before_payload["expected_resume_fingerprint"]
+        )
         assert status_before_payload["last_success_resume_fingerprint_match"] is True
         assert isinstance(status_before_payload["last_success_resume_at"], str)
         assert isinstance(status_before_payload["tool_version"], str)
-        assert status_before_payload["last_success_tool_version"] == status_before_payload[
-            "tool_version"
-        ]
+        assert (
+            status_before_payload["last_success_tool_version"]
+            == status_before_payload["tool_version"]
+        )
         assert status_before_payload["last_success_tool_version_match"] is True
         first_success_fingerprint = status_before_payload["last_success_resume_fingerprint"]
         assert isinstance(first_success_fingerprint, str)
@@ -1265,15 +1361,16 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_changed.exit_code == 0
         status_changed_payload = _parse_json_output(status_changed.output)
         assert status_changed_payload["needs_reindex"] is True
-        assert status_changed_payload["expected_index_profile"] == "test:model-b"
-        assert status_changed_payload["cached_index_profile"] == "test:model-a"
+        assert (
+            status_changed_payload["expected_index_profile"] == "test:model-b|embed_graph_edges=0"
+        )
+        assert status_changed_payload["cached_index_profile"] == "test:model-a|embed_graph_edges=0"
         assert "embedding profile changed" in str(status_changed_payload["reindex_reason"])
         assert status_changed_payload["resume_decision"] == "reindex_required"
         assert status_changed_payload["resume_reason_codes"] == ["embedding_profile_changed"]
         assert status_changed_payload["resume_fingerprint_match"] is False
         assert (
-            status_changed_payload["last_success_resume_fingerprint"]
-            == first_success_fingerprint
+            status_changed_payload["last_success_resume_fingerprint"] == first_success_fingerprint
         )
         assert status_changed_payload["last_success_resume_fingerprint_match"] is False
         assert status_changed_payload["last_success_tool_version_match"] is True
@@ -1290,9 +1387,7 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert metadata["needs_reindex"] is True
         assert "embedding profile changed" in str(metadata["reindex_reason"])
         assert metadata["resume_decision"] == "reindex_required"
-        assert metadata["resume_reason_codes"] == [
-            "embedding_profile_changed"
-        ]
+        assert metadata["resume_reason_codes"] == ["embedding_profile_changed"]
         assert metadata["resume_fingerprint_match"] is False
         assert metadata["last_success_resume_fingerprint"] == first_success_fingerprint
         assert metadata["last_success_resume_fingerprint_match"] is False
@@ -1308,14 +1403,15 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
         assert status_after.exit_code == 0
         status_after_payload = _parse_json_output(status_after.output)
         assert status_after_payload["needs_reindex"] is False
-        assert status_after_payload["expected_index_profile"] == "test:model-b"
-        assert status_after_payload["cached_index_profile"] == "test:model-b"
+        assert status_after_payload["expected_index_profile"] == "test:model-b|embed_graph_edges=0"
+        assert status_after_payload["cached_index_profile"] == "test:model-b|embed_graph_edges=0"
         assert status_after_payload["resume_decision"] == "resume_ok"
         assert status_after_payload["resume_reason_codes"] == []
         assert status_after_payload["resume_fingerprint_match"] is True
-        assert status_after_payload["last_success_resume_fingerprint"] == status_after_payload[
-            "expected_resume_fingerprint"
-        ]
+        assert (
+            status_after_payload["last_success_resume_fingerprint"]
+            == status_after_payload["expected_resume_fingerprint"]
+        )
         assert status_after_payload["last_success_resume_fingerprint_match"] is True
         assert (
             status_after_payload["last_success_tool_version"]
@@ -1328,14 +1424,8 @@ def test_cli_detects_model_change_and_rebuilds_on_index() -> None:
 def test_cli_index_reports_incremental_observability_and_prunes_deleted_files() -> None:
     """Index payload should expose incremental counters and prune deleted-file symbols."""
     runner = CliRunner()
-    source = (
-        "def keep_me(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
-    delete_source = (
-        "def remove_me(value: int) -> int:\n"
-        "    return value + 2\n"
-    )
+    source = "def keep_me(value: int) -> int:\n" "    return value + 1\n"
+    delete_source = "def remove_me(value: int) -> int:\n" "    return value + 2\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"keep.py": source, "remove.py": delete_source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -1387,12 +1477,12 @@ def test_cli_index_rename_does_not_leave_ghost_symbols() -> None:
     """Rename flows should not report success while retaining stale old-path symbols."""
     runner = CliRunner()
     old_source = (
-        'def legacy_symbol(value: int) -> int:\n'
+        "def legacy_symbol(value: int) -> int:\n"
         '    """legacy rename ghost token old-only"""\n'
         "    return value + 1\n"
     )
     new_source = (
-        'def modern_symbol(value: int) -> int:\n'
+        "def modern_symbol(value: int) -> int:\n"
         '    """fresh rename token new-only"""\n'
         "    return value + 2\n"
     )
@@ -1587,12 +1677,12 @@ def test_cli_single_file_index_rename_prunes_missing_old_path_entries() -> None:
     """Single-file indexing should prune stale old-path rows after rename flows."""
     runner = CliRunner()
     old_source = (
-        'def legacy_symbol(value: int) -> int:\n'
+        "def legacy_symbol(value: int) -> int:\n"
         '    """legacy single-file rename token old-only"""\n'
         "    return value + 1\n"
     )
     new_source = (
-        'def modern_symbol(value: int) -> int:\n'
+        "def modern_symbol(value: int) -> int:\n"
         '    """single-file rename token new-only"""\n'
         "    return value + 2\n"
     )
@@ -1630,14 +1720,8 @@ def test_cli_single_file_index_surfaces_stale_cleanup_error_with_failure_contrac
 ) -> None:
     """Single-file index should fail closed with deterministic stale cleanup codes/remediation."""
     runner = CliRunner()
-    keep_source = (
-        "def keep_me(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
-    drop_source = (
-        "def drop_me(value: int) -> int:\n"
-        "    return value + 2\n"
-    )
+    keep_source = "def keep_me(value: int) -> int:\n" "    return value + 1\n"
+    drop_source = "def drop_me(value: int) -> int:\n" "    return value + 2\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"keep.py": keep_source, "drop.py": drop_source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -1875,7 +1959,9 @@ def test_cli_artifact_publish_fails_closed_when_destination_exists_without_overw
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
         env = {"GLOGGUR_CACHE_DIR": cache_dir}
-        destination_path = Path(tempfile.mkdtemp(prefix="gloggur-artifacts-")) / "cache-artifact.tgz"
+        destination_path = (
+            Path(tempfile.mkdtemp(prefix="gloggur-artifacts-")) / "cache-artifact.tgz"
+        )
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
         assert index_result.exit_code == 0, index_result.output
@@ -1934,10 +2020,7 @@ def test_cli_artifact_publish_supports_uploader_command_template() -> None:
             encoding="utf8",
         )
         uploaded_artifact = uploader_dir / "uploaded" / "cache-artifact.tgz"
-        uploader_template = (
-            f"{sys.executable} {uploader_script} "
-            "{artifact_path} {destination}"
-        )
+        uploader_template = f"{sys.executable} {uploader_script} " "{artifact_path} {destination}"
         env = {"GLOGGUR_CACHE_DIR": cache_dir}
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
@@ -1993,10 +2076,7 @@ def test_cli_artifact_publish_fails_closed_for_uploader_command_failure() -> Non
             "raise SystemExit(7)\n",
             encoding="utf8",
         )
-        uploader_template = (
-            f"{sys.executable} {uploader_script} "
-            "{artifact_path} {destination}"
-        )
+        uploader_template = f"{sys.executable} {uploader_script} " "{artifact_path} {destination}"
         env = {"GLOGGUR_CACHE_DIR": cache_dir}
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
@@ -2103,7 +2183,9 @@ def test_cli_artifact_publish_supports_direct_http_upload(monkeypatch: pytest.Mo
         assert headers["X-gloggur-archive-sha256"] == payload["archive_sha256"]
         assert headers["X-gloggur-archive-bytes"] == str(payload["archive_bytes"])
         assert headers["X-gloggur-manifest-sha256"] == payload["manifest_sha256"]
-        uploaded_path = Path(tempfile.mkdtemp(prefix="gloggur-http-upload-")) / "uploaded-artifact.tgz"
+        uploaded_path = (
+            Path(tempfile.mkdtemp(prefix="gloggur-http-upload-")) / "uploaded-artifact.tgz"
+        )
         uploaded_path.write_bytes(uploaded_body)
         validate_result = runner.invoke(
             cli,
@@ -2449,10 +2531,7 @@ def test_cli_inspect_self_heals_corrupted_cache() -> None:
 def test_cli_inspect_defaults_to_source_focus_with_opt_in_full_audit() -> None:
     """Inspect should default to src focus and include tests/scripts only when explicitly requested."""
     runner = CliRunner()
-    source_no_docstring = (
-        "def sample(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source_no_docstring = "def sample(value: int) -> int:\n" "    return value + 1\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
             {
@@ -2513,10 +2592,7 @@ def test_cli_inspect_defaults_to_source_focus_with_opt_in_full_audit() -> None:
 def test_cli_inspect_explicit_tests_path_remains_included_without_flags() -> None:
     """Explicit tests-path inspect should not be filtered out by default src-focus behavior."""
     runner = CliRunner()
-    source_no_docstring = (
-        "def sample(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source_no_docstring = "def sample(value: int) -> int:\n" "    return value + 1\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"tests/test_main.py": source_no_docstring})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -2580,10 +2656,7 @@ def test_cli_inspect_reports_no_missing_docstrings_for_recent_f11_hotspots(
 def test_cli_inspect_reuses_cached_warning_reports_for_unchanged_files() -> None:
     """Second inspect without --force should preserve actionable warnings from cache."""
     runner = CliRunner()
-    source_no_docstring = (
-        "def sample(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source_no_docstring = "def sample(value: int) -> int:\n" "    return value + 1\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"src/main.py": source_no_docstring})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -2643,8 +2716,7 @@ def test_cli_inspect_reuses_cached_clean_reports_for_unchanged_files(
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         config_path = Path(repo) / "gloggur.yaml"
         config_path.write_text(
-            "docstring_semantic_threshold: 0.2\n"
-            "docstring_semantic_min_chars: 0\n",
+            "docstring_semantic_threshold: 0.2\n" "docstring_semantic_min_chars: 0\n",
             encoding="utf8",
         )
         env = {"GLOGGUR_CACHE_DIR": cache_dir}
@@ -2684,10 +2756,7 @@ def test_cli_inspect_reuses_cached_clean_reports_for_unchanged_files(
 def test_cli_inspect_clears_stale_cached_reports_after_file_is_fixed() -> None:
     """A fixed file should not resurrect stale cached warnings on the next unchanged inspect."""
     runner = CliRunner()
-    source_no_docstring = (
-        "def sample(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source_no_docstring = "def sample(value: int) -> int:\n" "    return value + 1\n"
     source_with_docstring = (
         "def sample(value: int) -> int:\n"
         '    """Increment the value."""\n'
@@ -2725,12 +2794,7 @@ def test_cli_inspect_allow_partial_emits_failure_contract_for_decode_errors() ->
     runner = CliRunner()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
-            {
-                "src/main.py": (
-                    "def sample(value: int) -> int:\n"
-                    "    return value + 1\n"
-                )
-            }
+            {"src/main.py": ("def sample(value: int) -> int:\n" "    return value + 1\n")}
         )
         (repo / "src" / "broken.py").write_bytes(b"\xff\xfe\x00\x00")
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -2768,12 +2832,7 @@ def test_cli_inspect_fails_closed_without_allow_partial_on_decode_errors() -> No
     runner = CliRunner()
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
-            {
-                "src/main.py": (
-                    "def sample(value: int) -> int:\n"
-                    "    return value + 1\n"
-                )
-            }
+            {"src/main.py": ("def sample(value: int) -> int:\n" "    return value + 1\n")}
         )
         (repo / "src" / "broken.py").write_bytes(b"\xff\xfe\x00\x00")
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -2801,10 +2860,7 @@ def test_cli_inspect_fails_closed_without_allow_partial_on_decode_errors() -> No
 def test_cli_inspect_warning_summary_payload_schema_is_stable() -> None:
     """Inspect payload should keep stable summary fields and value types for automations."""
     runner = CliRunner()
-    source_no_docstring = (
-        "def sample(value: int) -> int:\n"
-        "    return value + 1\n"
-    )
+    source_no_docstring = "def sample(value: int) -> int:\n" "    return value + 1\n"
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"src/main.py": source_no_docstring})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -2932,19 +2988,19 @@ def test_cli_inspect_calibrated_threshold_reduces_low_semantic_warning_count(
 
     source = (
         "def high_signal() -> int:\n"
-        "    \"\"\"DOC_HI descriptive text.\"\"\"\n"
+        '    """DOC_HI descriptive text."""\n'
         "    value = 1 + 1  # CODE_HI marker with stable semantic alignment padding text.\n"
         "    return value\n\n"
         "def medium_signal_a() -> int:\n"
-        "    \"\"\"DOC_MID_A descriptive text.\"\"\"\n"
+        '    """DOC_MID_A descriptive text."""\n'
         "    value = 2 + 2  # CODE_MID_A marker with deterministic medium score padding.\n"
         "    return value\n\n"
         "def medium_signal_b() -> int:\n"
-        "    \"\"\"DOC_MID_B descriptive text.\"\"\"\n"
+        '    """DOC_MID_B descriptive text."""\n'
         "    value = 3 + 3  # CODE_MID_B marker with deterministic medium score padding.\n"
         "    return value\n\n"
         "def low_signal() -> int:\n"
-        "    \"\"\"DOC_LOW descriptive text.\"\"\"\n"
+        '    """DOC_LOW descriptive text."""\n'
         "    value = 4 + 4  # CODE_LOW marker with deterministic low score padding text.\n"
         "    return value\n"
     )
@@ -3045,12 +3101,12 @@ def test_cli_index_unchanged_run_skips_all_files_and_is_faster() -> None:
         full_duration_ms: int = int(full_payload["duration_ms"])
 
         # All files should have been processed in the first run.
-        assert full_scanned == len(module_names), (
-            f"expected {len(module_names)} files scanned, got {full_scanned}"
-        )
-        assert full_changed == len(module_names), (
-            f"expected all {len(module_names)} files changed on first run, got {full_changed}"
-        )
+        assert full_scanned == len(
+            module_names
+        ), f"expected {len(module_names)} files scanned, got {full_scanned}"
+        assert full_changed == len(
+            module_names
+        ), f"expected all {len(module_names)} files changed on first run, got {full_changed}"
 
         # --- Unchanged re-index ---
         unchanged_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
@@ -3063,15 +3119,15 @@ def test_cli_index_unchanged_run_skips_all_files_and_is_faster() -> None:
         unchanged_duration_ms: int = int(unchanged_payload["duration_ms"])
 
         # Behavioral contract: every file must be hash-matched and skipped.
-        assert unchanged_scanned == full_scanned, (
-            f"unchanged run scanned {unchanged_scanned} files, expected {full_scanned}"
-        )
-        assert unchanged_changed == 0, (
-            f"unchanged run should have files_changed=0, got {unchanged_changed}"
-        )
-        assert unchanged_skipped == full_scanned, (
-            f"unchanged run should skip all {full_scanned} files, got {unchanged_skipped}"
-        )
+        assert (
+            unchanged_scanned == full_scanned
+        ), f"unchanged run scanned {unchanged_scanned} files, expected {full_scanned}"
+        assert (
+            unchanged_changed == 0
+        ), f"unchanged run should have files_changed=0, got {unchanged_changed}"
+        assert (
+            unchanged_skipped == full_scanned
+        ), f"unchanged run should skip all {full_scanned} files, got {unchanged_skipped}"
 
         # Timing contract: unchanged run must be faster than the full build.
         # The 80 % ceiling is generous enough to survive slow CI but catches

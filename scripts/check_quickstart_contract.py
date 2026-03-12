@@ -22,7 +22,7 @@ REQUIRED_COMMAND_SNIPPETS = [
     "scripts/gloggur watch init . --json",
     "scripts/gloggur watch start --daemon --json",
     "scripts/gloggur watch status --json",
-    "scripts/gloggur search \"add numbers token\" --top-k 5 --json",
+    'scripts/gloggur search "add numbers token" --top-k 5 --json',
     "scripts/gloggur inspect . --json",
     "scripts/gloggur watch stop --json",
     "scripts/gloggur support collect --json",

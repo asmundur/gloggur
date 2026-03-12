@@ -45,6 +45,11 @@ def test_indexer_indexes_repo_and_sets_metadata() -> None:
             "symbols_removed",
         ):
             assert field in payload
+        index_stats = payload["index_stats"]
+        assert index_stats["symbol_count"] == len(cache.list_symbols())
+        assert index_stats["chunk_count"] == len(cache.list_chunks())
+        assert index_stats["graph_edge_count"] == len(cache.list_edges())
+        assert index_stats["embedded_edge_vectors"] == 0
         metadata = cache.get_index_metadata()
         assert metadata is not None
         assert metadata.indexed_files == 1
@@ -75,10 +80,7 @@ def test_indexer_skips_minified_js_by_default_and_can_include_with_config() -> N
 
         assert default_result.failed == 0
         assert default_result.files_considered == 1
-        assert all(
-            not path.endswith("jquery.min.js")
-            for path in default_result.source_files
-        )
+        assert all(not path.endswith("jquery.min.js") for path in default_result.source_files)
 
         include_cache = tempfile.mkdtemp(prefix="gloggur-cache-")
         include_indexer = Indexer(
@@ -312,8 +314,24 @@ def test_indexer_surfaces_stale_cleanup_failures_with_deterministic_reason_code(
         assert guidance["stale_cleanup_error"]
 
 
-def test_indexer_persists_graph_edges_for_file() -> None:
-    """Indexing should persist deterministic graph edges per file."""
+def test_indexer_persists_graph_edges_without_edge_embeddings_by_default() -> None:
+    """Default indexing should keep graph edges structural-only."""
+
+    class RecordingProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self.batch_texts: list[list[str]] = []
+
+        def embed_text(self, text: str) -> list[float]:
+            size = float(len(text))
+            return [size, size + 1.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            self.batch_texts.append(list(texts))
+            return [self.embed_text(text) for text in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
     source = (
         "import math\n\n"
         "def helper(value: int) -> int:\n"
@@ -327,7 +345,13 @@ def test_indexer_persists_graph_edges_for_file() -> None:
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         config = GloggurConfig(cache_dir=cache_dir)
         cache = CacheManager(CacheConfig(cache_dir))
-        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+        embedding_provider = RecordingProvider()
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=embedding_provider,
+        )
 
         result = indexer.index_repository(str(repo))
 
@@ -341,6 +365,76 @@ def test_indexer_persists_graph_edges_for_file() -> None:
             edge for edge in edges if edge.edge_type == "CALLS" and "unresolved:" in edge.to_id
         ]
         assert unresolved_calls
+        assert all(edge.text is None for edge in edges)
+        assert all(edge.embedding_vector is None for edge in edges)
+        assert not any(
+            text.startswith("EDGE_TYPE:")
+            for batch in embedding_provider.batch_texts
+            for text in batch
+        )
+        index_stats = cache.get_index_stats()
+        assert index_stats["graph_edge_count"] == len(edges)
+        assert index_stats["embedded_edge_vectors"] == 0
+        assert index_stats["embedded_vector_count"] == index_stats["embedded_symbol_vectors"]
+
+
+def test_indexer_opt_in_restores_edge_text_and_embeddings() -> None:
+    """Enabling edge embeddings should restore edge text serialization and vectors."""
+
+    class RecordingProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self.batch_texts: list[list[str]] = []
+
+        def embed_text(self, text: str) -> list[float]:
+            size = float(len(text))
+            return [size, size + 1.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            self.batch_texts.append(list(texts))
+            return [self.embed_text(text) for text in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    source = (
+        "import math\n\n"
+        "def helper(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def target(value: int) -> int:\n"
+        "    computed = helper(value)\n"
+        "    return unknown_api(computed)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir, embed_graph_edges=True)
+        cache = CacheManager(CacheConfig(cache_dir))
+        embedding_provider = RecordingProvider()
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=embedding_provider,
+        )
+
+        result = indexer.index_repository(str(repo))
+
+        assert result.failed == 0
+        edges = cache.list_edges_for_file(str(repo / "sample.py"))
+        assert edges
+        assert all(
+            isinstance(edge.text, str) and edge.text.startswith("EDGE_TYPE:") for edge in edges
+        )
+        assert all(edge.embedding_vector is not None for edge in edges)
+        assert any(
+            text.startswith("EDGE_TYPE:")
+            for batch in embedding_provider.batch_texts
+            for text in batch
+        )
+        index_stats = cache.get_index_stats()
+        assert index_stats["graph_edge_count"] == len(edges)
+        assert index_stats["embedded_edge_vectors"] == len(edges)
+        assert index_stats["embedded_vector_count"] > index_stats["embedded_symbol_vectors"]
 
 
 def test_indexer_removes_edges_for_deleted_files() -> None:

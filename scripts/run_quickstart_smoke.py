@@ -85,7 +85,7 @@ def _create_fixture_repo(root: Path) -> None:
     (root / "pkg").mkdir(parents=True, exist_ok=True)
     (root / "pkg" / "math_utils.py").write_text(
         "def add_numbers(value_a: int, value_b: int) -> int:\n"
-        "    \"\"\"Add two integers and return the sum.\"\"\"\n"
+        '    """Add two integers and return the sum."""\n'
         "    return value_a + value_b\n",
         encoding="utf8",
     )
@@ -170,7 +170,9 @@ def _run_stage(
     return stage_payload
 
 
-def _watch_stop_cleanup(repo_root: Path, workspace_repo: Path, timeout_seconds: float) -> Dict[str, object]:
+def _watch_stop_cleanup(
+    repo_root: Path, workspace_repo: Path, timeout_seconds: float
+) -> Dict[str, object]:
     python_exec = _python_executable(repo_root)
     env = _base_env(repo_root)
     command = [python_exec, "-m", "gloggur.cli.main", "watch", "stop", "--json"]

@@ -84,6 +84,7 @@ class IndexResult:
     failed_reasons: dict[str, int] = field(default_factory=dict)
     failed_samples: list[str] = field(default_factory=list)
     phase_timings_ms: dict[str, int] = field(default_factory=dict)
+    index_stats: dict[str, int] = field(default_factory=dict)
     file_timings: list[FileTimingTrace] = field(default_factory=list)
     parsed_files: list[ParsedFileSnapshot] = field(default_factory=list)
     source_files: list[str] = field(default_factory=list)
@@ -119,6 +120,7 @@ class IndexResult:
             "duration_ms": self.duration_ms,
             "indexed_files": self.indexed_files,
             "skipped_files": self.skipped_files,
+            "index_stats": dict(self.index_stats),
         }
         if self.failed_reasons:
             payload["failure_codes"] = sorted(self.failed_reasons)
@@ -314,6 +316,7 @@ class Indexer:
                     repo_id=prepared.repo_id,
                     commit=prepared.commit,
                     language=prepared.language or "unknown",
+                    include_text=self.config.embed_graph_edges,
                 )
                 prepared.timing.edge_ms = int((time.perf_counter() - edge_started) * 1000)
         edge_phase_ms = int((time.perf_counter() - edge_phase_started) * 1000)
@@ -462,6 +465,7 @@ class Indexer:
                 "cleanup": cleanup_ms,
                 "consistency_checks": consistency_ms,
             },
+            index_stats=self.cache.get_index_stats(),
             file_timings=file_timings,
             parsed_files=[prepared.snapshot for prepared in prepared_files],
             source_files=source_files,
@@ -513,6 +517,7 @@ class Indexer:
             repo_id=prepared.repo_id,
             commit=prepared.commit,
             language=prepared.language or "unknown",
+            include_text=self.config.embed_graph_edges,
         )
         timing.edge_ms = int((time.perf_counter() - edge_started) * 1000)
 
@@ -1115,6 +1120,8 @@ class Indexer:
 
     def _apply_edge_embeddings(self, edges: list[EdgeRecord]) -> list[EdgeRecord]:
         """Attach embedding vectors to edge fact text when a provider is available."""
+        if not self.config.embed_graph_edges:
+            return edges
         if not self.embedding_provider:
             return edges
         texts = [edge.text or "" for edge in edges]
@@ -1151,6 +1158,7 @@ class Indexer:
         repo_id: str,
         commit: str,
         language: str,
+        include_text: bool,
     ) -> list[EdgeRecord]:
         """Extract deterministic graph edges for a file from symbols and source text."""
         extractor = GraphEdgeExtractor(language)
@@ -1161,6 +1169,7 @@ class Indexer:
             candidate_symbols=candidate_symbols,
             repo_id=repo_id,
             commit=commit,
+            include_text=include_text,
         )
 
     @staticmethod

@@ -124,12 +124,7 @@ def test_artifact_validate_and_restore_routes_emit_payloads(
     monkeypatch.setattr(
         cli_main,
         "_restore_artifact_archive",
-        lambda artifact_path,
-        destination_dir,
-        overwrite,
-        verify_file_hashes,
-        require_provenance=False,
-        expected_manifest_sha256=None: {
+        lambda artifact_path, destination_dir, overwrite, verify_file_hashes, require_provenance=False, expected_manifest_sha256=None: {
             "restored": True,
             "artifact_path": artifact_path,
             "destination_dir": destination_dir,

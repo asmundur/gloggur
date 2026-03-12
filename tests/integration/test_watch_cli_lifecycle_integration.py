@@ -113,9 +113,7 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
 
         updated_phrase = "after watch lifecycle update phrase"
         target.write_text(
-            "def watch_target() -> str:\n"
-            f'    """{updated_phrase}"""\n'
-            '    return "after"\n',
+            "def watch_target() -> str:\n" f'    """{updated_phrase}"""\n' '    return "after"\n',
             encoding="utf8",
         )
 
@@ -152,7 +150,9 @@ def test_watch_lifecycle_commands_with_env_overrides(tmp_path: Path) -> None:
                 saw_updated_search_result = True
                 break
             time.sleep(0.1)
-        log_content = log_file.read_text(encoding="utf8") if log_file.exists() else "<missing log file>"
+        log_content = (
+            log_file.read_text(encoding="utf8") if log_file.exists() else "<missing log file>"
+        )
         assert saw_updated_search_result, (
             "watch daemon did not surface the updated file in search results in time\n"
             f"last_status={json.dumps(last_status_again_payload, indent=2, sort_keys=True) if last_status_again_payload is not None else '<missing>'}\n"
@@ -270,10 +270,10 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
             assert status.returncode == 0, f"{status.stderr}\n{status.stdout}"
             payload = _parse_json_payload(status.stdout)
             status_label = str(payload.get("status", "")).strip().lower()
-            if (
-                payload.get("running") is True
-                and status_label in {"running", "running_with_errors"}
-            ):
+            if payload.get("running") is True and status_label in {
+                "running",
+                "running_with_errors",
+            }:
                 running_payload = payload
                 break
             time.sleep(0.1)
@@ -302,7 +302,9 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
                 failed_payload = payload
                 break
             time.sleep(0.1)
-        log_content = log_file.read_text(encoding="utf8") if log_file.exists() else "<missing log file>"
+        log_content = (
+            log_file.read_text(encoding="utf8") if log_file.exists() else "<missing log file>"
+        )
         assert failed_payload is not None, (
             "watch daemon did not report vector_metadata_mismatch\n"
             f"last_status={json.dumps(last_status_payload, indent=2, sort_keys=True) if last_status_payload is not None else '<missing>'}\n"
@@ -347,7 +349,9 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
                 env,
                 timeout=30,
             )
-            assert drifted_status.returncode == 0, f"{drifted_status.stderr}\n{drifted_status.stdout}"
+            assert (
+                drifted_status.returncode == 0
+            ), f"{drifted_status.stderr}\n{drifted_status.stdout}"
             payload = _parse_json_payload(drifted_status.stdout)
             reasons = payload.get("failed_reasons", {})
             codes = payload.get("failure_codes", [])
@@ -385,7 +389,9 @@ def test_watch_status_fails_closed_from_last_batch_when_summary_counters_drift(
         drifted_guidance = drifted_payload.get("failure_guidance", {})
         assert isinstance(drifted_guidance, dict)
         matched_guidance_codes = [
-            code for code in drifted_codes if code in accepted_failure_codes and code in drifted_guidance
+            code
+            for code in drifted_codes
+            if code in accepted_failure_codes and code in drifted_guidance
         ]
         assert matched_guidance_codes
         for code in matched_guidance_codes:

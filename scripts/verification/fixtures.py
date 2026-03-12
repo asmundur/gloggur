@@ -24,9 +24,11 @@ _LANGUAGE_BY_EXTENSION: Dict[str, str] = {
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class FixtureFile:
     """Fixture file content and metadata."""
+
     content: str
     language: Optional[str] = None
     screen: bool = True
@@ -35,6 +37,7 @@ class FixtureFile:
 @dataclass(frozen=True)
 class FixtureTemplate:
     """Template describing a set of fixture files."""
+
     name: str
     description: str
     files: Dict[str, FixtureFile]
@@ -43,6 +46,7 @@ class FixtureTemplate:
 
 class FixtureRegistry:
     """Registry for fixture templates used in verification tests."""
+
     def __init__(self) -> None:
         """Initialize an empty fixture registry."""
         self._templates: Dict[str, FixtureTemplate] = {}
@@ -65,7 +69,9 @@ class FixtureRegistry:
         if not tags:
             return list(self._templates.values())
         tag_set = set(tags)
-        return [template for template in self._templates.values() if tag_set.issubset(template.tags)]
+        return [
+            template for template in self._templates.values() if tag_set.issubset(template.tags)
+        ]
 
     def compose(
         self,
@@ -99,6 +105,7 @@ FIXTURE_REGISTRY = FixtureRegistry()
 
 class TestFixtures:
     """Utilities for creating temporary repos and caches for tests."""
+
     __test__ = False
     registry = FIXTURE_REGISTRY
 
@@ -179,10 +186,10 @@ class TestFixtures:
         return (
             "\n".join(
                 [
-                    "\"\"\"Sample module for verification tests.\"\"\"",
+                    '"""Sample module for verification tests."""',
                     "",
                     "class Greeter:",
-                    "    \"\"\"Simple greeting class.\"\"\"",
+                    '    """Simple greeting class."""',
                     "    def __init__(self, name: str) -> None:",
                     "        self.name = name",
                     "",
@@ -190,7 +197,7 @@ class TestFixtures:
                     "        return f'Hello, {self.name}!'",
                     "",
                     "def add(a: int, b: int) -> int:",
-                    "    \"\"\"Add two integers.\"\"\"",
+                    '    """Add two integers."""',
                     "    return a + b",
                 ]
             )
@@ -258,7 +265,7 @@ class TestFixtures:
         return (
             "\n".join(
                 [
-                    "import React from \"react\";",
+                    'import React from "react";',
                     "",
                     "type Props = {",
                     "  title: string;",
@@ -290,7 +297,7 @@ class TestFixtures:
                     "    }",
                     "",
                     "    pub fn greet(&self) -> String {",
-                    "        format!(\"Hello, {}!\", self.name)",
+                    '        format!("Hello, {}!", self.name)',
                     "    }",
                     "}",
                     "",
@@ -310,7 +317,7 @@ class TestFixtures:
                 [
                     "package main",
                     "",
-                    "import \"fmt\"",
+                    'import "fmt"',
                     "",
                     "func add(a int, b int) int {",
                     "    return a + b",
@@ -519,7 +526,9 @@ def _register_default_fixtures(registry: FixtureRegistry) -> None:
     python_basic = FixtureTemplate(
         name="python_basic",
         description="Single-file Python fixture with class and function.",
-        files={"sample.py": FixtureFile(TestFixtures.create_sample_python_file(), language="python")},
+        files={
+            "sample.py": FixtureFile(TestFixtures.create_sample_python_file(), language="python")
+        },
         tags=("python", "single-file"),
     )
     python_multi = FixtureTemplate(
@@ -533,7 +542,7 @@ def _register_default_fixtures(registry: FixtureRegistry) -> None:
                         "from src.models.user import User",
                         "",
                         "def build_message(user: User) -> str:",
-                        "    return f\"Hello, {user.name}!\"",
+                        '    return f"Hello, {user.name}!"',
                         "",
                         "def total(a: int, b: int) -> int:",
                         "    return add(a, b)",
@@ -579,13 +588,21 @@ def _register_default_fixtures(registry: FixtureRegistry) -> None:
     javascript_basic = FixtureTemplate(
         name="javascript_basic",
         description="Single-file JavaScript fixture with class and function.",
-        files={"src/index.js": FixtureFile(TestFixtures.create_sample_javascript_file(), language="javascript")},
+        files={
+            "src/index.js": FixtureFile(
+                TestFixtures.create_sample_javascript_file(), language="javascript"
+            )
+        },
         tags=("javascript", "single-file"),
     )
     typescript_basic = FixtureTemplate(
         name="typescript_basic",
         description="Single-file TypeScript fixture with interface, class, and function.",
-        files={"src/index.ts": FixtureFile(TestFixtures.create_sample_typescript_file(), language="typescript")},
+        files={
+            "src/index.ts": FixtureFile(
+                TestFixtures.create_sample_typescript_file(), language="typescript"
+            )
+        },
         tags=("typescript", "single-file"),
     )
     tsx_basic = FixtureTemplate(
@@ -609,7 +626,9 @@ def _register_default_fixtures(registry: FixtureRegistry) -> None:
     java_basic = FixtureTemplate(
         name="java_basic",
         description="Single-file Java fixture with main method.",
-        files={"src/Main.java": FixtureFile(TestFixtures.create_sample_java_file(), language="java")},
+        files={
+            "src/Main.java": FixtureFile(TestFixtures.create_sample_java_file(), language="java")
+        },
         tags=("java", "single-file"),
     )
     edge_empty = FixtureTemplate(

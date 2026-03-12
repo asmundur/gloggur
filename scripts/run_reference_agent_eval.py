@@ -106,22 +106,22 @@ def _build_fixture_repo(repo: Path) -> None:
     (repo / "string_ops.py").write_text(
         "def capitalize_words(text: str) -> str:\n"
         '    """capitalize words token"""\n'
-        "    return \" \".join(part.capitalize() for part in text.split())\n\n"
+        '    return " ".join(part.capitalize() for part in text.split())\n\n'
         "def slugify_words(text: str) -> str:\n"
         '    """slugify words token"""\n'
-        "    return \"-\".join(part.lower() for part in text.split())\n\n"
+        '    return "-".join(part.lower() for part in text.split())\n\n'
         "def count_vowels(text: str) -> int:\n"
         '    """count vowels token"""\n'
-        "    return sum(1 for char in text.lower() if char in \"aeiou\")\n\n"
+        '    return sum(1 for char in text.lower() if char in "aeiou")\n\n'
         "def reverse_words(text: str) -> str:\n"
         '    """reverse words token"""\n'
-        "    return \" \".join(reversed(text.split()))\n\n"
+        '    return " ".join(reversed(text.split()))\n\n'
         "def parse_int_safe(raw: str) -> int:\n"
         '    """parse int token"""\n'
         "    return int(raw.strip())\n\n"
         "def format_currency(amount: float) -> str:\n"
         '    """format currency token"""\n'
-        "    return f\"${amount:0.2f}\"\n",
+        '    return f"${amount:0.2f}"\n',
         encoding="utf8",
     )
 
@@ -192,7 +192,14 @@ def execute_reference_loop(
             retry_performed=False,
             final_query=query,
             final_top_k=top_k,
-            logs=[{"step": "stop", "attempt": 0, "outcome": "failed", "reason_code": "agent_query_invalid"}],
+            logs=[
+                {
+                    "step": "stop",
+                    "attempt": 0,
+                    "outcome": "failed",
+                    "reason_code": "agent_query_invalid",
+                }
+            ],
             result_count=0,
             top_symbol=None,
             top_symbol_id=None,
@@ -211,7 +218,14 @@ def execute_reference_loop(
             retry_performed=False,
             final_query=query,
             final_top_k=top_k,
-            logs=[{"step": "stop", "attempt": 0, "outcome": "failed", "reason_code": "agent_top_k_invalid"}],
+            logs=[
+                {
+                    "step": "stop",
+                    "attempt": 0,
+                    "outcome": "failed",
+                    "reason_code": "agent_top_k_invalid",
+                }
+            ],
             result_count=0,
             top_symbol=None,
             top_symbol_id=None,
@@ -273,7 +287,14 @@ def execute_reference_loop(
         try:
             payload = search_json(current_query, current_top_k)
         except subprocess.TimeoutExpired as exc:
-            logs.append({"step": "stop", "attempt": attempt, "outcome": "failed", "reason_code": "agent_search_timeout"})
+            logs.append(
+                {
+                    "step": "stop",
+                    "attempt": attempt,
+                    "outcome": "failed",
+                    "reason_code": "agent_search_timeout",
+                }
+            )
             return LoopResult(
                 ok=False,
                 status="failed",
@@ -293,7 +314,14 @@ def execute_reference_loop(
                 },
             )
         except Exception as exc:  # pragma: no cover - defensive fallback
-            logs.append({"step": "stop", "attempt": attempt, "outcome": "failed", "reason_code": "agent_search_failed"})
+            logs.append(
+                {
+                    "step": "stop",
+                    "attempt": attempt,
+                    "outcome": "failed",
+                    "reason_code": "agent_search_failed",
+                }
+            )
             return LoopResult(
                 ok=False,
                 status="failed",
@@ -438,7 +466,9 @@ def execute_reference_loop(
         )
 
 
-def _build_eval_summary(case_results: List[Dict[str, object]], *, min_pass_rate: float) -> Dict[str, object]:
+def _build_eval_summary(
+    case_results: List[Dict[str, object]], *, min_pass_rate: float
+) -> Dict[str, object]:
     """Build deterministic eval summary and threshold decision."""
     total = len(case_results)
     passed = sum(1 for case in case_results if bool(case.get("passed")))
@@ -587,9 +617,13 @@ class ReferenceAgentHarness:
         try:
             indexed_symbols = int(indexed_symbols_raw)
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"index payload has invalid indexed_symbols: {indexed_symbols_raw!r}") from exc
+            raise RuntimeError(
+                f"index payload has invalid indexed_symbols: {indexed_symbols_raw!r}"
+            ) from exc
         if indexed_symbols <= 0:
-            raise RuntimeError("index produced zero symbols; reference loop cannot run grounded retrieval")
+            raise RuntimeError(
+                "index produced zero symbols; reference loop cannot run grounded retrieval"
+            )
 
     def _search_json(self, query: str, top_k: int) -> Dict[str, object]:
         return self._run_cli_json(
@@ -676,7 +710,9 @@ class ReferenceAgentHarness:
 
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run minimal reference agent loop and eval harness.")
+    parser = argparse.ArgumentParser(
+        description="Run minimal reference agent loop and eval harness."
+    )
     parser.add_argument("--mode", choices=("run", "eval"), default="eval")
     parser.add_argument("--query", type=str, default=None)
     parser.add_argument("--repo", type=Path, default=None)

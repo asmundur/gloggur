@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 @dataclass
 class TestResult:
     """Result of a single verification test."""
+
     __test__ = False
 
     passed: bool
@@ -19,6 +20,7 @@ class TestResult:
 @dataclass
 class PerformanceMetric:
     """Performance measurement for a verification step."""
+
     name: str
     duration_ms: Optional[float] = None
     memory_mb: Optional[float] = None
@@ -29,6 +31,7 @@ class PerformanceMetric:
 @dataclass
 class PerformanceThresholds:
     """Thresholds for performance warnings."""
+
     max_duration_ms: Optional[float] = None
     max_memory_mb: Optional[float] = None
     min_throughput: Optional[float] = None
@@ -37,6 +40,7 @@ class PerformanceThresholds:
 @dataclass
 class PerformanceTrendPoint:
     """Single trend point for performance metrics."""
+
     label: str
     duration_ms: Optional[float] = None
     memory_mb: Optional[float] = None
@@ -47,12 +51,14 @@ class PerformanceTrendPoint:
 @dataclass
 class _Section:
     """Section of the report containing test results."""
+
     title: str
     results: List[Dict[str, object]]
 
 
 class Reporter:
     """Collects verification results and formats reports."""
+
     def __init__(self) -> None:
         """Initialize an empty reporter."""
         self._sections: List[_Section] = []
@@ -191,7 +197,9 @@ class Reporter:
             if baseline:
                 self._baseline = baseline
 
-    def add_baseline_trends(self, baseline_label: str = "baseline", current_label: str = "current") -> None:
+    def add_baseline_trends(
+        self, baseline_label: str = "baseline", current_label: str = "current"
+    ) -> None:
         """Add baseline and current points to trend data."""
         with self._lock:
             if not self._baseline:
@@ -297,13 +305,17 @@ class Reporter:
                 payload["sections"].append({"title": section.title, "results": results})
             if self._performance:
                 payload["performance"] = {
-                    "metrics": {name: _metric_payload(metric) for name, metric in self._performance.items()},
+                    "metrics": {
+                        name: _metric_payload(metric) for name, metric in self._performance.items()
+                    },
                     "thresholds": {
                         name: _threshold_payload(thresholds)
                         for name, thresholds in self._performance_thresholds.items()
                     },
                     "warnings": list(self._performance_warnings),
-                    "baseline": {name: _metric_payload(metric) for name, metric in self._baseline.items()},
+                    "baseline": {
+                        name: _metric_payload(metric) for name, metric in self._baseline.items()
+                    },
                     "comparisons": self._build_comparisons_payload(),
                     "trends": {
                         name: [_trend_payload(point) for point in points]
@@ -320,13 +332,17 @@ class Reporter:
             red = "\033[91m"
             yellow = "\033[93m"
             reset = "\033[0m"
-            print(f"{yellow}Verification Summary{reset}: total={total} passed={passed} failed={failed}")
+            print(
+                f"{yellow}Verification Summary{reset}: total={total} passed={passed} failed={failed}"
+            )
             if failed:
                 for section in self._sections:
                     for item in section.results:
                         result: TestResult = item["result"]
                         if not result.passed:
-                            print(f"{red}FAIL{reset} {section.title} - {item['name']}: {result.message}")
+                            print(
+                                f"{red}FAIL{reset} {section.title} - {item['name']}: {result.message}"
+                            )
             else:
                 print(f"{green}All tests passed{reset}")
 
@@ -349,7 +365,9 @@ class Reporter:
         thresholds = self._performance_thresholds.get(name)
         if not thresholds:
             return
-        self._performance_warnings = [item for item in self._performance_warnings if item.get("metric") != name]
+        self._performance_warnings = [
+            item for item in self._performance_warnings if item.get("metric") != name
+        ]
         if metric.duration_ms is not None and thresholds.max_duration_ms is not None:
             if metric.duration_ms > thresholds.max_duration_ms:
                 current = _format_duration_ms(metric.duration_ms)
@@ -370,7 +388,10 @@ class Reporter:
                 current = f"{metric.throughput:.2f} {unit}"
                 expected = f"{thresholds.min_throughput:.2f} {unit}"
                 self._performance_warnings.append(
-                    {"metric": name, "message": f"{name} throughput {current}, expected >{expected}"}
+                    {
+                        "metric": name,
+                        "message": f"{name} throughput {current}, expected >{expected}",
+                    }
                 )
 
     def _format_comparison_lines(self, name: str, metric: PerformanceMetric) -> List[str]:
@@ -417,9 +438,15 @@ class Reporter:
             if not baseline:
                 continue
             comparisons[name] = {
-                "duration_ms": _comparison_payload(metric.duration_ms, baseline.duration_ms, higher_is_better=False),
-                "memory_mb": _comparison_payload(metric.memory_mb, baseline.memory_mb, higher_is_better=False),
-                "throughput": _comparison_payload(metric.throughput, baseline.throughput, higher_is_better=True),
+                "duration_ms": _comparison_payload(
+                    metric.duration_ms, baseline.duration_ms, higher_is_better=False
+                ),
+                "memory_mb": _comparison_payload(
+                    metric.memory_mb, baseline.memory_mb, higher_is_better=False
+                ),
+                "throughput": _comparison_payload(
+                    metric.throughput, baseline.throughput, higher_is_better=True
+                ),
             }
         return comparisons
 
@@ -504,7 +531,11 @@ def _format_comparison_line(
         pct = None
     else:
         pct = (delta / baseline) * 100
-    direction = "improved" if (delta > 0 and higher_is_better) or (delta < 0 and not higher_is_better) else "regressed"
+    direction = (
+        "improved"
+        if (delta > 0 and higher_is_better) or (delta < 0 and not higher_is_better)
+        else "regressed"
+    )
     if delta == 0:
         direction = "unchanged"
     delta_text = formatter(abs(delta))
@@ -512,10 +543,18 @@ def _format_comparison_line(
     return f"{label}: {formatter(current)} vs {formatter(baseline)} ({direction}, Δ {delta_text}, {pct_text})"
 
 
-def _comparison_payload(current: Optional[float], baseline: Optional[float], *, higher_is_better: bool) -> Dict[str, object]:
+def _comparison_payload(
+    current: Optional[float], baseline: Optional[float], *, higher_is_better: bool
+) -> Dict[str, object]:
     """Build a comparison payload for JSON output."""
     if current is None or baseline is None:
-        return {"current": current, "baseline": baseline, "delta": None, "delta_pct": None, "status": "unknown"}
+        return {
+            "current": current,
+            "baseline": baseline,
+            "delta": None,
+            "delta_pct": None,
+            "status": "unknown",
+        }
     delta = current - baseline
     delta_pct = None if baseline == 0 else (delta / baseline) * 100
     if delta == 0:

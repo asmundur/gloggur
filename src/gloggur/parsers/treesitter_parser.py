@@ -79,8 +79,27 @@ _LANGUAGE_SPECS: dict[str, LanguageSpec] = {
 class _ContainerContext:
     """Container stack frame for fqname/container metadata."""
 
-    symbol_id: str
+    symbol_id: str | None
     fqname: str
+
+
+@dataclass(frozen=True)
+class _SyntheticSymbolSpec:
+    """Resolved synthetic symbol metadata for JS-family assignment patterns."""
+
+    kind: str
+    name: str
+    container: _ContainerContext | None
+    attributes: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _AssignmentTarget:
+    """Resolved assignment target metadata for one synthetic symbol."""
+
+    name: str
+    container: _ContainerContext | None
+    binding_style: str
 
 
 class TreeSitterParser(Parser):
@@ -143,7 +162,13 @@ class TreeSitterParser(Parser):
             return
 
         current_container = containers[-1] if containers else None
-        symbol = self._symbol_from_node(
+        symbol = self._synthetic_symbol_from_node(
+            node,
+            path=path,
+            source=source,
+            repo_id=repo_id,
+            current_container=current_container,
+        ) or self._symbol_from_node(
             node,
             path=path,
             source=source,
@@ -187,8 +212,57 @@ class TreeSitterParser(Parser):
         if not name:
             return None
 
+        return self._build_symbol(
+            node=node,
+            path=path,
+            source=source,
+            repo_id=repo_id,
+            kind=kind,
+            name=name,
+            container=container,
+        )
+
+    def _synthetic_symbol_from_node(
+        self,
+        node: Node,
+        *,
+        path: str,
+        source: str,
+        repo_id: str,
+        current_container: _ContainerContext | None,
+    ) -> Symbol | None:
+        """Create JS-family synthetic symbols for assignment-bound declarations."""
+        spec = self._synthetic_symbol_spec(node, source, current_container)
+        if spec is None:
+            return None
+
+        return self._build_symbol(
+            node=node,
+            path=path,
+            source=source,
+            repo_id=repo_id,
+            kind=spec.kind,
+            name=spec.name,
+            container=spec.container,
+            extra_attributes=spec.attributes,
+        )
+
+    def _build_symbol(
+        self,
+        *,
+        node: Node,
+        path: str,
+        source: str,
+        repo_id: str,
+        kind: str,
+        name: str,
+        container: _ContainerContext | None,
+        extra_attributes: dict[str, object] | None = None,
+    ) -> Symbol:
+        """Build one symbol object with shared metadata/signals plumbing."""
+
         signals = []
-        attributes: dict[str, object] = {}
+        attributes: dict[str, object] = dict(extra_attributes or {})
         final_kind = kind
         for processor in self.signal_processors:
             outcome = processor.process(
@@ -264,6 +338,205 @@ class TreeSitterParser(Parser):
             attributes=attributes,
         )
 
+    def _synthetic_symbol_spec(
+        self,
+        node: Node,
+        source: str,
+        current_container: _ContainerContext | None,
+    ) -> _SyntheticSymbolSpec | None:
+        """Return a synthetic symbol spec for supported JS-family binding patterns."""
+        if self.language not in {"javascript", "typescript", "tsx"}:
+            return None
+
+        if node.type == "method_definition":
+            if node.parent is None or node.parent.type != "object":
+                return None
+            owner = self._bound_object_owner(node.parent, source)
+            if owner is None:
+                return None
+            property_name = self._property_name(node.child_by_field_name("name"), source)
+            if not property_name:
+                return None
+            return _SyntheticSymbolSpec(
+                kind="method",
+                name=property_name,
+                container=owner,
+                attributes={"binding_style": "object_binding_property"},
+            )
+
+        if node.type not in {"function_expression", "arrow_function", "class_expression"}:
+            return None
+
+        parent = node.parent
+        if parent is None:
+            return None
+
+        if parent.type == "pair" and parent.child_by_field_name("value") == node:
+            owner = self._bound_object_owner(parent.parent, source)
+            if owner is None:
+                return None
+            property_name = self._property_name(parent.child_by_field_name("key"), source)
+            if not property_name:
+                return None
+            if node.type == "class_expression":
+                return None
+            return _SyntheticSymbolSpec(
+                kind="method",
+                name=property_name,
+                container=owner,
+                attributes={"binding_style": "object_binding_property"},
+            )
+
+        if parent.type == "variable_declarator" and parent.child_by_field_name("value") == node:
+            target = self._assignment_symbol_target(
+                parent.child_by_field_name("name"),
+                source,
+                current_container=current_container,
+            )
+            if target is None:
+                return None
+            kind = self._synthetic_assignment_kind(node=node, binding_style=target.binding_style)
+            return _SyntheticSymbolSpec(
+                kind=kind,
+                name=target.name,
+                container=target.container,
+                attributes={"binding_style": target.binding_style},
+            )
+
+        if parent.type == "assignment_expression" and parent.child_by_field_name("right") == node:
+            target = self._assignment_symbol_target(
+                parent.child_by_field_name("left"),
+                source,
+                current_container=current_container,
+            )
+            if target is None:
+                return None
+            kind = self._synthetic_assignment_kind(node=node, binding_style=target.binding_style)
+            return _SyntheticSymbolSpec(
+                kind=kind,
+                name=target.name,
+                container=target.container,
+                attributes={"binding_style": target.binding_style},
+            )
+
+        return None
+
+    def _assignment_symbol_target(
+        self,
+        node: Node | None,
+        source: str,
+        *,
+        current_container: _ContainerContext | None,
+    ) -> _AssignmentTarget | None:
+        """Resolve an identifier/member binding target into synthetic symbol metadata."""
+        if node is None:
+            return None
+
+        if node.type == "identifier":
+            name = source[node.start_byte : node.end_byte]
+            if not name:
+                return None
+            return _AssignmentTarget(
+                name=name,
+                container=current_container,
+                binding_style="variable_assignment",
+            )
+
+        if node.type != "member_expression":
+            return None
+
+        path = self._member_expression_path(node, source)
+        if not path:
+            return None
+        parts = path.split(".")
+        if len(parts) < 2:
+            return None
+        owner_path = ".".join(parts[:-1])
+        binding_style = "member_assignment"
+        if owner_path in {"exports", "module.exports"}:
+            binding_style = "export_assignment"
+        elif owner_path.endswith(".prototype"):
+            binding_style = "prototype_assignment"
+        return _AssignmentTarget(
+            name=parts[-1],
+            container=_ContainerContext(symbol_id=None, fqname=owner_path),
+            binding_style=binding_style,
+        )
+
+    def _bound_object_owner(self, node: Node | None, source: str) -> _ContainerContext | None:
+        """Resolve the binding owner for an object literal used as a named target."""
+        if node is None or node.type != "object":
+            return None
+
+        parent = node.parent
+        if parent is None:
+            return None
+
+        if parent.type == "variable_declarator" and parent.child_by_field_name("value") == node:
+            return self._binding_target_container(parent.child_by_field_name("name"), source)
+
+        if parent.type == "assignment_expression" and parent.child_by_field_name("right") == node:
+            return self._binding_target_container(parent.child_by_field_name("left"), source)
+
+        return None
+
+    def _binding_target_container(self, node: Node | None, source: str) -> _ContainerContext | None:
+        """Resolve the full target path used as an object-binding owner context."""
+        if node is None:
+            return None
+        if node.type == "identifier":
+            name = source[node.start_byte : node.end_byte]
+            if not name:
+                return None
+            return _ContainerContext(symbol_id=None, fqname=name)
+        if node.type != "member_expression":
+            return None
+        path = self._member_expression_path(node, source)
+        if not path:
+            return None
+        return _ContainerContext(symbol_id=None, fqname=path)
+
+    def _synthetic_assignment_kind(self, *, node: Node, binding_style: str) -> str:
+        """Return the stable symbol kind for an assignment-based JS-family symbol."""
+        if node.type == "class_expression":
+            return "class"
+        if binding_style in {"variable_assignment", "export_assignment"}:
+            return "function"
+        return "method"
+
+    def _member_expression_path(self, node: Node, source: str) -> str | None:
+        """Return a dotted member-expression path for supported identifier/property chains."""
+        if node.type == "identifier":
+            return source[node.start_byte : node.end_byte]
+
+        if node.type != "member_expression":
+            return None
+
+        object_node = node.child_by_field_name("object")
+        property_node = node.child_by_field_name("property")
+        if object_node is None or property_node is None:
+            return None
+        object_path = self._member_expression_path(object_node, source)
+        property_name = self._property_name(property_node, source)
+        if not object_path or not property_name:
+            return None
+        return f"{object_path}.{property_name}"
+
+    @staticmethod
+    def _property_name(node: Node | None, source: str) -> str | None:
+        """Extract a recoverable property/binding name from an identifier-like node."""
+        if node is None:
+            return None
+        if node.type not in {
+            "identifier",
+            "property_identifier",
+            "type_identifier",
+            "field_identifier",
+            "name",
+        }:
+            return None
+        return source[node.start_byte : node.end_byte] or None
+
     def _symbol_kind(self, node: Node) -> str | None:
         """Classify a node as function/method/class/interface/trait/enum/type."""
         if self._is_decorated_inner_symbol(node):
@@ -284,6 +557,8 @@ class TreeSitterParser(Parser):
 
         if self.language in {"javascript", "typescript", "tsx"}:
             if node.type == "method_definition":
+                if node.parent is None or node.parent.type != "class_body":
+                    return None
                 return "method"
             if node.type in self.spec.function_nodes:
                 return "function"

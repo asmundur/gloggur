@@ -13,7 +13,7 @@ from scripts.run_smoke import (
 
 
 def test_parse_json_payload_supports_prefixed_output() -> None:
-    raw = "info line before payload\n{\n  \"ok\": true,\n  \"value\": 1\n}\n"
+    raw = 'info line before payload\n{\n  "ok": true,\n  "value": 1\n}\n'
     payload = _parse_json_payload(raw)
     assert payload == {"ok": True, "value": 1}
 

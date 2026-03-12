@@ -29,15 +29,19 @@ def test_readme_documents_bidirectional_graph_neighbors_and_parser_gaps() -> Non
     text = Path("README.md").read_text(encoding="utf8")
 
     assert "bidirectional by default" in text
+    assert "structural metadata by default" in text
+    assert "--embed-graph-edges" in text
     assert "get all outgoing edges for a symbol" not in text
     assert "Language support is baseline, not uniform." in text
     assert "gloggur parsers check --json" in text
 
 
 def test_quickstart_documents_current_operator_gotchas() -> None:
-    """Quickstart should call out inspect scope, repo-config warnings, and test-provider scope."""
+    """Quickstart should call out inspect scope, graph-edge defaults, repo-config warnings, and test-provider scope."""
     text = Path("docs/QUICKSTART.md").read_text(encoding="utf8")
 
+    assert "--embed-graph-edges" in text
+    assert "embedded_edge_vectors" in text
     assert "focuses on source paths by default" in text
     assert "--include-tests" in text
     assert "--include-scripts" in text

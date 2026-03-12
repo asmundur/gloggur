@@ -312,8 +312,10 @@ def test_gemini_provider_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatch) -> None:
     """OpenAI provider returns embeddings and dimension."""
+
     class FakeEmbeddings:
         """Fake OpenAI embeddings client."""
+
         def create(self, model: str, input: object):
             """Return fake embeddings for testing."""
             if isinstance(input, list):
@@ -327,6 +329,7 @@ def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatc
 
     class FakeOpenAI:
         """Fake OpenAI client wrapper."""
+
         def __init__(
             self,
             api_key: str,
@@ -468,14 +471,17 @@ def test_openai_provider_fails_closed_on_non_numeric_vector_value(
 
 def test_gemini_embed_text_and_dimension(monkeypatch: pytest.MonkeyPatch) -> None:
     """Gemini provider returns embeddings and dimension."""
+
     class FakeModels:
         """Fake Gemini models client."""
+
         def embed_content(self, model: str, contents: object):
             """Return fake embedding response."""
             return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2])])
 
     class FakeClient:
         """Fake Gemini client wrapper."""
+
         def __init__(self, api_key: str) -> None:
             """Store fake models client."""
             self.models = FakeModels()
@@ -587,9 +593,7 @@ def test_gemini_embed_batch_single_item(monkeypatch: pytest.MonkeyPatch) -> None
 
     class FakeModels:
         def embed_content(self, model: str, contents: object):
-            return SimpleNamespace(
-                embeddings=[SimpleNamespace(values=[0.1, 0.2, 0.3])]
-            )
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2, 0.3])])
 
     class FakeClient:
         def __init__(self, api_key: str) -> None:
@@ -757,9 +761,7 @@ def test_gemini_embed_batch_prefers_single_large_request_when_supported(
             _ = model
             size = len(list(contents))
             call_sizes.append(size)
-            return SimpleNamespace(
-                embeddings=[SimpleNamespace(values=[0.1, 0.2])] * size
-            )
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2])] * size)
 
     class FakeClient:
         def __init__(self, api_key: str) -> None:
@@ -793,9 +795,7 @@ def test_gemini_embed_batch_falls_back_to_chunked_mode_when_large_request_fails(
             call_sizes.append(size)
             if size > 2:
                 raise RuntimeError("400 request payload too large")
-            return SimpleNamespace(
-                embeddings=[SimpleNamespace(values=[0.1, 0.2])] * size
-            )
+            return SimpleNamespace(embeddings=[SimpleNamespace(values=[0.1, 0.2])] * size)
 
     class FakeClient:
         def __init__(self, api_key: str) -> None:
@@ -834,8 +834,10 @@ def test_local_embedding_legacy_marker_uses_fallback_cache_dir(tmp_path: Path) -
 
 def test_local_embedding_model_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Local embedding provider uses model encode paths."""
+
     class FakeVector:
         """Fake vector object with tolist."""
+
         def __init__(self, values) -> None:
             """Store fake vector values."""
             self._values = values
@@ -846,6 +848,7 @@ def test_local_embedding_model_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class FakeModel:
         """Fake model with encode/dimension methods."""
+
         def encode(self, texts, normalize_embeddings: bool = True):
             """Return fake vector values for inputs."""
             if isinstance(texts, list) and len(texts) == 1:
