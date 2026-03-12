@@ -2,6 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+STATE_DIAGRAM_DIR = Path("docs/state-diagrams")
+STATE_DIAGRAM_FILES = {
+    "README.md",
+    "application-state.md",
+    "index-command-state.md",
+    "watch-command-state.md",
+    "search-command-state.md",
+    "find-command-state.md",
+    "artifact-publish-state.md",
+    "artifact-validate-state.md",
+    "artifact-restore-state.md",
+    "simple-command-reference.md",
+}
+NON_MERMAID_STATE_FILES = {"README.md", "simple-command-reference.md"}
+
 
 def test_readme_and_agent_guide_do_not_advertise_removed_grounding_flags() -> None:
     """Public docs should avoid recommending removed search grounding flags."""
@@ -61,3 +76,27 @@ def test_verification_docs_and_harness_expose_test_provider_scope() -> None:
     assert 'env["GLOGGUR_EMBEDDING_PROVIDER"] = "test"' in harness_text
     assert '"embedding_provider": "test"' in harness_text
     assert '"local_provider_bootstrap_validated": False' in harness_text
+
+
+def test_state_diagram_docs_index_and_mermaid_contract() -> None:
+    """State-diagram docs should stay linked, complete, and Mermaid-renderable."""
+    readme_text = Path("README.md").read_text(encoding="utf8")
+    quickstart_text = Path("docs/QUICKSTART.md").read_text(encoding="utf8")
+    index_path = STATE_DIAGRAM_DIR / "README.md"
+
+    assert STATE_DIAGRAM_DIR.exists()
+    assert index_path.exists()
+
+    index_text = index_path.read_text(encoding="utf8")
+    assert "ERROR_CODES.md" in index_text
+
+    actual_files = {path.name for path in STATE_DIAGRAM_DIR.glob("*.md")}
+    assert actual_files == STATE_DIAGRAM_FILES
+
+    for name in sorted(actual_files - NON_MERMAID_STATE_FILES):
+        text = (STATE_DIAGRAM_DIR / name).read_text(encoding="utf8")
+        assert "```mermaid" in text, f"{name} is missing a Mermaid fence"
+        assert "stateDiagram-v2" in text, f"{name} is missing stateDiagram-v2"
+
+    assert "docs/state-diagrams/README.md" in readme_text
+    assert "docs/state-diagrams/README.md" in quickstart_text

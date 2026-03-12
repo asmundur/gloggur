@@ -186,6 +186,7 @@ For `--json` failures, the top-level contract is:
 ## Command Reference
 
 - CLI behavior and config keys: `README.md`
+- Application and command state diagrams: `docs/state-diagrams/README.md`
 - Search JSON migration: `docs/SEARCH_JSON_V2_MIGRATION.md`
 - Verification probes and smoke harnesses: `docs/VERIFICATION.md`
 - Agent integration conventions: `docs/AGENT_INTEGRATION.md`

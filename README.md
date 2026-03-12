@@ -177,6 +177,9 @@ gloggur extract sample.py 0 42 --json
 
 Graph commands return `edge_id`, `edge_type`, `from_id`, `to_id`, `file_path`, `line` and `confidence`.  Inspect commands return audit findings per symbol with categories such as missing docstring, parameter mismatch and summary quality.
 
+Application and command lifecycle maps live in
+[`docs/state-diagrams/README.md`](docs/state-diagrams/README.md).
+
 ## Language Support Contract
 
 Gloggur exposes a machine-readable support contract for extensions/languages and parser tiers:
