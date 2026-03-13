@@ -39,7 +39,10 @@ from gloggur.io_failures import StorageIOError
 from gloggur.models import EdgeRecord, IndexMetadata, Symbol, SymbolChunk
 from gloggur.search import attach_legacy_search_contract
 from gloggur.search.router.types import ContextHit, ContextPack, ContextSpan
-from gloggur.support_runtime import SUPPORT_RUNTIME_DEGRADED_WARNING_CODE, write_support_runtime_config
+from gloggur.support_runtime import (
+    SUPPORT_RUNTIME_DEGRADED_WARNING_CODE,
+    write_support_runtime_config,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +111,7 @@ def test_profile_reindex_reason_hf_snapshot_alias_matches_short_model() -> None:
 
 
 def test_profile_reindex_reason_allows_legacy_unsuffixed_edge_profiles_for_reads() -> None:
-    """Read-path compatibility should accept legacy cache profiles that predate embed_graph_edges."""
+    """Read path should accept legacy cache profiles predating `embed_graph_edges`."""
     reason = _profile_reindex_reason(
         metadata_present=True,
         cached_profile="local:microsoft/codebert-base",
@@ -162,6 +165,8 @@ def test_build_status_payload_surfaces_missing_search_integrity_markers(tmp_path
     assert payload["index_stats"]["embedded_edge_vectors"] == 0
     assert payload["extension_policy"]["valid"] is True
     assert payload["language_support_contract"]["schema_version"] == "1"
+    assert ".c" in payload["language_support_contract"]["supported_extensions"]
+    assert ".cpp" in payload["language_support_contract"]["supported_extensions"]
     assert ".jsx" in payload["language_support_contract"]["supported_extensions"]
 
 
@@ -917,6 +922,8 @@ def test_adapters_list_reports_discoverable_categories(tmp_path: Path) -> None:
     assert payload["extension_policy"]["valid"] is True
     support_contract = payload["language_support_contract"]
     assert support_contract["schema_version"] == "1"
+    assert ".c" in support_contract["supported_extensions"]
+    assert ".cpp" in support_contract["supported_extensions"]
     assert ".jsx" in support_contract["supported_extensions"]
     assert ".tsx" in support_contract["supported_extensions"]
     assert ".html" not in support_contract["supported_extensions"]

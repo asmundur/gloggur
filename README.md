@@ -8,7 +8,7 @@ The current design emphasises **lexical candidate generation** backed by **seman
 
 ### Chunk‑first indexing
 
-Gloggur extracts baseline symbol coverage using Tree-sitter parsers for Python (`.py`), JavaScript (`.js`, `.jsx`), TypeScript (`.ts`, `.tsx`), Rust (`.rs`), Go (`.go`), and Java (`.java`). Each symbol's definition and docstring are split into one or more **chunks**, and each chunk is assigned a stable, hashed ID. The indexer persists symbols, chunks and edges into a local SQLite/FAISS cache. Incremental indexing updates only modified files, keeping search fast without reprocessing the entire project.
+Gloggur extracts baseline symbol coverage using Tree-sitter parsers for Python (`.py`), JavaScript (`.js`, `.jsx`), TypeScript (`.ts`, `.tsx`), C (`.c`, `.h`), C++ (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`), Rust (`.rs`), Go (`.go`), and Java (`.java`). Each symbol's definition and docstring are split into one or more **chunks**, and each chunk is assigned a stable, hashed ID. The indexer persists symbols, chunks and edges into a local SQLite/FAISS cache. Incremental indexing updates only modified files, keeping search fast without reprocessing the entire project.
 
 ### Search & discovery
 
@@ -122,6 +122,14 @@ supported_extensions:
   - .jsx
   - .ts
   - .tsx
+  - .c
+  - .h
+  - .cpp
+  - .cc
+  - .cxx
+  - .hpp
+  - .hh
+  - .hxx
   - .rs
   - .go
   - .java
@@ -204,7 +212,7 @@ gloggur inspect . --json --warn-on-skipped-extensions
 
 ## Current gotchas
 
-- Language support is baseline, not uniform. Current known construct gaps include JavaScript computed identifier subscripts and helper-driven runtime mutation, TypeScript type aliases and enums, Go named struct/interface declarations, Rust impl/trait method forms, and Java record/enum declarations. Use `gloggur status --json` or `gloggur parsers check --json` when symbol fidelity matters for a workflow.
+- Language support is baseline, not uniform. Current known construct gaps include JavaScript computed identifier subscripts and helper-driven runtime mutation, TypeScript type aliases and enums, strict C++ macro recovery limits outside supported placeholder patterns, Go named struct/interface declarations, Rust impl/trait method forms, and Java record/enum declarations. Use `gloggur status --json` or `gloggur parsers check --json` when symbol fidelity matters for a workflow.
 - `gloggur inspect . --json` audits source paths by default. Add `--include-tests` and `--include-scripts` when you need a wider repo audit.
 - `gloggur init . --betatester-support --json` enables repo-local support tracing. `gloggur watch init . --json` stays watch-specific. Either command writes repo-local config, so later commands in that workspace may report `security_warning_codes=["untrusted_repo_config"]` because auto-discovered repo config is treated as untrusted by default.
 - This repo's quickstart smoke and most deterministic CI verification use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.

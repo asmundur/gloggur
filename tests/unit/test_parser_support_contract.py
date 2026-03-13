@@ -13,10 +13,15 @@ def test_build_language_support_contract_reports_frontend_extension_scope() -> N
     contract = build_language_support_contract()
 
     assert contract["schema_version"] == "1"
+    assert ".c" in contract["supported_extensions"]
+    assert ".cpp" in contract["supported_extensions"]
+    assert ".hpp" in contract["supported_extensions"]
     assert ".jsx" in contract["supported_extensions"]
     assert ".tsx" in contract["supported_extensions"]
     assert ".html" not in contract["supported_extensions"]
     assert ".css" not in contract["supported_extensions"]
+    assert "c" in contract["enabled_languages"]
+    assert "cpp" in contract["enabled_languages"]
     assert "javascript" in contract["enabled_languages"]
     assert "tsx" in contract["enabled_languages"]
 
@@ -59,13 +64,33 @@ def test_parser_capability_check_promotes_js_assignment_cases_to_required_passes
     assert javascript_tiers["computed_identifier_subscript_assignment"] == "known_gap"
     assert javascript_tiers["helper_runtime_mutation"] == "known_gap"
     assert contract["known_gaps"]["javascript"] == [
-        "computed identifier subscript assignments such as app[method] = fn are not extracted as symbols",
+        (
+            "computed identifier subscript assignments such as app[method] = fn are not "
+            "extracted as symbols"
+        ),
         "helper-driven runtime mutation such as mixin/install helpers is not extracted as symbols",
     ]
     assert (
         contract["construct_tiers"]["typescript"]["typed_arrow_function_assignment"] == "baseline"
     )
     assert contract["construct_tiers"]["tsx"]["arrow_component_assignment"] == "baseline"
+    assert contract["construct_tiers"]["c"]["function_definition"] == "baseline"
+    assert contract["construct_tiers"]["c"]["function_declaration"] == "baseline"
+    assert contract["construct_tiers"]["c"]["struct_union_declaration"] == "baseline"
+    assert contract["construct_tiers"]["c"]["enum_declaration"] == "baseline"
+    assert contract["construct_tiers"]["c"]["function_pointer_declarator"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["class_struct_declaration"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["class_body_method_definition"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["class_body_method_declaration"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["qualified_method_definition"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["namespace_qualified_container_fqname"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["template_operator_normalization"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["macro_generated_recoverable_patterns"] == "baseline"
+    assert contract["construct_tiers"]["cpp"]["macro_generated_complex_forms"] == "known_gap"
+    assert contract["known_gaps"]["c"] == []
+    assert contract["known_gaps"]["cpp"] == [
+        "macro-generated symbols outside strict placeholder patterns are not extracted",
+    ]
 
     cases = {case["id"]: case for case in payload["cases"]}
     assert cases["javascript.arrow_assignment"]["known_gap"] is False
@@ -79,3 +104,10 @@ def test_parser_capability_check_promotes_js_assignment_cases_to_required_passes
     assert cases["javascript.object_binding_alias_owners"]["status"] == "passed"
     assert cases["typescript.typed_arrow_assignment"]["status"] == "passed"
     assert cases["tsx.arrow_component"]["status"] == "passed"
+    assert cases["c.functions_and_types"]["status"] == "passed"
+    assert cases["c.callback_returning_function_pointer"]["status"] == "passed"
+    assert cases["c.function_pointer_variable_not_callable"]["status"] == "passed"
+    assert cases["cpp.class_and_qualified_methods"]["status"] == "passed"
+    assert cases["cpp.namespace_qualified_methods"]["status"] == "passed"
+    assert cases["cpp.template_and_operator_methods"]["status"] == "passed"
+    assert cases["cpp.macro_generated_method_recovery"]["status"] == "passed"

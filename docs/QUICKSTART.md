@@ -125,7 +125,7 @@ When the cache is not reusable, `search --json` exits non-zero with:
 ## Current gotchas
 
 - `scripts/gloggur inspect . --json` focuses on source paths by default; add `--include-tests` and `--include-scripts` when you want a broader repo audit.
-- Parser support is baseline rather than uniform. Run `scripts/gloggur parsers check --json` before depending on symbol fidelity for JavaScript computed identifier subscripts or helper-driven runtime mutation, TypeScript type aliases or enums, named Go types, Rust impl methods, or Java records/enums.
+- Parser support is baseline rather than uniform. Run `scripts/gloggur parsers check --json` before depending on symbol fidelity for JavaScript computed identifier subscripts or helper-driven runtime mutation, TypeScript type aliases or enums, strict C++ macro recovery outside supported placeholder patterns, named Go types, Rust impl methods, or Java records/enums.
 - After `scripts/gloggur init . --json` or `scripts/gloggur watch init . --json`, later commands may include `security_warning_codes: ["untrusted_repo_config"]` because the repo-local config is auto-discovered and treated as untrusted by default.
 - In betatester-support repos, tracing is best-effort: command JSON may include `warning_codes: ["support_runtime_degraded"]` if support-runtime telemetry writes fail, while command execution itself continues.
 - This repo's `scripts/run_quickstart_smoke.py` harness and most deterministic CI checks use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.

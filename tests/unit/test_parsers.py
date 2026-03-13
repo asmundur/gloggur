@@ -25,6 +25,12 @@ def test_parser_registry_supports_known_extensions() -> None:
     assert entry is not None
     assert entry.language == "python"
     assert isinstance(entry.parser, TreeSitterParser)
+    c_entry = registry.get_parser_for_path("sample.h")
+    assert c_entry is not None
+    assert c_entry.language == "c"
+    cpp_entry = registry.get_parser_for_path("sample.hpp")
+    assert cpp_entry is not None
+    assert cpp_entry.language == "cpp"
 
 
 def test_parser_registry_supports_extension_overrides() -> None:
@@ -217,6 +223,136 @@ func test_when_user_logs_in() int {
     assert target.implicit_contract is None
 
 
+def test_treesitter_parser_extracts_c_function_and_type_symbols() -> None:
+    """C parser should recover function definitions/declarations and named type declarations."""
+    source = """
+int add(int a, int b) { return a + b; }
+int declared(int value);
+struct Point { int x; int y; };
+enum Mode { Fast, Slow };
+"""
+    parser = TreeSitterParser("c")
+    symbols = parser.extract_symbols("sample.c", source)
+    by_fqname = _symbols_by_fqname(symbols)
+
+    assert {"add", "declared", "Point", "Mode"}.issubset(by_fqname)
+    assert by_fqname["add"].kind == "function"
+    assert by_fqname["declared"].kind == "function"
+    assert by_fqname["Point"].kind == "type"
+    assert by_fqname["Mode"].kind == "enum"
+
+
+def test_treesitter_parser_extracts_c_callback_returning_function_pointer() -> None:
+    """C parser should classify callback-return declarators as callable functions."""
+    parser = TreeSitterParser("c")
+    symbols = parser.extract_symbols("sample.h", "int (*make_cb(void))(int);\n")
+    by_fqname = _symbols_by_fqname(symbols)
+
+    assert "make_cb" in by_fqname
+    assert by_fqname["make_cb"].kind == "function"
+
+
+def test_treesitter_parser_skips_c_function_pointer_variables() -> None:
+    """C parser should not classify plain function-pointer variables as functions."""
+    parser = TreeSitterParser("c")
+    symbols = parser.extract_symbols("sample.h", "int (*fp)(int);\n")
+
+    assert symbols == []
+
+
+def test_treesitter_parser_extracts_cpp_class_and_qualified_method_symbols() -> None:
+    """C++ parser should recover class-body methods and qualified out-of-class method owners."""
+    source = """
+class Greeter {
+public:
+  int hello() const { return 1; }
+  static int ping();
+};
+
+int Greeter::ping() { return 2; }
+"""
+    parser = TreeSitterParser("cpp")
+    symbols = parser.extract_symbols("sample.cpp", source)
+    grouped = _symbols_grouped_by_fqname(symbols)
+
+    assert "Greeter" in grouped
+    assert "Greeter.hello" in grouped
+    assert "Greeter.ping" in grouped
+    assert grouped["Greeter"][0].kind == "class"
+    assert grouped["Greeter.hello"][0].kind == "method"
+    assert grouped["Greeter.hello"][0].container_fqname == "Greeter"
+    ping_symbols = grouped["Greeter.ping"]
+    assert ping_symbols
+    assert all(symbol.kind == "method" for symbol in ping_symbols)
+    assert all(symbol.container_fqname == "Greeter" for symbol in ping_symbols)
+    assert any((symbol.signature or "").startswith("static int ping();") for symbol in ping_symbols)
+    assert any("Greeter::ping" in (symbol.signature or "") for symbol in ping_symbols)
+
+
+def test_treesitter_parser_extracts_cpp_namespace_template_and_operator_symbols() -> None:
+    """C++ parser should preserve namespace/template owners and operator method names."""
+    source = """
+namespace core {
+template <typename T>
+class Box {
+public:
+  T get() const;
+};
+
+class Engine {
+public:
+  int start();
+};
+}
+
+template <>
+int core::Box<int>::get() const { return 1; }
+int core::Engine::start() { return 1; }
+
+struct Vec {
+  int operator[](int idx) const;
+};
+int Vec::operator[](int idx) const { return idx; }
+"""
+    parser = TreeSitterParser("cpp")
+    symbols = parser.extract_symbols("sample.cpp", source)
+    grouped = _symbols_grouped_by_fqname(symbols)
+
+    assert "core.Box" in grouped
+    assert "core.Box.get" in grouped
+    assert "core.Box<int>.get" in grouped
+    assert "core.Engine" in grouped
+    assert "core.Engine.start" in grouped
+    assert "Vec.operator[]" in grouped
+    assert all(symbol.name == "operator[]" for symbol in grouped["Vec.operator[]"])
+
+
+def test_treesitter_parser_recovers_cpp_macro_generated_method_symbols() -> None:
+    """C++ parser should recover strict method macros and dedupe explicit duplicates."""
+    parser = TreeSitterParser("cpp")
+    recovered = parser.extract_symbols(
+        "sample.cpp",
+        (
+            "class Greeter {};\n"
+            "#define DECL_METHOD(Type, Name) int Type::Name() { return 0; }\n"
+            "DECL_METHOD(Greeter, ping)\n"
+        ),
+    )
+    recovered_by_fqname = _symbols_by_fqname(recovered)
+    assert "Greeter.ping" in recovered_by_fqname
+    assert recovered_by_fqname["Greeter.ping"].attributes["macro_generated"] is True
+
+    deduped = parser.extract_symbols(
+        "sample.cpp",
+        (
+            "class Greeter { public: int ping(); };\n"
+            "#define DECL_METHOD(Type, Name) int Type::Name() { return 0; }\n"
+            "DECL_METHOD(Greeter, ping)\n"
+        ),
+    )
+    assert sum(1 for symbol in deduped if symbol.fqname == "Greeter.ping") == 1
+
+
 def test_treesitter_parser_extracts_javascript_assignment_bound_symbols() -> None:
     """JavaScript parser should recover assignment-bound canonical fqnames and owners."""
     source = """
@@ -275,7 +411,7 @@ items.map(function (x) { return x; });
     assert "map" not in {symbol.name for symbol in symbols}
 
 
-def test_treesitter_parser_recovers_remaining_javascript_commonjs_alias_and_descriptor_symbols() -> None:
+def test_treesitter_parser_recovers_remaining_javascript_binding_symbols() -> None:
     """JavaScript parser should recover alias chains, literal subscripts, and descriptors."""
     source = """
 res.header = res.set = function header() {};

@@ -60,6 +60,46 @@ def test_indexer_indexes_repo_and_sets_metadata() -> None:
         assert search_integrity["chunk_span"]["status"] == "passed"
 
 
+def test_indexer_indexes_mixed_c_cpp_files_without_parser_unavailable_failures() -> None:
+    """Indexer should parse default C/C++ source and header extensions without parser gaps."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "main.c": "int add(int a, int b) { return a + b; }\n",
+                "include/math.h": "int declared(int value);\n",
+                "include/callbacks.h": "int (*make_cb(void))(int);\nint (*fp)(int);\n",
+                "include/greeter.hpp": (
+                    "namespace core {\n"
+                    "class Greeter {\n"
+                    "public:\n"
+                    "  static int ping();\n"
+                    "};\n"
+                    "}\n"
+                ),
+                "src/greeter.cpp": (
+                    "int core::Greeter::ping() { return 2; }\n"
+                    "#define DECL_METHOD(Type, Name) int Type::Name() { return 0; }\n"
+                    "DECL_METHOD(Greeter, macro_ping)\n"
+                ),
+                "src/operators.cpp": (
+                    "struct Vec { int operator[](int idx) const; };\n"
+                    "int Vec::operator[](int idx) const { return idx; }\n"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        config = GloggurConfig(cache_dir=cache_dir)
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+
+        result = indexer.index_repository(str(repo))
+
+        assert result.files_considered == 6
+        assert result.failed == 0
+        assert result.indexed_symbols > 0
+        assert "parser_unavailable" not in result.failed_reasons
+
+
 def test_indexer_skips_minified_js_by_default_and_can_include_with_config() -> None:
     """Repository scan should exclude `.min.js` unless explicitly opted in."""
     with TestFixtures() as fixtures:

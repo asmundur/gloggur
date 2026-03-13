@@ -48,6 +48,24 @@ _LANGUAGE_CONSTRUCT_TIERS: dict[str, dict[str, str]] = {
         "function_declaration_component": "baseline",
         "arrow_component_assignment": "baseline",
     },
+    "c": {
+        "function_definition": "baseline",
+        "function_declaration": "baseline",
+        "struct_union_declaration": "baseline",
+        "enum_declaration": "baseline",
+        "function_pointer_declarator": "baseline",
+    },
+    "cpp": {
+        "class_struct_declaration": "baseline",
+        "enum_declaration": "baseline",
+        "class_body_method_definition": "baseline",
+        "class_body_method_declaration": "baseline",
+        "qualified_method_definition": "baseline",
+        "namespace_qualified_container_fqname": "baseline",
+        "template_operator_normalization": "baseline",
+        "macro_generated_recoverable_patterns": "baseline",
+        "macro_generated_complex_forms": "known_gap",
+    },
     "go": {
         "function_declaration": "baseline",
         "method_declaration": "baseline",
@@ -73,7 +91,10 @@ _KNOWN_GAPS_BY_LANGUAGE: dict[str, list[str]] = {
         "decorated methods such as @property may be classified as function instead of method",
     ],
     "javascript": [
-        "computed identifier subscript assignments such as app[method] = fn are not extracted as symbols",
+        (
+            "computed identifier subscript assignments such as app[method] = fn are not "
+            "extracted as symbols"
+        ),
         "helper-driven runtime mutation such as mixin/install helpers is not extracted as symbols",
     ],
     "typescript": [
@@ -81,6 +102,10 @@ _KNOWN_GAPS_BY_LANGUAGE: dict[str, list[str]] = {
         "enum declarations are not extracted as symbols",
     ],
     "tsx": [],
+    "c": [],
+    "cpp": [
+        "macro-generated symbols outside strict placeholder patterns are not extracted",
+    ],
     "go": [
         "named struct/interface type declarations are not extracted as symbols",
         "receiver methods do not include receiver type in fqname",
@@ -105,6 +130,9 @@ class ParserCheckCase:
     path: str
     source: str
     expected_symbols: tuple[tuple[str, str], ...]
+    expected_fqnames: tuple[str, ...] = ()
+    forbidden_symbols: tuple[tuple[str, str], ...] = ()
+    forbidden_fqnames: tuple[str, ...] = ()
     known_gap: bool = False
 
 
@@ -253,6 +281,111 @@ _PARSER_CHECK_CASES: tuple[ParserCheckCase, ...] = (
         expected_symbols=(("function", "add"),),
     ),
     ParserCheckCase(
+        case_id="c.functions_and_types",
+        language="c",
+        path="sample.c",
+        source=(
+            "int add(int a, int b) { return a + b; }\n"
+            "int declared(int value);\n"
+            "struct Point { int x; int y; };\n"
+            "enum Mode { Fast, Slow };\n"
+        ),
+        expected_symbols=(
+            ("function", "add"),
+            ("function", "declared"),
+            ("type", "Point"),
+            ("enum", "Mode"),
+        ),
+        expected_fqnames=("add", "declared", "Point", "Mode"),
+    ),
+    ParserCheckCase(
+        case_id="c.callback_returning_function_pointer",
+        language="c",
+        path="sample.h",
+        source="int (*make_cb(void))(int);\n",
+        expected_symbols=(("function", "make_cb"),),
+        expected_fqnames=("make_cb",),
+    ),
+    ParserCheckCase(
+        case_id="c.function_pointer_variable_not_callable",
+        language="c",
+        path="sample.h",
+        source="int (*fp)(int);\n",
+        expected_symbols=(),
+        forbidden_symbols=(("function", "fp"),),
+        forbidden_fqnames=("fp",),
+    ),
+    ParserCheckCase(
+        case_id="cpp.class_and_qualified_methods",
+        language="cpp",
+        path="sample.cpp",
+        source=(
+            "class Greeter {\n"
+            "public:\n"
+            "    int hello() const { return 1; }\n"
+            "    static int ping();\n"
+            "};\n"
+            "int Greeter::ping() { return 2; }\n"
+        ),
+        expected_symbols=(("class", "Greeter"), ("method", "hello"), ("method", "ping")),
+        expected_fqnames=("Greeter", "Greeter.hello", "Greeter.ping"),
+    ),
+    ParserCheckCase(
+        case_id="cpp.namespace_qualified_methods",
+        language="cpp",
+        path="sample.cpp",
+        source=(
+            "namespace core {\n"
+            "class Engine {\n"
+            "public:\n"
+            "    int start();\n"
+            "};\n"
+            "}\n"
+            "int core::Engine::start() { return 1; }\n"
+        ),
+        expected_symbols=(("class", "Engine"), ("method", "start")),
+        expected_fqnames=("core.Engine", "core.Engine.start"),
+    ),
+    ParserCheckCase(
+        case_id="cpp.template_and_operator_methods",
+        language="cpp",
+        path="sample.cpp",
+        source=(
+            "namespace core {\n"
+            "template <typename T>\n"
+            "class Box {\n"
+            "public:\n"
+            "    T get() const;\n"
+            "};\n"
+            "}\n"
+            "template <>\n"
+            "int core::Box<int>::get() const { return 1; }\n"
+            "struct Vec {\n"
+            "    int operator[](int idx) const;\n"
+            "};\n"
+            "int Vec::operator[](int idx) const { return idx; }\n"
+        ),
+        expected_symbols=(
+            ("class", "Box"),
+            ("method", "get"),
+            ("class", "Vec"),
+            ("method", "operator[]"),
+        ),
+        expected_fqnames=("core.Box", "core.Box.get", "core.Box<int>.get", "Vec.operator[]"),
+    ),
+    ParserCheckCase(
+        case_id="cpp.macro_generated_method_recovery",
+        language="cpp",
+        path="sample.cpp",
+        source=(
+            "class Greeter {};\n"
+            "#define DECL_METHOD(Type, Name) int Type::Name() { return 0; }\n"
+            "DECL_METHOD(Greeter, ping)\n"
+        ),
+        expected_symbols=(("class", "Greeter"), ("method", "ping")),
+        expected_fqnames=("Greeter", "Greeter.ping"),
+    ),
+    ParserCheckCase(
         case_id="go.function_and_method",
         language="go",
         path="sample.go",
@@ -390,6 +523,7 @@ def run_parser_capability_check(
     for case in _PARSER_CHECK_CASES:
         parser_entry = parser_registry.get_parser_for_path(case.path)
         actual_symbols: set[tuple[str, str]] = set()
+        actual_fqnames: set[str] = set()
         parse_error: str | None = None
         if parser_entry is None:
             parse_error = "parser_unavailable"
@@ -397,6 +531,7 @@ def run_parser_capability_check(
             try:
                 extracted = parser_entry.parser.extract_symbols(case.path, case.source)
                 actual_symbols = {(symbol.kind, symbol.name) for symbol in extracted}
+                actual_fqnames = {symbol.fqname or symbol.name for symbol in extracted}
             except Exception as exc:  # pragma: no cover - defensive envelope
                 parse_error = f"{type(exc).__name__}: {exc}"
         missing_symbols = [
@@ -404,15 +539,29 @@ def run_parser_capability_check(
             for kind, name in case.expected_symbols
             if (kind, name) not in actual_symbols
         ]
+        unexpected_symbols = [
+            {"kind": kind, "name": name}
+            for kind, name in case.forbidden_symbols
+            if (kind, name) in actual_symbols
+        ]
+        missing_fqnames = [
+            fqname for fqname in case.expected_fqnames if fqname not in actual_fqnames
+        ]
+        unexpected_fqnames = [
+            fqname for fqname in case.forbidden_fqnames if fqname in actual_fqnames
+        ]
+        has_failures = bool(
+            missing_symbols or missing_fqnames or unexpected_symbols or unexpected_fqnames
+        )
         if case.known_gap:
-            if missing_symbols or parse_error is not None:
+            if has_failures or parse_error is not None:
                 status = "gap_confirmed"
                 known_gap_confirmed += 1
             else:
                 status = "gap_closed"
                 known_gap_closed += 1
         else:
-            if missing_symbols or parse_error is not None:
+            if has_failures or parse_error is not None:
                 status = "failed"
                 required_failed += 1
             else:
@@ -428,8 +577,16 @@ def run_parser_capability_check(
                 "expected_symbols": [
                     {"kind": kind, "name": name} for kind, name in case.expected_symbols
                 ],
+                "expected_fqnames": list(case.expected_fqnames),
+                "forbidden_symbols": [
+                    {"kind": kind, "name": name} for kind, name in case.forbidden_symbols
+                ],
+                "forbidden_fqnames": list(case.forbidden_fqnames),
                 "actual_symbol_count": len(actual_symbols),
                 "missing_symbols": missing_symbols,
+                "unexpected_symbols": unexpected_symbols,
+                "missing_fqnames": missing_fqnames,
+                "unexpected_fqnames": unexpected_fqnames,
                 "parse_error": parse_error,
             }
         )

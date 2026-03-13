@@ -169,6 +169,14 @@ def test_embedding_profile_uses_active_provider_model() -> None:
     assert with_edges.embedding_profile() == "local:local-a|embed_graph_edges=1"
 
 
+def test_default_supported_extensions_include_c_and_cpp() -> None:
+    """Default extension policy should include common C/C++ source and header file types."""
+    config = GloggurConfig()
+
+    for extension in (".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"):
+        assert extension in config.supported_extensions
+
+
 def test_load_env_reads_dotenv_when_process_env_unset(tmp_path, monkeypatch) -> None:
     """Config should read embedding settings from local .env when process env is unset."""
     monkeypatch.chdir(tmp_path)
@@ -290,7 +298,7 @@ def test_load_repo_dotenv_is_classified_untrusted(tmp_path, monkeypatch) -> None
 
 
 def test_load_marks_custom_embedding_endpoints(monkeypatch) -> None:
-    """Resolved configs should surface a warning when a non-default embedding endpoint is requested."""
+    """Resolved configs should warn when non-default embedding endpoint is requested."""
     monkeypatch.setenv("GLOGGUR_EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example.test/v1")
 

@@ -105,7 +105,24 @@ class GloggurConfig:
         default_factory=lambda: {"class": 0.05, "interface": 0.05}
     )
     supported_extensions: list[str] = field(
-        default_factory=lambda: [".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".java"]
+        default_factory=lambda: [
+            ".py",
+            ".js",
+            ".jsx",
+            ".ts",
+            ".tsx",
+            ".c",
+            ".h",
+            ".cpp",
+            ".cc",
+            ".cxx",
+            ".hpp",
+            ".hh",
+            ".hxx",
+            ".rs",
+            ".go",
+            ".java",
+        ]
     )
     parser_extension_map: dict[str, str] = field(default_factory=dict)
     include_minified_js: bool = False

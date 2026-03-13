@@ -54,6 +54,18 @@ _LANGUAGE_SPECS: dict[str, LanguageSpec] = {
         ["class_declaration"],
         ["interface_declaration"],
     ),
+    "c": LanguageSpec(
+        "c",
+        ["function_definition", "declaration"],
+        ["struct_specifier", "union_specifier", "enum_specifier"],
+        [],
+    ),
+    "cpp": LanguageSpec(
+        "cpp",
+        ["function_definition", "declaration", "field_declaration"],
+        ["class_specifier", "struct_specifier", "enum_specifier"],
+        [],
+    ),
     "rust": LanguageSpec(
         "rust",
         ["function_item"],
@@ -106,6 +118,26 @@ class _AssignmentTarget:
     fqname: str | None = None
 
 
+@dataclass(frozen=True)
+class _CFamilyDeclaratorInfo:
+    """Resolved C-family declarator metadata for symbol extraction/classification."""
+
+    symbol_name: str | None
+    qualified_parts: tuple[str, ...]
+    is_callable_declaration: bool
+
+
+@dataclass(frozen=True)
+class _CppMacroPattern:
+    """Recoverable C++ macro expansion pattern for method/function declarations."""
+
+    macro_name: str
+    kind: str
+    name_index: int
+    owner_index: int | None
+    parameter_count: int
+
+
 class TreeSitterParser(Parser):
     """Tree-sitter parser that extracts Symbol objects from source code."""
 
@@ -122,6 +154,7 @@ class TreeSitterParser(Parser):
         self.parser = get_parser(language)
         self.signal_processors = signal_processors or default_signal_processors()
         self._js_object_owner_aliases: dict[str, tuple[str, ...]] = {}
+        self._cpp_macro_patterns: dict[str, _CppMacroPattern] = {}
 
     def parse_file(self, path: str, source: str) -> ParsedFile:
         """Parse a file and return ParsedFile with extracted symbols."""
@@ -143,6 +176,13 @@ class TreeSitterParser(Parser):
             )
         else:
             self._js_object_owner_aliases = {}
+        if self.language == "cpp":
+            self._cpp_macro_patterns = self._collect_cpp_macro_patterns(
+                tree.root_node,
+                source,
+            )
+        else:
+            self._cpp_macro_patterns = {}
         symbols: list[Symbol] = []
         try:
             self._collect_symbols(
@@ -155,6 +195,9 @@ class TreeSitterParser(Parser):
             )
         finally:
             self._js_object_owner_aliases = {}
+            self._cpp_macro_patterns = {}
+        if self.language == "cpp":
+            symbols = self._drop_cpp_macro_duplicates(symbols)
         symbols.sort(key=lambda item: (item.file_path, item.start_line, item.end_line, item.id))
         return symbols
 
@@ -194,13 +237,24 @@ class TreeSitterParser(Parser):
             )
             symbols_for_node = [] if base_symbol is None else [base_symbol]
         pushed = False
+        pushed_container: _ContainerContext | None = None
         if symbols_for_node:
             out.extend(symbols_for_node)
             if len(symbols_for_node) == 1:
                 symbol = symbols_for_node[0]
                 fqname = symbol.fqname or symbol.name
-                containers.append(_ContainerContext(symbol_id=symbol.id, fqname=fqname))
+                pushed_container = _ContainerContext(symbol_id=symbol.id, fqname=fqname)
                 pushed = True
+        elif self.language == "cpp":
+            pushed_container = self._cpp_namespace_container(
+                node=node,
+                source=source,
+                current_container=current_container,
+            )
+            pushed = pushed_container is not None
+
+        if pushed_container is not None:
+            containers.append(pushed_container)
 
         for child in node.children:
             self._collect_symbols(
@@ -225,12 +279,17 @@ class TreeSitterParser(Parser):
         container: _ContainerContext | None,
     ) -> Symbol | None:
         """Convert one AST node into a Symbol with fqname/container metadata."""
-        kind = self._symbol_kind(node)
+        kind = self._symbol_kind(node, source)
         if not kind:
             return None
         name = self._extract_name(node, source)
         if not name:
             return None
+        effective_container = container
+        if self.language == "cpp" and kind == "method":
+            qualified_container = self._cpp_method_container_from_qualified_declarator(node, source)
+            if qualified_container is not None:
+                effective_container = qualified_container
 
         return self._build_symbol(
             node=node,
@@ -239,7 +298,7 @@ class TreeSitterParser(Parser):
             repo_id=repo_id,
             kind=kind,
             name=name,
-            container=container,
+            container=effective_container,
         )
 
     def _synthetic_symbols_from_node(
@@ -371,6 +430,12 @@ class TreeSitterParser(Parser):
         current_container: _ContainerContext | None,
     ) -> list[_SyntheticSymbolSpec]:
         """Return synthetic symbol specs for supported JS-family binding patterns."""
+        if self.language == "cpp":
+            return self._cpp_macro_symbol_specs(
+                node=node,
+                source=source,
+                current_container=current_container,
+            )
         if self.language not in {"javascript", "typescript", "tsx"}:
             return []
 
@@ -478,13 +543,19 @@ class TreeSitterParser(Parser):
             parent = current.parent
             if parent is None:
                 break
-            if parent.type == "assignment_expression" and parent.child_by_field_name("right") == current:
+            if (
+                parent.type == "assignment_expression"
+                and parent.child_by_field_name("right") == current
+            ):
                 target = parent.child_by_field_name("left")
                 if target is not None:
                     targets.append(target)
                 current = parent
                 continue
-            if parent.type == "variable_declarator" and parent.child_by_field_name("value") == current:
+            if (
+                parent.type == "variable_declarator"
+                and parent.child_by_field_name("value") == current
+            ):
                 target = parent.child_by_field_name("name")
                 if target is not None:
                     targets.append(target)
@@ -595,7 +666,11 @@ class TreeSitterParser(Parser):
             owners.append(owner)
         return owners
 
-    def _collect_js_object_owner_aliases(self, node: Node, source: str) -> dict[str, tuple[str, ...]]:
+    def _collect_js_object_owner_aliases(
+        self,
+        node: Node,
+        source: str,
+    ) -> dict[str, tuple[str, ...]]:
         """Collect recoverable alias groups created by object-literal root bindings."""
         aliases: dict[str, tuple[str, ...]] = {}
 
@@ -604,7 +679,9 @@ class TreeSitterParser(Parser):
                 return
             if current.type == "object":
                 owner_paths = list(
-                    dict.fromkeys(owner.fqname for owner in self._bound_object_owners(current, source))
+                    dict.fromkeys(
+                        owner.fqname for owner in self._bound_object_owners(current, source)
+                    )
                 )
                 if len(owner_paths) > 1:
                     merged = tuple(owner_paths)
@@ -698,7 +775,10 @@ class TreeSitterParser(Parser):
             return []
 
         callee = call.child_by_field_name("function")
-        if callee is None or self._member_expression_path(callee, source) != "Object.defineProperty":
+        if (
+            callee is None
+            or self._member_expression_path(callee, source) != "Object.defineProperty"
+        ):
             return []
 
         args = [child for child in arguments.named_children]
@@ -780,7 +860,199 @@ class TreeSitterParser(Parser):
             return None
         return source[node.start_byte : node.end_byte] or None
 
-    def _symbol_kind(self, node: Node) -> str | None:
+    def _cpp_namespace_container(
+        self,
+        *,
+        node: Node,
+        source: str,
+        current_container: _ContainerContext | None,
+    ) -> _ContainerContext | None:
+        """Return namespace container metadata for C++ namespace body traversal."""
+        if node.type != "namespace_definition":
+            return None
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            return None
+        namespace_parts = self._split_cpp_qualified_text(
+            source[name_node.start_byte : name_node.end_byte],
+        )
+        if not namespace_parts:
+            return None
+        namespace_fqname = ".".join(namespace_parts)
+        if current_container is not None:
+            namespace_fqname = f"{current_container.fqname}.{namespace_fqname}"
+        return _ContainerContext(symbol_id=None, fqname=namespace_fqname)
+
+    @staticmethod
+    def _split_cpp_qualified_text(text: str) -> tuple[str, ...]:
+        """Split `A::B::name` text into stable non-empty parts."""
+        parts = [part.strip() for part in text.split("::") if part.strip()]
+        return tuple(parts)
+
+    def _collect_cpp_macro_patterns(self, node: Node, source: str) -> dict[str, _CppMacroPattern]:
+        """Collect same-file macro definitions that expand to recoverable symbols."""
+        patterns: dict[str, _CppMacroPattern] = {}
+
+        def walk(current: Node) -> None:
+            if not current.is_named:
+                return
+            if current.type == "preproc_function_def":
+                pattern = self._cpp_macro_pattern_from_definition(current, source)
+                if pattern is not None:
+                    patterns[pattern.macro_name] = pattern
+            for child in current.children:
+                walk(child)
+
+        walk(node)
+        return patterns
+
+    def _cpp_macro_pattern_from_definition(
+        self,
+        node: Node,
+        source: str,
+    ) -> _CppMacroPattern | None:
+        """Build one recoverable macro pattern from a macro function definition."""
+        name_node = node.child_by_field_name("name")
+        params_node = node.child_by_field_name("parameters")
+        value_node = node.child_by_field_name("value")
+        if name_node is None or params_node is None or value_node is None:
+            return None
+        macro_name = source[name_node.start_byte : name_node.end_byte]
+        if not macro_name:
+            return None
+
+        parameter_names = [
+            source[param.start_byte : param.end_byte]
+            for param in params_node.named_children
+            if param.type == "identifier"
+        ]
+        if not parameter_names:
+            return None
+        parameter_indexes = {name: index for index, name in enumerate(parameter_names)}
+        value_text = source[value_node.start_byte : value_node.end_byte]
+        header_text = value_text.split("{", 1)[0]
+
+        for owner_name, owner_index in parameter_indexes.items():
+            for name_name, name_index in parameter_indexes.items():
+                if owner_name == name_name:
+                    continue
+                method_pattern = re.compile(
+                    rf"\b{re.escape(owner_name)}\s*::\s*{re.escape(name_name)}\s*\(",
+                )
+                if method_pattern.search(header_text):
+                    return _CppMacroPattern(
+                        macro_name=macro_name,
+                        kind="method",
+                        name_index=name_index,
+                        owner_index=owner_index,
+                        parameter_count=len(parameter_names),
+                    )
+
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", header_text):
+            candidate = match.group(1)
+            if candidate not in parameter_indexes:
+                continue
+            prefix = header_text[max(0, match.start(1) - 2) : match.start(1)]
+            if prefix == "::":
+                continue
+            return _CppMacroPattern(
+                macro_name=macro_name,
+                kind="function",
+                name_index=parameter_indexes[candidate],
+                owner_index=None,
+                parameter_count=len(parameter_names),
+            )
+        return None
+
+    def _cpp_macro_symbol_specs(
+        self,
+        *,
+        node: Node,
+        source: str,
+        current_container: _ContainerContext | None,
+    ) -> list[_SyntheticSymbolSpec]:
+        """Emit synthetic C++ symbols recovered from strict macro placeholder patterns."""
+        if node.type != "call_expression":
+            return []
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "identifier":
+            return []
+        macro_name = source[callee.start_byte : callee.end_byte]
+        if not macro_name:
+            return []
+        pattern = self._cpp_macro_patterns.get(macro_name)
+        if pattern is None:
+            return []
+
+        arguments_node = node.child_by_field_name("arguments")
+        if arguments_node is None:
+            return []
+        arguments = [child for child in arguments_node.named_children]
+        if len(arguments) != pattern.parameter_count:
+            return []
+        symbol_name = self._cpp_macro_argument_name(arguments[pattern.name_index], source)
+        if symbol_name is None:
+            return []
+
+        container = current_container
+        if pattern.kind == "method":
+            owner_index = pattern.owner_index
+            if owner_index is None:
+                return []
+            owner_name = self._cpp_macro_argument_name(arguments[owner_index], source)
+            if owner_name is None:
+                return []
+            owner_fqname = owner_name
+            if current_container is not None:
+                owner_fqname = f"{current_container.fqname}.{owner_name}"
+            container = _ContainerContext(symbol_id=None, fqname=owner_fqname)
+
+        return [
+            _SyntheticSymbolSpec(
+                kind=pattern.kind,
+                name=symbol_name,
+                container=container,
+                attributes={
+                    "binding_style": "macro_generated",
+                    "macro_generated": True,
+                    "macro_name": pattern.macro_name,
+                },
+            )
+        ]
+
+    @staticmethod
+    def _cpp_macro_argument_name(node: Node, source: str) -> str | None:
+        """Return identifier-like macro argument text for strict recoverable patterns."""
+        if node.type not in {
+            "identifier",
+            "type_identifier",
+            "field_identifier",
+            "namespace_identifier",
+        }:
+            return None
+        value = source[node.start_byte : node.end_byte]
+        if not value or _IDENTIFIER_PROPERTY_RE.fullmatch(value) is None:
+            return None
+        return value
+
+    @staticmethod
+    def _drop_cpp_macro_duplicates(symbols: list[Symbol]) -> list[Symbol]:
+        """Drop macro-generated symbols when explicit symbols already exist for same fqname/kind."""
+        explicit_keys = {
+            (symbol.kind, symbol.fqname or symbol.name)
+            for symbol in symbols
+            if not bool(symbol.attributes.get("macro_generated"))
+        }
+        deduped: list[Symbol] = []
+        for symbol in symbols:
+            is_macro = bool(symbol.attributes.get("macro_generated"))
+            symbol_key = (symbol.kind, symbol.fqname or symbol.name)
+            if is_macro and symbol_key in explicit_keys:
+                continue
+            deduped.append(symbol)
+        return deduped
+
+    def _symbol_kind(self, node: Node, source: str) -> str | None:
         """Classify a node as function/method/class/interface/trait/enum/type."""
         if self._is_decorated_inner_symbol(node):
             return None
@@ -809,6 +1081,37 @@ class TreeSitterParser(Parser):
                 return "class"
             if node.type in self.spec.interface_nodes:
                 return "interface"
+            return None
+
+        if self.language == "c":
+            if node.type in {"struct_specifier", "union_specifier"}:
+                return "type"
+            if node.type == "enum_specifier":
+                return "enum"
+            if node.type == "function_definition":
+                return "function"
+            if node.type == "declaration" and self._c_family_is_callable_declaration(node, source):
+                return "function"
+            return None
+
+        if self.language == "cpp":
+            if node.type in {"class_specifier", "struct_specifier"}:
+                return "class"
+            if node.type == "enum_specifier":
+                return "enum"
+            if node.type == "function_definition":
+                if self._cpp_is_class_body_method_definition(node):
+                    return "method"
+                if self._cpp_has_qualified_method_declarator(node, source):
+                    return "method"
+                return "function"
+            if node.type == "field_declaration" and self._c_family_is_callable_declaration(
+                node,
+                source,
+            ):
+                return "method"
+            if node.type == "declaration" and self._c_family_is_callable_declaration(node, source):
+                return "function"
             return None
 
         if self.language == "go":
@@ -851,6 +1154,135 @@ class TreeSitterParser(Parser):
             return "interface"
         return None
 
+    def _c_family_is_callable_declaration(self, node: Node, source: str) -> bool:
+        """Return True when declaration-like node declares a callable symbol."""
+        info = self._c_family_declarator_info(node.child_by_field_name("declarator"), source)
+        return info.is_callable_declaration
+
+    def _c_family_declarator_info(
+        self,
+        declarator: Node | None,
+        source: str,
+    ) -> _CFamilyDeclaratorInfo:
+        """Resolve C-family declarator metadata from nested declarator chains."""
+        path = self._c_family_declarator_path(declarator)
+        if not path:
+            return _CFamilyDeclaratorInfo(
+                symbol_name=None,
+                qualified_parts=(),
+                is_callable_declaration=False,
+            )
+
+        terminal = path[-1]
+        symbol_name: str | None = None
+        qualified_parts: tuple[str, ...] = ()
+        if terminal.type == "qualified_identifier":
+            qualified_parts = self._c_family_qualified_parts(terminal, source)
+            if qualified_parts:
+                symbol_name = qualified_parts[-1]
+        elif terminal.type in {
+            "identifier",
+            "field_identifier",
+            "type_identifier",
+            "namespace_identifier",
+            "operator_name",
+            "destructor_name",
+        }:
+            symbol_name = source[terminal.start_byte : terminal.end_byte] or None
+
+        is_callable = False
+        function_indexes = [
+            index
+            for index, current in enumerate(path[:-1])
+            if current.type == "function_declarator"
+        ]
+        if function_indexes:
+            innermost_index = function_indexes[-1]
+            path_tail = path[innermost_index + 1 : -1]
+            is_callable = not any(
+                current.type in {"pointer_declarator", "reference_declarator", "array_declarator"}
+                for current in path_tail
+            )
+
+        return _CFamilyDeclaratorInfo(
+            symbol_name=symbol_name,
+            qualified_parts=qualified_parts,
+            is_callable_declaration=is_callable and symbol_name is not None,
+        )
+
+    def _c_family_declarator_path(self, declarator: Node | None) -> list[Node]:
+        """Return terminal declarator walk used for C-family name/callability analysis."""
+        if declarator is None:
+            return []
+        path: list[Node] = []
+        current: Node | None = declarator
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            path.append(current)
+            visited.add(id(current))
+            if current.type in {
+                "identifier",
+                "field_identifier",
+                "type_identifier",
+                "qualified_identifier",
+                "namespace_identifier",
+                "operator_name",
+                "destructor_name",
+            }:
+                break
+            nested = current.child_by_field_name("declarator")
+            if nested is None and current.type == "parenthesized_declarator":
+                for child in current.named_children:
+                    nested = child
+                    break
+            current = nested
+        return path
+
+    def _c_family_qualified_parts(self, node: Node, source: str) -> tuple[str, ...]:
+        """Resolve nested qualified identifier/name nodes into ordered parts."""
+        if node.type == "qualified_identifier":
+            scope = node.child_by_field_name("scope")
+            name = node.child_by_field_name("name")
+            parts: list[str] = []
+            if scope is not None:
+                parts.extend(self._c_family_qualified_parts(scope, source))
+            if name is not None:
+                parts.extend(self._c_family_qualified_parts(name, source))
+            if parts:
+                return tuple(parts)
+            text = source[node.start_byte : node.end_byte]
+            return self._split_cpp_qualified_text(text)
+        text = source[node.start_byte : node.end_byte]
+        if not text:
+            return ()
+        return (text,)
+
+    @staticmethod
+    def _cpp_is_class_body_method_definition(node: Node) -> bool:
+        """Return True for C++ method definitions defined inside class/struct bodies."""
+        parent = node.parent
+        if parent is None or parent.type != "field_declaration_list":
+            return False
+        owner = parent.parent
+        return bool(owner and owner.type in {"class_specifier", "struct_specifier"})
+
+    def _cpp_has_qualified_method_declarator(self, node: Node, source: str) -> bool:
+        """Return True when C++ definition declarator is type-qualified (`Type::name`)."""
+        info = self._c_family_declarator_info(node.child_by_field_name("declarator"), source)
+        return info.is_callable_declaration and len(info.qualified_parts) >= 2
+
+    def _cpp_method_container_from_qualified_declarator(
+        self,
+        node: Node,
+        source: str,
+    ) -> _ContainerContext | None:
+        """Build method container context from `Type::method` declarators."""
+        info = self._c_family_declarator_info(node.child_by_field_name("declarator"), source)
+        if len(info.qualified_parts) < 2:
+            return None
+        owner_parts = info.qualified_parts[:-1]
+        return _ContainerContext(symbol_id=None, fqname=".".join(owner_parts))
+
     def _is_decorated_inner_symbol(self, node: Node) -> bool:
         """Return True when node is the inner declaration under decorated_definition."""
         if self.language != "python":
@@ -880,6 +1312,29 @@ class TreeSitterParser(Parser):
                     return self._extract_name(child, source)
                 if child.type in self.spec.class_nodes:
                     return self._extract_name(child, source)
+
+        if self.language in {"c", "cpp"}:
+            if node.type in {
+                "function_definition",
+                "declaration",
+                "field_declaration",
+            }:
+                info = self._c_family_declarator_info(
+                    node.child_by_field_name("declarator"),
+                    source,
+                )
+                name = info.symbol_name
+                if name:
+                    return name
+            if node.type in {
+                "class_specifier",
+                "struct_specifier",
+                "union_specifier",
+                "enum_specifier",
+            }:
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    return source[name_node.start_byte : name_node.end_byte] or None
 
         for child in node.children:
             if child.type in {
