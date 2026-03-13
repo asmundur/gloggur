@@ -212,13 +212,17 @@ def test_symbol_index_preserves_js_assignment_owner_paths(tmp_path) -> None:
     repo.mkdir()
     path = repo / "sample.js"
     path.write_text(
-        "exports.send = function send() {};\n"
-        "module.exports.json = function () {};\n"
-        "proto.use = function (fn) {};\n"
-        "Router.prototype.route = function route(path) {};\n"
-        "app.listen = function listen() {};\n"
-        "const api = { close() {}, parse: function () {}, end: () => {} };\n"
+        "res.header = res.set = function header() {};\n"
+        "var Router = module.exports = function Router() {};\n"
+        'app["all"] = function all() {};\n'
+        'Object.defineProperty(res, "connection", {\n'
+        "  value: function connection() {},\n"
+        "  get: function () {},\n"
+        "  set: function (value) {},\n"
+        "});\n"
+        "var api = module.exports = { send() {}, end: () => {} };\n"
         "const render = () => {};\n"
+        "const state = { get name() {}, set name(value) {} };\n"
         "items.map(function (x) { return x; });\n",
         encoding="utf8",
     )
@@ -236,15 +240,51 @@ def test_symbol_index_preserves_js_assignment_owner_paths(tmp_path) -> None:
     assert result.files_considered == 1
     assert result.files_changed == 1
     assert tuples == {
-        ("send", "exports"),
-        ("json", "module.exports"),
-        ("use", "proto"),
-        ("route", "Router.prototype"),
-        ("listen", "app"),
-        ("close", "api"),
-        ("parse", "api"),
+        ("header", "res"),
+        ("set", "res"),
+        ("Router", None),
+        ("all", "app"),
+        ("connection", "res"),
+        ("send", "api"),
+        ("send", "module.exports"),
         ("end", "api"),
+        ("end", "module.exports"),
         ("render", None),
+        ("name", "state"),
+    }
+    assert ("exports", "module") not in tuples
+
+
+def test_symbol_index_propagates_js_object_root_aliases_for_member_assignments(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    path = repo / "sample.js"
+    path.write_text(
+        "var app = exports = module.exports = {};\n"
+        "app.listen = function listen() {};\n"
+        "exports.use = function use() {};\n",
+        encoding="utf8",
+    )
+    indexer = SymbolIndexer(
+        repo_root=repo,
+        config=_config(tmp_path),
+        parser_registry=ParserRegistry(),
+    )
+    store = SymbolIndexStore(SymbolIndexStoreConfig(repo_root=repo))
+
+    result = indexer.index_path(str(repo))
+
+    defs = [item for item in store.list_occurrences() if item.kind == "def"]
+    tuples = {(item.symbol, item.container) for item in defs}
+    assert result.files_considered == 1
+    assert result.files_changed == 1
+    assert tuples == {
+        ("listen", "app"),
+        ("listen", "exports"),
+        ("listen", "module.exports"),
+        ("use", "app"),
+        ("use", "exports"),
+        ("use", "module.exports"),
     }
 
 

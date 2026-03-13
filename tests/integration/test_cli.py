@@ -345,8 +345,10 @@ def test_cli_search_json_emits_contextpack_v2_without_legacy_keys() -> None:
 def test_cli_search_by_fqname_finds_js_assignment_bound_symbols() -> None:
     runner = CliRunner()
     source = (
-        "module.exports.json = function () { return 1; };\n"
-        "const api = { send() { return module.exports.json(); } };\n"
+        "res.header = res.set = function header() { return 1; };\n"
+        "var Router = module.exports = function Router() { return 2; };\n"
+        'app["all"] = function all() { return 3; };\n'
+        "var api = module.exports = { send() { return app.all(); } };\n"
     )
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"sample.js": source})
@@ -359,33 +361,16 @@ def test_cli_search_by_fqname_finds_js_assignment_bound_symbols() -> None:
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
         assert index_result.exit_code == 0, index_result.output
 
-        api_result = runner.invoke(
-            cli,
-            ["search", "api.send", "--json", "--search-mode", "by_fqname", "--top-k", "3"],
-            env=env,
-        )
-        assert api_result.exit_code == 0, api_result.output
-        api_payload = json.loads(api_result.output)
-        assert api_payload["hits"]
-        assert api_payload["hits"][0]["path"] == "sample.js"
-
-        exports_result = runner.invoke(
-            cli,
-            [
-                "search",
-                "module.exports.json",
-                "--json",
-                "--search-mode",
-                "by_fqname",
-                "--top-k",
-                "3",
-            ],
-            env=env,
-        )
-        assert exports_result.exit_code == 0, exports_result.output
-        exports_payload = json.loads(exports_result.output)
-        assert exports_payload["hits"]
-        assert exports_payload["hits"][0]["path"] == "sample.js"
+        for query in ("res.header", "app.all", "module.exports", "module.exports.send"):
+            result = runner.invoke(
+                cli,
+                ["search", query, "--json", "--search-mode", "by_fqname", "--top-k", "3"],
+                env=env,
+            )
+            assert result.exit_code == 0, result.output
+            payload = json.loads(result.output)
+            assert payload["hits"]
+            assert payload["hits"][0]["path"] == "sample.js"
 
 
 def test_cli_search_auto_declaration_query_finds_definition_without_exact_mode() -> None:

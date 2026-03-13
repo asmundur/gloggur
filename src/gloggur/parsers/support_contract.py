@@ -26,8 +26,15 @@ _LANGUAGE_CONSTRUCT_TIERS: dict[str, dict[str, str]] = {
         "arrow_function_assignment": "baseline",
         "function_expression_assignment": "baseline",
         "commonjs_export_assignment": "baseline",
+        "assignment_alias_chain": "baseline",
+        "export_root_assignment": "baseline",
         "prototype_member_assignment": "baseline",
+        "string_literal_subscript_assignment": "baseline",
+        "define_property_descriptor": "baseline",
         "object_binding_property": "baseline",
+        "object_binding_alias_propagation": "baseline",
+        "computed_identifier_subscript_assignment": "known_gap",
+        "helper_runtime_mutation": "known_gap",
     },
     "typescript": {
         "function_declaration": "baseline",
@@ -65,7 +72,10 @@ _KNOWN_GAPS_BY_LANGUAGE: dict[str, list[str]] = {
     "python": [
         "decorated methods such as @property may be classified as function instead of method",
     ],
-    "javascript": [],
+    "javascript": [
+        "computed identifier subscript assignments such as app[method] = fn are not extracted as symbols",
+        "helper-driven runtime mutation such as mixin/install helpers is not extracted as symbols",
+    ],
     "typescript": [
         "type alias declarations are not extracted as symbols",
         "enum declarations are not extracted as symbols",
@@ -158,11 +168,50 @@ _PARSER_CHECK_CASES: tuple[ParserCheckCase, ...] = (
         ),
     ),
     ParserCheckCase(
+        case_id="javascript.assignment_alias_chain",
+        language="javascript",
+        path="sample.js",
+        source="res.header = res.set = function header() {};\n",
+        expected_symbols=(("method", "header"), ("method", "set")),
+    ),
+    ParserCheckCase(
+        case_id="javascript.export_root_alias_chain",
+        language="javascript",
+        path="sample.js",
+        source="var Router = module.exports = function () {};\n",
+        expected_symbols=(("function", "Router"), ("function", "module.exports")),
+    ),
+    ParserCheckCase(
+        case_id="javascript.literal_subscript_assignment",
+        language="javascript",
+        path="sample.js",
+        source='app["all"] = function all() {};\n',
+        expected_symbols=(("method", "all"),),
+    ),
+    ParserCheckCase(
+        case_id="javascript.define_property_descriptor",
+        language="javascript",
+        path="sample.js",
+        source=(
+            'Object.defineProperty(res, "connection", { value: function connection() {} });\n'
+            'Object.defineProperty(res, "path", { get: function () {} });\n'
+            'Object.defineProperty(res, "host", { set: function (value) {} });\n'
+        ),
+        expected_symbols=(("method", "connection"), ("method", "path"), ("method", "host")),
+    ),
+    ParserCheckCase(
         case_id="javascript.object_binding_methods",
         language="javascript",
         path="sample.js",
         source="const api = { send() {}, json: function () {}, end: () => {} };\n",
         expected_symbols=(("method", "send"), ("method", "json"), ("method", "end")),
+    ),
+    ParserCheckCase(
+        case_id="javascript.object_binding_alias_owners",
+        language="javascript",
+        path="sample.js",
+        source="var api = module.exports = { send() {}, end: () => {} };\n",
+        expected_symbols=(("method", "send"), ("method", "end")),
     ),
     ParserCheckCase(
         case_id="typescript.interface_and_function",

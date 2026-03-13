@@ -74,6 +74,8 @@ _LANGUAGE_SPECS: dict[str, LanguageSpec] = {
     ),
 }
 
+_IDENTIFIER_PROPERTY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 @dataclass(frozen=True)
 class _ContainerContext:
@@ -91,6 +93,7 @@ class _SyntheticSymbolSpec:
     name: str
     container: _ContainerContext | None
     attributes: dict[str, object]
+    fqname: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,7 @@ class _AssignmentTarget:
     name: str
     container: _ContainerContext | None
     binding_style: str
+    fqname: str | None = None
 
 
 class TreeSitterParser(Parser):
@@ -117,6 +121,7 @@ class TreeSitterParser(Parser):
         self.spec = _LANGUAGE_SPECS[language]
         self.parser = get_parser(language)
         self.signal_processors = signal_processors or default_signal_processors()
+        self._js_object_owner_aliases: dict[str, tuple[str, ...]] = {}
 
     def parse_file(self, path: str, source: str) -> ParsedFile:
         """Parse a file and return ParsedFile with extracted symbols."""
@@ -131,15 +136,25 @@ class TreeSitterParser(Parser):
         """Extract symbol records from the syntax tree with container metadata."""
         tree = self.parser.parse(bytes(source, "utf8"))
         repo_id = self._repo_id(path)
+        if self.language in {"javascript", "typescript", "tsx"}:
+            self._js_object_owner_aliases = self._collect_js_object_owner_aliases(
+                tree.root_node,
+                source,
+            )
+        else:
+            self._js_object_owner_aliases = {}
         symbols: list[Symbol] = []
-        self._collect_symbols(
-            node=tree.root_node,
-            path=path,
-            source=source,
-            repo_id=repo_id,
-            containers=[],
-            out=symbols,
-        )
+        try:
+            self._collect_symbols(
+                node=tree.root_node,
+                path=path,
+                source=source,
+                repo_id=repo_id,
+                containers=[],
+                out=symbols,
+            )
+        finally:
+            self._js_object_owner_aliases = {}
         symbols.sort(key=lambda item: (item.file_path, item.start_line, item.end_line, item.id))
         return symbols
 
@@ -162,25 +177,30 @@ class TreeSitterParser(Parser):
             return
 
         current_container = containers[-1] if containers else None
-        symbol = self._synthetic_symbol_from_node(
+        symbols_for_node = self._synthetic_symbols_from_node(
             node,
             path=path,
             source=source,
             repo_id=repo_id,
             current_container=current_container,
-        ) or self._symbol_from_node(
-            node,
-            path=path,
-            source=source,
-            repo_id=repo_id,
-            container=current_container,
         )
+        if not symbols_for_node:
+            base_symbol = self._symbol_from_node(
+                node,
+                path=path,
+                source=source,
+                repo_id=repo_id,
+                container=current_container,
+            )
+            symbols_for_node = [] if base_symbol is None else [base_symbol]
         pushed = False
-        if symbol is not None:
-            out.append(symbol)
-            fqname = symbol.fqname or symbol.name
-            containers.append(_ContainerContext(symbol_id=symbol.id, fqname=fqname))
-            pushed = True
+        if symbols_for_node:
+            out.extend(symbols_for_node)
+            if len(symbols_for_node) == 1:
+                symbol = symbols_for_node[0]
+                fqname = symbol.fqname or symbol.name
+                containers.append(_ContainerContext(symbol_id=symbol.id, fqname=fqname))
+                pushed = True
 
         for child in node.children:
             self._collect_symbols(
@@ -222,7 +242,7 @@ class TreeSitterParser(Parser):
             container=container,
         )
 
-    def _synthetic_symbol_from_node(
+    def _synthetic_symbols_from_node(
         self,
         node: Node,
         *,
@@ -230,22 +250,23 @@ class TreeSitterParser(Parser):
         source: str,
         repo_id: str,
         current_container: _ContainerContext | None,
-    ) -> Symbol | None:
+    ) -> list[Symbol]:
         """Create JS-family synthetic symbols for assignment-bound declarations."""
-        spec = self._synthetic_symbol_spec(node, source, current_container)
-        if spec is None:
-            return None
-
-        return self._build_symbol(
-            node=node,
-            path=path,
-            source=source,
-            repo_id=repo_id,
-            kind=spec.kind,
-            name=spec.name,
-            container=spec.container,
-            extra_attributes=spec.attributes,
-        )
+        specs = self._synthetic_symbol_specs(node, source, current_container)
+        return [
+            self._build_symbol(
+                node=node,
+                path=path,
+                source=source,
+                repo_id=repo_id,
+                kind=spec.kind,
+                name=spec.name,
+                container=spec.container,
+                extra_attributes=spec.attributes,
+                fqname_override=spec.fqname,
+            )
+            for spec in specs
+        ]
 
     def _build_symbol(
         self,
@@ -258,6 +279,7 @@ class TreeSitterParser(Parser):
         name: str,
         container: _ContainerContext | None,
         extra_attributes: dict[str, object] | None = None,
+        fqname_override: str | None = None,
     ) -> Symbol:
         """Build one symbol object with shared metadata/signals plumbing."""
 
@@ -294,7 +316,11 @@ class TreeSitterParser(Parser):
         body_hash = hashlib.sha256(body.encode("utf8")).hexdigest()
         start_line = node.start_point[0] + 1
         end_line = node.end_point[0] + 1
-        fqname = name if container is None else f"{container.fqname}.{name}"
+        fqname = (
+            fqname_override
+            if fqname_override is not None
+            else (name if container is None else f"{container.fqname}.{name}")
+        )
         visibility, exported = self._infer_visibility_and_exported(
             node=node,
             name=name,
@@ -338,88 +364,135 @@ class TreeSitterParser(Parser):
             attributes=attributes,
         )
 
-    def _synthetic_symbol_spec(
+    def _synthetic_symbol_specs(
         self,
         node: Node,
         source: str,
         current_container: _ContainerContext | None,
-    ) -> _SyntheticSymbolSpec | None:
-        """Return a synthetic symbol spec for supported JS-family binding patterns."""
+    ) -> list[_SyntheticSymbolSpec]:
+        """Return synthetic symbol specs for supported JS-family binding patterns."""
         if self.language not in {"javascript", "typescript", "tsx"}:
-            return None
+            return []
 
         if node.type == "method_definition":
             if node.parent is None or node.parent.type != "object":
-                return None
-            owner = self._bound_object_owner(node.parent, source)
-            if owner is None:
-                return None
+                return []
+            owners = self._bound_object_owners(node.parent, source)
+            if not owners:
+                return []
             property_name = self._property_name(node.child_by_field_name("name"), source)
             if not property_name:
-                return None
-            return _SyntheticSymbolSpec(
-                kind="method",
-                name=property_name,
-                container=owner,
-                attributes={"binding_style": "object_binding_property"},
-            )
+                return []
+            attributes: dict[str, object] = {"binding_style": "object_binding_property"}
+            accessor = self._method_definition_accessor(node, source)
+            if accessor is not None:
+                attributes["accessor"] = accessor
+            return [
+                _SyntheticSymbolSpec(
+                    kind="method",
+                    name=property_name,
+                    container=owner,
+                    attributes=dict(attributes),
+                )
+                for owner in owners
+            ]
 
         if node.type not in {"function_expression", "arrow_function", "class_expression"}:
-            return None
+            return []
 
         parent = node.parent
         if parent is None:
-            return None
+            return []
 
         if parent.type == "pair" and parent.child_by_field_name("value") == node:
-            owner = self._bound_object_owner(parent.parent, source)
-            if owner is None:
-                return None
+            define_property_specs = self._define_property_symbol_specs(
+                pair=parent,
+                value_node=node,
+                source=source,
+            )
+            if define_property_specs:
+                return define_property_specs
+            owners = self._bound_object_owners(parent.parent, source)
+            if not owners:
+                return []
             property_name = self._property_name(parent.child_by_field_name("key"), source)
             if not property_name:
-                return None
+                return []
             if node.type == "class_expression":
-                return None
-            return _SyntheticSymbolSpec(
-                kind="method",
-                name=property_name,
-                container=owner,
-                attributes={"binding_style": "object_binding_property"},
-            )
+                return []
+            return [
+                _SyntheticSymbolSpec(
+                    kind="method",
+                    name=property_name,
+                    container=owner,
+                    attributes={"binding_style": "object_binding_property"},
+                )
+                for owner in owners
+            ]
 
-        if parent.type == "variable_declarator" and parent.child_by_field_name("value") == node:
-            target = self._assignment_symbol_target(
-                parent.child_by_field_name("name"),
-                source,
-                current_container=current_container,
-            )
-            if target is None:
-                return None
-            kind = self._synthetic_assignment_kind(node=node, binding_style=target.binding_style)
-            return _SyntheticSymbolSpec(
-                kind=kind,
+        targets = self._assignment_symbol_targets(
+            node,
+            source,
+            current_container=current_container,
+        )
+        return [
+            _SyntheticSymbolSpec(
+                kind=self._synthetic_assignment_kind(node=node, binding_style=target.binding_style),
                 name=target.name,
                 container=target.container,
                 attributes={"binding_style": target.binding_style},
+                fqname=target.fqname,
             )
+            for target in targets
+        ]
 
-        if parent.type == "assignment_expression" and parent.child_by_field_name("right") == node:
-            target = self._assignment_symbol_target(
-                parent.child_by_field_name("left"),
+    def _assignment_symbol_targets(
+        self,
+        value_node: Node,
+        source: str,
+        *,
+        current_container: _ContainerContext | None,
+    ) -> list[_AssignmentTarget]:
+        """Resolve all recoverable binding targets in an assignment/declarator chain."""
+        intrinsic_name = self._extract_name(value_node, source)
+        targets: list[_AssignmentTarget] = []
+        seen: set[_AssignmentTarget] = set()
+        for target_node in self._binding_target_nodes_for_value(value_node):
+            for target in self._assignment_symbol_targets_for_node(
+                target_node,
                 source,
                 current_container=current_container,
-            )
-            if target is None:
-                return None
-            kind = self._synthetic_assignment_kind(node=node, binding_style=target.binding_style)
-            return _SyntheticSymbolSpec(
-                kind=kind,
-                name=target.name,
-                container=target.container,
-                attributes={"binding_style": target.binding_style},
-            )
+                intrinsic_name=intrinsic_name,
+            ):
+                if target in seen:
+                    continue
+                seen.add(target)
+                targets.append(target)
+        return targets
 
-        return None
+    def _binding_target_nodes_for_value(self, value_node: Node) -> list[Node]:
+        """Return outer-to-inner binding targets for a value inside assignment chains."""
+        targets: list[Node] = []
+        current = value_node
+        while True:
+            parent = current.parent
+            if parent is None:
+                break
+            if parent.type == "assignment_expression" and parent.child_by_field_name("right") == current:
+                target = parent.child_by_field_name("left")
+                if target is not None:
+                    targets.append(target)
+                current = parent
+                continue
+            if parent.type == "variable_declarator" and parent.child_by_field_name("value") == current:
+                target = parent.child_by_field_name("name")
+                if target is not None:
+                    targets.append(target)
+                current = parent
+                continue
+            break
+        targets.reverse()
+        return targets
 
     def _assignment_symbol_target(
         self,
@@ -427,6 +500,7 @@ class TreeSitterParser(Parser):
         source: str,
         *,
         current_container: _ContainerContext | None,
+        intrinsic_name: str | None = None,
     ) -> _AssignmentTarget | None:
         """Resolve an identifier/member binding target into synthetic symbol metadata."""
         if node is None:
@@ -442,43 +516,109 @@ class TreeSitterParser(Parser):
                 binding_style="variable_assignment",
             )
 
-        if node.type != "member_expression":
-            return None
-
         path = self._member_expression_path(node, source)
         if not path:
             return None
+
+        if path in {"exports", "module.exports"}:
+            return _AssignmentTarget(
+                name=intrinsic_name or path,
+                container=None,
+                binding_style="export_root_assignment",
+                fqname=path,
+            )
+
         parts = path.split(".")
         if len(parts) < 2:
             return None
         owner_path = ".".join(parts[:-1])
-        binding_style = "member_assignment"
-        if owner_path in {"exports", "module.exports"}:
-            binding_style = "export_assignment"
-        elif owner_path.endswith(".prototype"):
-            binding_style = "prototype_assignment"
+        binding_style = self._binding_style_for_owner_path(owner_path)
         return _AssignmentTarget(
             name=parts[-1],
             container=_ContainerContext(symbol_id=None, fqname=owner_path),
             binding_style=binding_style,
         )
 
-    def _bound_object_owner(self, node: Node | None, source: str) -> _ContainerContext | None:
-        """Resolve the binding owner for an object literal used as a named target."""
+    def _assignment_symbol_targets_for_node(
+        self,
+        node: Node | None,
+        source: str,
+        *,
+        current_container: _ContainerContext | None,
+        intrinsic_name: str | None = None,
+    ) -> list[_AssignmentTarget]:
+        """Resolve one target node into all alias-expanded synthetic targets."""
+        target = self._assignment_symbol_target(
+            node,
+            source,
+            current_container=current_container,
+            intrinsic_name=intrinsic_name,
+        )
+        if target is None:
+            return []
+        if node is None or node.type == "identifier" or target.container is None:
+            return [target]
+
+        path = self._member_expression_path(node, source)
+        if not path:
+            return [target]
+        parts = path.split(".")
+        if len(parts) < 2:
+            return [target]
+
+        owner_path = ".".join(parts[:-1])
+        property_name = parts[-1]
+        alias_paths = self._owner_alias_paths(owner_path)
+        if len(alias_paths) <= 1:
+            return [target]
+
+        return [
+            _AssignmentTarget(
+                name=property_name,
+                container=_ContainerContext(symbol_id=None, fqname=alias_owner),
+                binding_style=self._binding_style_for_owner_path(alias_owner),
+            )
+            for alias_owner in alias_paths
+        ]
+
+    def _bound_object_owners(self, node: Node | None, source: str) -> list[_ContainerContext]:
+        """Resolve all recoverable owners for an object literal used as a named target."""
         if node is None or node.type != "object":
-            return None
+            return []
+        owners: list[_ContainerContext] = []
+        seen: set[_ContainerContext] = set()
+        for target_node in self._binding_target_nodes_for_value(node):
+            owner = self._binding_target_container(target_node, source)
+            if owner is None or owner in seen:
+                continue
+            seen.add(owner)
+            owners.append(owner)
+        return owners
 
-        parent = node.parent
-        if parent is None:
-            return None
+    def _collect_js_object_owner_aliases(self, node: Node, source: str) -> dict[str, tuple[str, ...]]:
+        """Collect recoverable alias groups created by object-literal root bindings."""
+        aliases: dict[str, tuple[str, ...]] = {}
 
-        if parent.type == "variable_declarator" and parent.child_by_field_name("value") == node:
-            return self._binding_target_container(parent.child_by_field_name("name"), source)
+        def walk(current: Node) -> None:
+            if not current.is_named:
+                return
+            if current.type == "object":
+                owner_paths = list(
+                    dict.fromkeys(owner.fqname for owner in self._bound_object_owners(current, source))
+                )
+                if len(owner_paths) > 1:
+                    merged = tuple(owner_paths)
+                    for owner_path in owner_paths:
+                        existing = aliases.get(owner_path)
+                        if existing is not None:
+                            merged = tuple(dict.fromkeys([*existing, *merged]))
+                    for owner_path in merged:
+                        aliases[owner_path] = merged
+            for child in current.children:
+                walk(child)
 
-        if parent.type == "assignment_expression" and parent.child_by_field_name("right") == node:
-            return self._binding_target_container(parent.child_by_field_name("left"), source)
-
-        return None
+        walk(node)
+        return aliases
 
     def _binding_target_container(self, node: Node | None, source: str) -> _ContainerContext | None:
         """Resolve the full target path used as an object-binding owner context."""
@@ -489,8 +629,6 @@ class TreeSitterParser(Parser):
             if not name:
                 return None
             return _ContainerContext(symbol_id=None, fqname=name)
-        if node.type != "member_expression":
-            return None
         path = self._member_expression_path(node, source)
         if not path:
             return None
@@ -500,14 +638,29 @@ class TreeSitterParser(Parser):
         """Return the stable symbol kind for an assignment-based JS-family symbol."""
         if node.type == "class_expression":
             return "class"
-        if binding_style in {"variable_assignment", "export_assignment"}:
+        if binding_style in {
+            "variable_assignment",
+            "export_assignment",
+            "export_root_assignment",
+        }:
             return "function"
         return "method"
 
     def _member_expression_path(self, node: Node, source: str) -> str | None:
-        """Return a dotted member-expression path for supported identifier/property chains."""
+        """Return a dotted path for supported identifier/member/subscript chains."""
         if node.type == "identifier":
             return source[node.start_byte : node.end_byte]
+
+        if node.type == "subscript_expression":
+            object_node = node.child_by_field_name("object")
+            index_node = node.child_by_field_name("index")
+            if object_node is None or index_node is None:
+                return None
+            object_path = self._member_expression_path(object_node, source)
+            property_name = self._identifier_string_property_name(index_node, source)
+            if not object_path or not property_name:
+                return None
+            return f"{object_path}.{property_name}"
 
         if node.type != "member_expression":
             return None
@@ -521,6 +674,96 @@ class TreeSitterParser(Parser):
         if not object_path or not property_name:
             return None
         return f"{object_path}.{property_name}"
+
+    def _define_property_symbol_specs(
+        self,
+        *,
+        pair: Node,
+        value_node: Node,
+        source: str,
+    ) -> list[_SyntheticSymbolSpec]:
+        """Resolve exact Object.defineProperty descriptor symbols from a pair value node."""
+        key_name = self._property_name(pair.child_by_field_name("key"), source)
+        if key_name not in {"value", "get", "set"}:
+            return []
+
+        descriptor = pair.parent
+        if descriptor is None or descriptor.type != "object":
+            return []
+        arguments = descriptor.parent
+        if arguments is None or arguments.type != "arguments":
+            return []
+        call = arguments.parent
+        if call is None or call.type != "call_expression":
+            return []
+
+        callee = call.child_by_field_name("function")
+        if callee is None or self._member_expression_path(callee, source) != "Object.defineProperty":
+            return []
+
+        args = [child for child in arguments.named_children]
+        if len(args) < 3 or args[2] != descriptor:
+            return []
+
+        owner_path = self._member_expression_path(args[0], source)
+        property_name = self._identifier_string_property_name(args[1], source)
+        if not owner_path or not property_name:
+            return []
+
+        attributes: dict[str, object] = {"binding_style": "define_property_descriptor"}
+        if key_name in {"get", "set"}:
+            if value_node.type == "class_expression":
+                return []
+            attributes["accessor"] = key_name
+
+        return [
+            _SyntheticSymbolSpec(
+                kind=self._synthetic_assignment_kind(
+                    node=value_node,
+                    binding_style=self._binding_style_for_owner_path(owner_path),
+                ),
+                name=property_name,
+                container=_ContainerContext(symbol_id=None, fqname=owner_path),
+                attributes=attributes,
+            )
+        ]
+
+    def _method_definition_accessor(self, node: Node, source: str) -> str | None:
+        """Return get/set for object-literal accessors when syntactically explicit."""
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            return None
+        prefix = source[node.start_byte : name_node.start_byte].strip()
+        if prefix == "get":
+            return "get"
+        if prefix == "set":
+            return "set"
+        return None
+
+    @staticmethod
+    def _binding_style_for_owner_path(owner_path: str) -> str:
+        """Resolve the stable binding style for a member-like owner path."""
+        if owner_path in {"exports", "module.exports"}:
+            return "export_assignment"
+        if owner_path.endswith(".prototype"):
+            return "prototype_assignment"
+        return "member_assignment"
+
+    def _owner_alias_paths(self, owner_path: str) -> tuple[str, ...]:
+        """Return alias-equivalent owner paths discovered from object-literal roots."""
+        aliases = self._js_object_owner_aliases.get(owner_path)
+        if aliases:
+            return aliases
+        return (owner_path,)
+
+    def _identifier_string_property_name(self, node: Node | None, source: str) -> str | None:
+        """Return identifier-shaped property name from a quoted string literal."""
+        if node is None or node.type != "string":
+            return None
+        value = self._strip_quotes(source[node.start_byte : node.end_byte])
+        if not value or _IDENTIFIER_PROPERTY_RE.fullmatch(value) is None:
+            return None
+        return value
 
     @staticmethod
     def _property_name(node: Node | None, source: str) -> str | None:

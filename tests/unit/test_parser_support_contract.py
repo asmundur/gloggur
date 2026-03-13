@@ -49,9 +49,19 @@ def test_parser_capability_check_promotes_js_assignment_cases_to_required_passes
     assert javascript_tiers["arrow_function_assignment"] == "baseline"
     assert javascript_tiers["function_expression_assignment"] == "baseline"
     assert javascript_tiers["commonjs_export_assignment"] == "baseline"
+    assert javascript_tiers["assignment_alias_chain"] == "baseline"
+    assert javascript_tiers["export_root_assignment"] == "baseline"
     assert javascript_tiers["prototype_member_assignment"] == "baseline"
+    assert javascript_tiers["string_literal_subscript_assignment"] == "baseline"
+    assert javascript_tiers["define_property_descriptor"] == "baseline"
     assert javascript_tiers["object_binding_property"] == "baseline"
-    assert contract["known_gaps"]["javascript"] == []
+    assert javascript_tiers["object_binding_alias_propagation"] == "baseline"
+    assert javascript_tiers["computed_identifier_subscript_assignment"] == "known_gap"
+    assert javascript_tiers["helper_runtime_mutation"] == "known_gap"
+    assert contract["known_gaps"]["javascript"] == [
+        "computed identifier subscript assignments such as app[method] = fn are not extracted as symbols",
+        "helper-driven runtime mutation such as mixin/install helpers is not extracted as symbols",
+    ]
     assert (
         contract["construct_tiers"]["typescript"]["typed_arrow_function_assignment"] == "baseline"
     )
@@ -61,6 +71,11 @@ def test_parser_capability_check_promotes_js_assignment_cases_to_required_passes
     assert cases["javascript.arrow_assignment"]["known_gap"] is False
     assert cases["javascript.arrow_assignment"]["status"] == "passed"
     assert cases["javascript.commonjs_and_member_assignments"]["status"] == "passed"
+    assert cases["javascript.assignment_alias_chain"]["status"] == "passed"
+    assert cases["javascript.export_root_alias_chain"]["status"] == "passed"
+    assert cases["javascript.literal_subscript_assignment"]["status"] == "passed"
+    assert cases["javascript.define_property_descriptor"]["status"] == "passed"
     assert cases["javascript.object_binding_methods"]["status"] == "passed"
+    assert cases["javascript.object_binding_alias_owners"]["status"] == "passed"
     assert cases["typescript.typed_arrow_assignment"]["status"] == "passed"
     assert cases["tsx.arrow_component"]["status"] == "passed"

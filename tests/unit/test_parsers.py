@@ -9,6 +9,13 @@ def _symbols_by_fqname(symbols):
     return {symbol.fqname or symbol.name: symbol for symbol in symbols}
 
 
+def _symbols_grouped_by_fqname(symbols):
+    grouped = {}
+    for symbol in symbols:
+        grouped.setdefault(symbol.fqname or symbol.name, []).append(symbol)
+    return grouped
+
+
 def test_parser_registry_supports_known_extensions() -> None:
     """Parser registry should resolve known extensions."""
     registry = ParserRegistry()
@@ -268,22 +275,130 @@ items.map(function (x) { return x; });
     assert "map" not in {symbol.name for symbol in symbols}
 
 
+def test_treesitter_parser_recovers_remaining_javascript_commonjs_alias_and_descriptor_symbols() -> None:
+    """JavaScript parser should recover alias chains, literal subscripts, and descriptors."""
+    source = """
+res.header = res.set = function header() {};
+var Router = module.exports = function Router() {};
+app["all"] = function all() {};
+Object.defineProperty(res, "connection", {
+  value: function connection() {},
+  get: function () {},
+  set: function (value) {},
+});
+var app = exports = module.exports = {};
+app.listen = function listen() {};
+var api = module.exports = { send() {}, end: () => {} };
+const state = { get name() {}, set name(value) {} };
+const method = "all";
+app[method] = function miss() {};
+app["x-y"] = function missBad() {};
+"""
+    parser = TreeSitterParser("javascript")
+    symbols = parser.extract_symbols("sample.js", source)
+    grouped = _symbols_grouped_by_fqname(symbols)
+
+    assert {
+        "res.header",
+        "res.set",
+        "Router",
+        "module.exports",
+        "app.all",
+        "res.connection",
+        "app.listen",
+        "exports.listen",
+        "module.exports.listen",
+        "api.send",
+        "api.end",
+        "module.exports.send",
+        "module.exports.end",
+        "state.name",
+    }.issubset(grouped)
+    assert "app.miss" not in grouped
+    assert "app.x-y" not in grouped
+
+    header = grouped["res.header"][0]
+    assert header.kind == "method"
+    assert header.name == "header"
+    assert header.container_fqname == "res"
+    assert header.attributes["binding_style"] == "member_assignment"
+
+    setter_alias = grouped["res.set"][0]
+    assert setter_alias.kind == "method"
+    assert setter_alias.name == "set"
+    assert setter_alias.container_fqname == "res"
+    assert setter_alias.attributes["binding_style"] == "member_assignment"
+
+    export_root = grouped["module.exports"][0]
+    assert export_root.kind == "function"
+    assert export_root.name == "Router"
+    assert export_root.container_fqname is None
+    assert export_root.attributes["binding_style"] == "export_root_assignment"
+
+    local_alias = grouped["Router"][0]
+    assert local_alias.kind == "function"
+    assert local_alias.container_fqname is None
+    assert local_alias.attributes["binding_style"] == "variable_assignment"
+
+    subscript = grouped["app.all"][0]
+    assert subscript.kind == "method"
+    assert subscript.name == "all"
+    assert subscript.container_fqname == "app"
+    assert subscript.attributes["binding_style"] == "member_assignment"
+
+    assert grouped["app.listen"][0].kind == "method"
+    assert grouped["app.listen"][0].attributes["binding_style"] == "member_assignment"
+    assert grouped["exports.listen"][0].kind == "function"
+    assert grouped["exports.listen"][0].attributes["binding_style"] == "export_assignment"
+    assert grouped["module.exports.listen"][0].kind == "function"
+    assert grouped["module.exports.listen"][0].attributes["binding_style"] == (
+        "export_assignment"
+    )
+
+    descriptor_symbols = grouped["res.connection"]
+    assert len(descriptor_symbols) == 3
+    assert {symbol.attributes["binding_style"] for symbol in descriptor_symbols} == {
+        "define_property_descriptor"
+    }
+    assert {symbol.attributes.get("accessor") for symbol in descriptor_symbols} == {
+        None,
+        "get",
+        "set",
+    }
+
+    assert grouped["api.send"][0].container_fqname == "api"
+    assert grouped["api.send"][0].attributes["binding_style"] == "object_binding_property"
+    assert grouped["module.exports.send"][0].container_fqname == "module.exports"
+    assert grouped["api.end"][0].container_fqname == "api"
+    assert grouped["module.exports.end"][0].container_fqname == "module.exports"
+
+    accessor_symbols = grouped["state.name"]
+    assert len(accessor_symbols) == 2
+    assert {symbol.attributes["accessor"] for symbol in accessor_symbols} == {"get", "set"}
+    assert {symbol.attributes["binding_style"] for symbol in accessor_symbols} == {
+        "object_binding_property"
+    }
+
+
 def test_treesitter_parser_extracts_typescript_assignment_bound_symbols() -> None:
     """TypeScript parser should recover typed arrow assignments and bound object helpers."""
     source = """
 const add: (a: number, b: number) => number = (a, b) => a + b;
 const api = { json: function (): void {}, end: (): void => {} };
+api["load"] = function (): void {};
 """
     parser = TreeSitterParser("typescript")
     symbols = parser.extract_symbols("sample.ts", source)
     by_fqname = _symbols_by_fqname(symbols)
 
-    assert set(by_fqname) == {"add", "api.json", "api.end"}
+    assert set(by_fqname) == {"add", "api.json", "api.end", "api.load"}
     assert by_fqname["add"].kind == "function"
     assert by_fqname["add"].attributes["binding_style"] == "variable_assignment"
     assert by_fqname["api.json"].kind == "method"
     assert by_fqname["api.json"].container_fqname == "api"
     assert by_fqname["api.end"].attributes["binding_style"] == "object_binding_property"
+    assert by_fqname["api.load"].kind == "method"
+    assert by_fqname["api.load"].attributes["binding_style"] == "member_assignment"
 
 
 def test_treesitter_parser_extracts_tsx_assignment_bound_symbols() -> None:
@@ -291,13 +406,16 @@ def test_treesitter_parser_extracts_tsx_assignment_bound_symbols() -> None:
     source = """
 const Inline = () => <span>x</span>;
 const api = { render: () => <div /> };
+widgets["Inline"] = () => <aside />;
 """
     parser = TreeSitterParser("tsx")
     symbols = parser.extract_symbols("sample.tsx", source)
     by_fqname = _symbols_by_fqname(symbols)
 
-    assert set(by_fqname) == {"Inline", "api.render"}
+    assert set(by_fqname) == {"Inline", "api.render", "widgets.Inline"}
     assert by_fqname["Inline"].kind == "function"
     assert by_fqname["Inline"].attributes["binding_style"] == "variable_assignment"
     assert by_fqname["api.render"].kind == "method"
     assert by_fqname["api.render"].container_fqname == "api"
+    assert by_fqname["widgets.Inline"].kind == "method"
+    assert by_fqname["widgets.Inline"].attributes["binding_style"] == "member_assignment"
