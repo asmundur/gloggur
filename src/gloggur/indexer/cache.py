@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from gloggur.indexer.embedding_ledger import EMBEDDING_LEDGER_DB_NAME
 from gloggur.io_failures import wrap_io_error
 from gloggur.models import (
     AuditFileMetadata,
@@ -33,6 +34,7 @@ SQLITE_JOURNAL_MODE = "WAL"
 SQLITE_SYNCHRONOUS = "NORMAL"
 BUILD_STATE_FILE_NAME = ".build-state.json"
 BUILD_STAGING_DIR_NAME = ".builds"
+BUILD_RESUME_MANIFEST_FILE_NAME = "resume-manifest.json"
 MANAGED_CACHE_ARTIFACT_NAMES = (
     "index.db",
     "index.db-wal",
@@ -886,6 +888,24 @@ class CacheManager:
         self.clear_build_state()
         self.cleanup_staged_builds()
 
+    def clear_embedding_ledger(self) -> None:
+        """Delete the durable embedding ledger artifacts."""
+        for path in (
+            os.path.join(self.config.cache_dir, EMBEDDING_LEDGER_DB_NAME),
+            os.path.join(self.config.cache_dir, f"{EMBEDDING_LEDGER_DB_NAME}-wal"),
+            os.path.join(self.config.cache_dir, f"{EMBEDDING_LEDGER_DB_NAME}-shm"),
+        ):
+            if not os.path.exists(path):
+                continue
+            try:
+                os.remove(path)
+            except OSError as exc:
+                raise wrap_io_error(
+                    exc,
+                    operation="delete embedding ledger artifact",
+                    path=path,
+                ) from exc
+
     @property
     def build_state_path(self) -> str:
         """Return the cache build-state sidecar path."""
@@ -952,6 +972,10 @@ class CacheManager:
         """Return the staged cache directory for one build id."""
         return os.path.join(self.build_staging_dir, build_id)
 
+    def build_resume_manifest_path(self, build_id: str) -> str:
+        """Return the staged-build resume manifest path for one build id."""
+        return os.path.join(self.build_cache_dir(build_id), BUILD_RESUME_MANIFEST_FILE_NAME)
+
     def list_staged_build_ids(self) -> list[str]:
         """Return staged build directory names in deterministic order."""
         if not os.path.isdir(self.build_staging_dir):
@@ -990,6 +1014,59 @@ class CacheManager:
                 ) from exc
             removed.append(build_id)
         return removed
+
+    def adopt_staged_build(
+        self,
+        source_dir: str,
+        *,
+        build_id: str | None = None,
+    ) -> tuple[str, str]:
+        """Copy an external staged cache directory into the managed staged-build root."""
+        normalized_source = os.path.abspath(source_dir)
+        if not os.path.isdir(normalized_source):
+            raise wrap_io_error(
+                FileNotFoundError(normalized_source),
+                operation="adopt staged cache build directory",
+                path=normalized_source,
+            )
+        source_db_path = os.path.join(normalized_source, "index.db")
+        if not os.path.exists(source_db_path):
+            raise wrap_io_error(
+                FileNotFoundError(source_db_path),
+                operation="adopt staged cache build directory",
+                path=source_db_path,
+            )
+        try:
+            os.makedirs(self.build_staging_dir, exist_ok=True)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="create staged cache build root",
+                path=self.build_staging_dir,
+            ) from exc
+
+        normalized_build_id = (
+            build_id or os.path.basename(normalized_source.rstrip(os.sep))
+        ).strip()
+        if not normalized_build_id:
+            normalized_build_id = datetime.now(timezone.utc).strftime("adopted-%Y%m%dT%H%M%S")
+        target_dir = self.build_cache_dir(normalized_build_id)
+        if os.path.abspath(target_dir) == normalized_source:
+            return normalized_build_id, target_dir
+        suffix = 1
+        while os.path.exists(target_dir):
+            suffix += 1
+            normalized_build_id = f"{normalized_build_id}-{suffix}"
+            target_dir = self.build_cache_dir(normalized_build_id)
+        try:
+            shutil.copytree(normalized_source, target_dir)
+        except OSError as exc:
+            raise wrap_io_error(
+                exc,
+                operation="copy adopted staged cache build directory",
+                path=target_dir,
+            ) from exc
+        return normalized_build_id, target_dir
 
     def prepare_staged_build(self, build_id: str) -> str:
         """Create a staged cache directory pre-populated with current active artifacts."""
@@ -1035,6 +1112,53 @@ class CacheManager:
                     path=source,
                 ) from exc
         return stage_dir
+
+    def get_staged_build_resume_manifest(self, build_id: str) -> dict[str, object] | None:
+        """Return one staged-build resume manifest when present and well-formed."""
+        raw = self._read_json_file(self.build_resume_manifest_path(build_id))
+        return self._normalize_staged_build_resume_manifest(raw, build_id=build_id)
+
+    def list_staged_build_resume_manifests(self) -> list[dict[str, object]]:
+        """Return normalized staged-build manifests in deterministic build-id order."""
+        manifests: list[dict[str, object]] = []
+        for build_id in self.list_staged_build_ids():
+            manifest = self.get_staged_build_resume_manifest(build_id)
+            if manifest is not None:
+                manifests.append(manifest)
+        return manifests
+
+    def write_staged_build_resume_manifest(
+        self,
+        build_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        """Persist normalized staged-build resume metadata."""
+        normalized = self._normalize_staged_build_resume_manifest(payload, build_id=build_id)
+        if normalized is None:
+            raise ValueError("invalid staged-build resume manifest payload")
+        self._atomic_write_json_file(self.build_resume_manifest_path(build_id), normalized)
+        return normalized
+
+    def get_staged_build_index_stats(self, build_id: str) -> dict[str, int]:
+        """Return normalized stats for one staged build."""
+        stage_dir = self.build_cache_dir(build_id)
+        if not os.path.isdir(stage_dir):
+            return {
+                "files": 0,
+                "symbols": 0,
+                "chunks": 0,
+                "embedded_chunks": 0,
+                "embedded_edges": 0,
+            }
+        stage_cache = CacheManager(CacheConfig(stage_dir))
+        stats = stage_cache.get_index_stats()
+        return {
+            "files": stage_cache.count_files(),
+            "symbols": int(stats.get("symbol_count", 0) or 0),
+            "chunks": int(stats.get("chunk_count", 0) or 0),
+            "embedded_chunks": int(stats.get("embedded_symbol_vectors", 0) or 0),
+            "embedded_edges": int(stats.get("embedded_edge_vectors", 0) or 0),
+        }
 
     def publish_staged_build(self, build_id: str) -> None:
         """Replace active cache artifacts with a fully prepared staged build."""
@@ -1312,6 +1436,68 @@ class CacheManager:
             "updated_at": normalized_updated_at,
             "stage": normalized_stage,
             "cleanup_pending": cleanup_pending,
+        }
+
+    def _normalize_staged_build_resume_manifest(
+        self,
+        payload: object,
+        *,
+        build_id: str,
+    ) -> dict[str, object] | None:
+        """Normalize staged-build resume manifests into a stable shape."""
+        if not isinstance(payload, dict):
+            return None
+        normalized_build_id = str(payload.get("build_id") or build_id).strip()
+        if not normalized_build_id:
+            normalized_build_id = build_id.strip()
+        if not normalized_build_id:
+            return None
+        state_raw = payload.get("state")
+        state = str(state_raw).strip() if state_raw is not None else "building"
+        if state not in BUILD_STATE_STATES:
+            return None
+        source_raw = payload.get("source")
+        source = str(source_raw).strip() if source_raw is not None else "manifest"
+        if source not in {"manifest", "legacy_adopted"}:
+            source = "manifest"
+        counts_raw = payload.get("counts")
+        normalized_counts = {
+            "files": 0,
+            "symbols": 0,
+            "chunks": 0,
+            "embedded_chunks": 0,
+            "embedded_edges": 0,
+        }
+        if isinstance(counts_raw, dict):
+            for key in normalized_counts:
+                normalized_counts[key] = int(counts_raw.get(key, 0) or 0)
+        stage_cache_dir = payload.get("stage_cache_dir")
+        normalized_stage_cache_dir = (
+            str(stage_cache_dir).strip()
+            if stage_cache_dir is not None and str(stage_cache_dir).strip()
+            else self.build_cache_dir(normalized_build_id)
+        )
+
+        def _optional_string(value: object) -> str | None:
+            if value is None:
+                return None
+            normalized = str(value).strip()
+            return normalized or None
+
+        return {
+            "build_id": normalized_build_id,
+            "source": source,
+            "workspace_path_hash": _optional_string(payload.get("workspace_path_hash")),
+            "index_target_path": _optional_string(payload.get("index_target_path")),
+            "embedding_profile": _optional_string(payload.get("embedding_profile")),
+            "schema_version": _optional_string(payload.get("schema_version")),
+            "tool_version": _optional_string(payload.get("tool_version")),
+            "stage_cache_dir": normalized_stage_cache_dir,
+            "state": state,
+            "started_at": _optional_string(payload.get("started_at")),
+            "updated_at": _optional_string(payload.get("updated_at")),
+            "stage": _optional_string(payload.get("stage")),
+            "counts": normalized_counts,
         }
 
     def _list_tables(self, conn: sqlite3.Connection) -> set[str]:

@@ -74,6 +74,7 @@ from gloggur.indexer.cache import (
     CacheRecoveryError,
 )
 from gloggur.indexer.concurrency import cache_write_lock
+from gloggur.indexer.embedding_ledger import EmbeddingLedger
 from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
 from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
@@ -1841,6 +1842,19 @@ def _build_search_health_snapshot(
     get_build_state = getattr(cache, "get_build_state", None)
     raw_build_state = get_build_state() if callable(get_build_state) else None
     build_state, stale_build_state = _classify_build_state_for_health(raw_build_state)
+    resume_candidate = _build_resume_candidate_payload(
+        cache,
+        build_state=build_state,
+        expected_profile=expected_profile,
+        index_target_path=None,
+    )
+    interrupted_resume_available = bool(
+        isinstance(build_state, dict)
+        and str(build_state.get("state")) == "interrupted"
+        and isinstance(resume_candidate, dict)
+        and isinstance(resume_candidate.get("compatibility"), dict)
+        and bool(resume_candidate["compatibility"].get("compatible"))
+    )
     cached_profile = _normalized_cached_embedding_profile(
         cache.get_index_profile(),
         expected_profile,
@@ -1884,6 +1898,16 @@ def _build_search_health_snapshot(
         allow_tool_version_drift=allow_tool_version_drift,
         stale_build_state=stale_build_state,
     )
+    if interrupted_resume_available:
+        remediation = dict(resume_contract.get("resume_remediation") or {})
+        guidance = _resume_available_guidance(
+            resume_source=str(resume_candidate.get("source") or "manifest"),
+        )
+        if "index_interrupted" in resume_contract["resume_reason_codes"]:
+            remediation["index_interrupted"] = guidance
+        if "stale_build_state" in resume_contract["resume_reason_codes"]:
+            remediation["stale_build_state"] = guidance
+        resume_contract["resume_remediation"] = remediation
     get_search_integrity = getattr(cache, "get_search_integrity", None)
     raw_integrity = get_search_integrity() if callable(get_search_integrity) else None
     search_integrity = _normalize_search_integrity(raw_integrity)
@@ -1934,6 +1958,8 @@ def _build_search_health_snapshot(
         "cached_index_profile": cached_profile,
         "search_integrity": search_integrity,
         "build_state": build_state,
+        "interrupted_resume_available": interrupted_resume_available,
+        "resume_candidate": resume_candidate,
         "resume_contract": resume_contract,
     }
 
@@ -2031,6 +2057,207 @@ def _write_cache_build_state(
     if trace_session is not None:
         trace_session.update_build_state(payload)
     return payload
+
+
+def _current_workspace_path_hash() -> str:
+    """Return the current workspace hash used by resume compatibility checks."""
+    return _hash_content(os.path.abspath(os.getcwd()))
+
+
+def _stage_resume_counts(stage_cache: CacheManager) -> dict[str, int]:
+    """Return stable staged-build counters for resume metadata."""
+    get_index_stats = getattr(stage_cache, "get_index_stats", None)
+    stats = get_index_stats() if callable(get_index_stats) else {}
+    if not isinstance(stats, dict):
+        stats = {}
+    count_files = getattr(stage_cache, "count_files", None)
+    return {
+        "files": int(count_files() or 0) if callable(count_files) else 0,
+        "symbols": int(stats.get("symbol_count", 0) or 0),
+        "chunks": int(stats.get("chunk_count", 0) or 0),
+        "embedded_chunks": int(stats.get("embedded_symbol_vectors", 0) or 0),
+        "embedded_edges": int(stats.get("embedded_edge_vectors", 0) or 0),
+    }
+
+
+def _write_staged_build_resume_manifest(
+    active_cache: CacheManager,
+    *,
+    build_id: str,
+    state: str,
+    started_at: str,
+    updated_at: str,
+    stage: str | None,
+    stage_cache: CacheManager,
+    embedding_profile: str,
+    index_target_path: str,
+    source: str,
+) -> dict[str, object]:
+    """Persist staged-build resume metadata for future interrupted-run recovery."""
+    write_resume_manifest = getattr(active_cache, "write_staged_build_resume_manifest", None)
+    if not callable(write_resume_manifest):
+        return {}
+    get_schema_version = getattr(stage_cache, "get_schema_version", None)
+    schema_version = (
+        str(get_schema_version() or CACHE_SCHEMA_VERSION)
+        if callable(get_schema_version)
+        else CACHE_SCHEMA_VERSION
+    )
+    stage_cache_config = getattr(stage_cache, "config", None)
+    stage_cache_dir = getattr(stage_cache_config, "cache_dir", None)
+    return write_resume_manifest(
+        build_id,
+        {
+            "build_id": build_id,
+            "source": source,
+            "workspace_path_hash": _current_workspace_path_hash(),
+            "index_target_path": index_target_path,
+            "embedding_profile": embedding_profile,
+            "schema_version": schema_version,
+            "tool_version": GLOGGUR_VERSION,
+            "stage_cache_dir": (
+                str(stage_cache_dir) if isinstance(stage_cache_dir, (str, os.PathLike)) else None
+            ),
+            "state": state,
+            "started_at": started_at,
+            "updated_at": updated_at,
+            "stage": stage,
+            "counts": _stage_resume_counts(stage_cache),
+        },
+    )
+
+
+def _build_state_updated_at(value: object) -> str:
+    """Return a usable build-state update timestamp for resume manifest writes."""
+    if isinstance(value, dict):
+        updated_at = value.get("updated_at")
+        if isinstance(updated_at, str) and updated_at:
+            return updated_at
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _build_resume_candidate_payload(
+    cache: object,
+    *,
+    build_state: dict[str, object] | None,
+    expected_profile: str,
+    index_target_path: str | None = None,
+) -> dict[str, object] | None:
+    """Return additive interrupted-build recovery metadata when a manifest is present."""
+    if not isinstance(build_state, dict):
+        return None
+    build_id_raw = build_state.get("build_id")
+    build_id = str(build_id_raw).strip() if build_id_raw is not None else ""
+    if not build_id:
+        return None
+    get_manifest = getattr(cache, "get_staged_build_resume_manifest", None)
+    if not callable(get_manifest):
+        return None
+    manifest = get_manifest(build_id)
+    if not isinstance(manifest, dict):
+        return None
+    reason_codes: list[str] = []
+    workspace_path_hash = _current_workspace_path_hash()
+    manifest_workspace = manifest.get("workspace_path_hash")
+    if isinstance(manifest_workspace, str) and manifest_workspace != workspace_path_hash:
+        reason_codes.append("workspace_path_hash_mismatch")
+    manifest_profile = manifest.get("embedding_profile")
+    if isinstance(manifest_profile, str) and manifest_profile != expected_profile:
+        reason_codes.append("embedding_profile_changed")
+    get_schema_version = getattr(cache, "get_schema_version", None)
+    current_schema_version = (
+        str(get_schema_version() or CACHE_SCHEMA_VERSION)
+        if callable(get_schema_version)
+        else CACHE_SCHEMA_VERSION
+    )
+    manifest_schema_version = manifest.get("schema_version")
+    if (
+        isinstance(manifest_schema_version, str)
+        and manifest_schema_version
+        and manifest_schema_version != current_schema_version
+    ):
+        reason_codes.append("schema_version_changed")
+    manifest_target = manifest.get("index_target_path")
+    if (
+        index_target_path is not None
+        and isinstance(manifest_target, str)
+        and manifest_target
+        and manifest_target != index_target_path
+    ):
+        reason_codes.append("index_target_path_changed")
+
+    counts = manifest.get("counts")
+    if not isinstance(counts, dict):
+        counts = {}
+    normalized_counts = {
+        "files": int(counts.get("files", 0) or 0),
+        "symbols": int(counts.get("symbols", 0) or 0),
+        "chunks": int(counts.get("chunks", 0) or 0),
+        "embedded_chunks": int(counts.get("embedded_chunks", 0) or 0),
+        "embedded_edges": int(counts.get("embedded_edges", 0) or 0),
+    }
+    return {
+        "build_id": build_id,
+        "source": str(manifest.get("source") or "manifest"),
+        "stage": manifest.get("stage"),
+        "counts": normalized_counts,
+        "compatibility": {
+            "compatible": len(reason_codes) == 0,
+            "reason_codes": reason_codes,
+        },
+    }
+
+
+def _resume_available_guidance(*, resume_source: str | None) -> list[str]:
+    """Return user-facing recovery guidance when a compatible interrupted build is reusable."""
+    source = resume_source or "manifest"
+    if source == "legacy_adopted":
+        return [
+            "A compatible adopted interrupted build is available; rerun "
+            "`gloggur index . --json` to continue without discarding "
+            "compatible cached embeddings.",
+            "Keep the same embedding provider/profile while resuming the adopted staged cache.",
+        ]
+    return [
+        "A compatible interrupted staged build is available; rerun "
+        "`gloggur index . --json` to resume without re-embedding "
+        "compatible cached work.",
+        "Avoid changing the embedding profile before the resumed build publishes successfully.",
+    ]
+
+
+def _health_interrupted_resume_available(health: dict[str, object]) -> bool:
+    """Return additive interrupted-build recovery availability with legacy fallback."""
+    return bool(health.get("interrupted_resume_available", False))
+
+
+def _health_resume_candidate(health: dict[str, object]) -> dict[str, object] | None:
+    """Return normalized interrupted-build recovery candidate metadata when present."""
+    candidate = health.get("resume_candidate")
+    return candidate if isinstance(candidate, dict) else None
+
+
+def _staged_cache_resume_incompatibility_reason(
+    stage_cache: CacheManager,
+    *,
+    expected_profile: str,
+) -> str | None:
+    """Return a user-facing reason when a staged cache should not be resumed."""
+    if stage_cache.last_reset_reason:
+        return f"staged cache was reset during validation ({stage_cache.last_reset_reason})"
+    if stage_cache.get_schema_version() != CACHE_SCHEMA_VERSION:
+        return (
+            "staged cache schema version changed "
+            f"(cached={stage_cache.get_schema_version()}, current={CACHE_SCHEMA_VERSION})"
+        )
+    metadata_present = stage_cache.get_index_metadata() is not None
+    cached_profile = _canonicalize_embedding_profile(stage_cache.get_index_profile())
+    return _profile_reindex_reason(
+        metadata_present=metadata_present,
+        cached_profile=cached_profile,
+        expected_profile=expected_profile,
+        allow_legacy_unsuffixed_edges=True,
+    )
 
 
 def _warm_embedding_provider(embedding: EmbeddingProvider | None) -> dict[str, object]:
@@ -2225,7 +2452,8 @@ def _build_search_not_ready_payload(
     """Build a stable structured error payload for search requests on non-ready caches."""
     resume_contract = health["resume_contract"]
     assert isinstance(resume_contract, dict)
-    guidance = CLI_FAILURE_REMEDIATION["search_cache_not_ready"]
+    interrupted_resume_available = _health_interrupted_resume_available(health)
+    resume_candidate = _health_resume_candidate(health)
     metadata: dict[str, object] = {
         "total_results": 0,
         "needs_reindex": bool(health["needs_reindex"]),
@@ -2238,8 +2466,16 @@ def _build_search_not_ready_payload(
         "build_state": health["build_state"],
         "expected_index_profile": health["expected_index_profile"],
         "cached_index_profile": health["cached_index_profile"],
+        "interrupted_resume_available": interrupted_resume_available,
+        "resume_candidate": resume_candidate,
     }
     metadata.update(resume_contract)
+    if interrupted_resume_available:
+        guidance = _resume_available_guidance(
+            resume_source=(str(resume_candidate.get("source")) if resume_candidate else None),
+        )
+    else:
+        guidance = CLI_FAILURE_REMEDIATION["search_cache_not_ready"]
     return {
         "query": query,
         "results": [],
@@ -2943,6 +3179,8 @@ def _build_status_payload(
         "semantic_search_allowed": health["semantic_search_allowed"],
         "search_integrity": health["search_integrity"],
         "build_state": health["build_state"],
+        "interrupted_resume_available": _health_interrupted_resume_available(health),
+        "resume_candidate": _health_resume_candidate(health),
         "extension_policy": _build_extension_policy_contract(config),
         "language_support_contract": build_language_support_contract(config=config),
         "raw_total_symbols": raw_total_symbols,
@@ -4035,6 +4273,15 @@ def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str,
     help="Override whether graph edges are embedded during indexing.",
 )
 @click.option(
+    "--adopt-interrupted-build",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=str),
+    default=None,
+    help=(
+        "Adopt a legacy interrupted staged cache directory into the current cache root "
+        "so indexing can resume without re-embedding compatible cached work."
+    ),
+)
+@click.option(
     "--allow-partial",
     is_flag=True,
     default=False,
@@ -4059,6 +4306,7 @@ def index(
     as_json: bool,
     embedding_provider: str | None,
     embed_graph_edges: bool | None,
+    adopt_interrupted_build: str | None,
     allow_partial: bool,
     debug_timings: bool,
     warn_on_skipped_extensions: bool,
@@ -4071,6 +4319,8 @@ def index(
         config.embedding_provider = embedding_provider
     if embed_graph_edges is not None:
         config.embed_graph_edges = embed_graph_edges
+    expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
+    requested_index_target_path = os.path.abspath(path)
     skipped_extension_diagnostics = _collect_index_skipped_extension_diagnostics(
         path=path,
         config=config,
@@ -4100,6 +4350,8 @@ def index(
     current_stage = "bootstrap_model"
     active_cache: CacheManager | None = None
     publish_succeeded = False
+    resume_source: str | None = None
+    resumed_build = False
 
     def _merge_failure_reasons(
         target: dict[str, int],
@@ -4134,29 +4386,92 @@ def index(
     with cache_write_lock(config.cache_dir):
         click.echo("Indexing...", err=True)
         active_cache = _create_cache_manager(config.cache_dir)
+        embedding_ledger = EmbeddingLedger(config.cache_dir)
         get_prior_build_state = getattr(active_cache, "get_build_state", None)
         raw_prior_build_state = get_prior_build_state() if callable(get_prior_build_state) else None
-        prior_build_state, stale_prior_build_state = _classify_build_state_for_health(
+        prior_build_state, _stale_prior_build_state = _classify_build_state_for_health(
             raw_prior_build_state
         )
-        if stale_prior_build_state and prior_build_state is not None:
-            clear_prior_build_state = getattr(active_cache, "clear_build_state", None)
-            if callable(clear_prior_build_state):
-                clear_prior_build_state()
-        active_cache.cleanup_staged_builds()
-        stage_dir = active_cache.prepare_staged_build(build_id)
-        stage_config = replace(config, cache_dir=stage_dir)
-        stage_config, cache, vector_store = _initialize_runtime(
-            stage_config,
-            rebuild_on_profile_change=True,
-            write_locked=True,
+        resume_candidate = _build_resume_candidate_payload(
+            active_cache,
+            build_state=prior_build_state,
+            expected_profile=expected_profile,
+            index_target_path=requested_index_target_path,
         )
+
+        if adopt_interrupted_build is not None:
+            build_id, stage_dir = active_cache.adopt_staged_build(adopt_interrupted_build)
+            stage_config = replace(config, cache_dir=stage_dir)
+            stage_config, cache, vector_store = _initialize_runtime(
+                stage_config,
+                rebuild_on_profile_change=False,
+                write_locked=True,
+            )
+            incompatibility_reason = _staged_cache_resume_incompatibility_reason(
+                cache,
+                expected_profile=expected_profile,
+            )
+            if incompatibility_reason is not None:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+                raise click.BadParameter(
+                    f"cannot adopt interrupted build: {incompatibility_reason}",
+                    param_hint="--adopt-interrupted-build",
+                )
+            resume_source = "legacy_adopted"
+            resumed_build = True
+            active_cache.cleanup_staged_builds(keep_build_ids=(build_id,))
+        elif (
+            isinstance(resume_candidate, dict)
+            and isinstance(resume_candidate.get("compatibility"), dict)
+            and bool(resume_candidate["compatibility"].get("compatible"))
+        ):
+            build_id = str(resume_candidate["build_id"])
+            if isinstance(prior_build_state, dict):
+                prior_started_at = prior_build_state.get("started_at")
+                if isinstance(prior_started_at, str) and prior_started_at:
+                    build_started_at = prior_started_at
+            stage_dir = active_cache.build_cache_dir(build_id)
+            stage_config = replace(config, cache_dir=stage_dir)
+            stage_config, cache, vector_store = _initialize_runtime(
+                stage_config,
+                rebuild_on_profile_change=False,
+                write_locked=True,
+            )
+            incompatibility_reason = _staged_cache_resume_incompatibility_reason(
+                cache,
+                expected_profile=expected_profile,
+            )
+            if incompatibility_reason is None:
+                resume_source = str(resume_candidate.get("source") or "manifest")
+                resumed_build = True
+                active_cache.cleanup_staged_builds(keep_build_ids=(build_id,))
+            else:
+                active_cache.cleanup_staged_builds()
+                build_id = _new_build_id()
+                build_started_at = datetime.now(timezone.utc).isoformat()
+                stage_dir = active_cache.prepare_staged_build(build_id)
+                stage_config = replace(config, cache_dir=stage_dir)
+                stage_config, cache, vector_store = _initialize_runtime(
+                    stage_config,
+                    rebuild_on_profile_change=True,
+                    write_locked=True,
+                )
+        else:
+            active_cache.cleanup_staged_builds()
+            stage_dir = active_cache.prepare_staged_build(build_id)
+            stage_config = replace(config, cache_dir=stage_dir)
+            stage_config, cache, vector_store = _initialize_runtime(
+                stage_config,
+                rebuild_on_profile_change=True,
+                write_locked=True,
+            )
         indexer = Indexer(
             config=stage_config,
             cache=cache,
             parser_registry=parser_registry,
             embedding_provider=embedding,
             vector_store=vector_store,
+            embedding_ledger=embedding_ledger,
         )
 
         def _update_build_stage(stage_name: str) -> None:
@@ -4167,12 +4482,24 @@ def index(
             trace_session = current_trace_session()
             if trace_session is not None:
                 trace_session.update_stage(stage_name, build_id=build_id)
-            _write_cache_build_state(
+            build_state_payload = _write_cache_build_state(
                 active_cache,
                 state="building",
                 build_id=build_id,
                 started_at=build_started_at,
                 stage=stage_name,
+            )
+            _write_staged_build_resume_manifest(
+                active_cache,
+                build_id=build_id,
+                state="building",
+                started_at=build_started_at,
+                updated_at=_build_state_updated_at(build_state_payload),
+                stage=stage_name,
+                stage_cache=cache,
+                embedding_profile=expected_profile,
+                index_target_path=requested_index_target_path,
+                source=resume_source or "manifest",
             )
 
         _update_build_stage("scan_source")
@@ -4200,13 +4527,25 @@ def index(
         def _handle_interrupt(_signal_name: str) -> None:
             """Mark the build interrupted and terminate child workers on SIGINT/SIGTERM."""
             assert active_cache is not None
-            _write_cache_build_state(
+            build_state_payload = _write_cache_build_state(
                 active_cache,
                 state="interrupted",
                 build_id=build_id,
                 started_at=build_started_at,
                 stage=current_stage,
                 cleanup_pending=True,
+            )
+            _write_staged_build_resume_manifest(
+                active_cache,
+                build_id=build_id,
+                state="interrupted",
+                started_at=build_started_at,
+                updated_at=_build_state_updated_at(build_state_payload),
+                stage=current_stage,
+                stage_cache=cache,
+                embedding_profile=expected_profile,
+                index_target_path=requested_index_target_path,
+                source=resume_source or "manifest",
             )
             _terminate_index_children()
 
@@ -4259,13 +4598,25 @@ def index(
                             indexed_files=indexed_files,
                         )
                     else:
-                        _write_cache_build_state(
+                        build_state_payload = _write_cache_build_state(
                             active_cache,
                             state="interrupted",
                             build_id=build_id,
                             started_at=build_started_at,
                             stage=current_stage,
                             cleanup_pending=True,
+                        )
+                        _write_staged_build_resume_manifest(
+                            active_cache,
+                            build_id=build_id,
+                            state="interrupted",
+                            started_at=build_started_at,
+                            updated_at=_build_state_updated_at(build_state_payload),
+                            stage=current_stage,
+                            stage_cache=cache,
+                            embedding_profile=expected_profile,
+                            index_target_path=requested_index_target_path,
+                            source=resume_source or "manifest",
                         )
                         _record_commit_metadata_stage(
                             stage_recorder,
@@ -4281,6 +4632,8 @@ def index(
                     payload["failed_reasons"] = overall_failed_reasons
                     payload["failed_samples"] = overall_failed_samples
                     payload["symbol_index"] = symbol_payload
+                    payload["resumed_build"] = resumed_build
+                    payload["resume_source"] = resume_source
                     payload["timings_ms"] = {
                         "total": command_duration_ms,
                         "legacy_index": result.duration_ms,
@@ -4541,13 +4894,25 @@ def index(
                         indexed_files=active_cache.count_files(),
                     )
                 else:
-                    _write_cache_build_state(
+                    build_state_payload = _write_cache_build_state(
                         active_cache,
                         state="interrupted",
                         build_id=build_id,
                         started_at=build_started_at,
                         stage=current_stage,
                         cleanup_pending=True,
+                    )
+                    _write_staged_build_resume_manifest(
+                        active_cache,
+                        build_id=build_id,
+                        state="interrupted",
+                        started_at=build_started_at,
+                        updated_at=_build_state_updated_at(build_state_payload),
+                        stage=current_stage,
+                        stage_cache=cache,
+                        embedding_profile=expected_profile,
+                        index_target_path=requested_index_target_path,
+                        source=resume_source or "manifest",
                     )
                     _record_commit_metadata_stage(
                         stage_recorder,
@@ -4573,6 +4938,8 @@ def index(
                     "indexed_symbols": indexed_symbols,
                     "duration_ms": 0,
                     "symbol_index": symbol_payload,
+                    "resumed_build": resumed_build,
+                    "resume_source": resume_source,
                 }
                 command_duration_ms = int((time.perf_counter() - command_started) * 1000)
                 result["timings_ms"] = {
@@ -4615,13 +4982,25 @@ def index(
                     if publish_succeeded:
                         active_cache.clear_build_state()
                     else:
-                        _write_cache_build_state(
+                        build_state_payload = _write_cache_build_state(
                             active_cache,
                             state="interrupted",
                             build_id=build_id,
                             started_at=build_started_at,
                             stage=current_stage,
                             cleanup_pending=True,
+                        )
+                        _write_staged_build_resume_manifest(
+                            active_cache,
+                            build_id=build_id,
+                            state="interrupted",
+                            started_at=build_started_at,
+                            updated_at=_build_state_updated_at(build_state_payload),
+                            stage=current_stage,
+                            stage_cache=cache,
+                            embedding_profile=expected_profile,
+                            index_target_path=requested_index_target_path,
+                            source=resume_source or "manifest",
                         )
                 except Exception:
                     pass
@@ -5511,6 +5890,14 @@ def _build_search_success_payload(
                 outcome.health["semantic_search_allowed"],
             )
             summary_payload.setdefault("search_integrity", outcome.health["search_integrity"])
+            summary_payload.setdefault(
+                "interrupted_resume_available",
+                _health_interrupted_resume_available(outcome.health),
+            )
+            summary_payload.setdefault(
+                "resume_candidate",
+                _health_resume_candidate(outcome.health),
+            )
             # Preserve legacy option observability as non-routing summary fields.
             summary_payload.setdefault("legacy_ranking_mode", ranking_mode)
             summary_payload.setdefault("legacy_kind_filter", kind)
@@ -7485,8 +7872,19 @@ def status(config_path: str | None, as_json: bool, allow_tool_version_drift: boo
         "(provider:model) or contains this substring."
     ),
 )
+@click.option(
+    "--purge-embedding-ledger",
+    is_flag=True,
+    default=False,
+    help="Also delete the durable embedding ledger instead of preserving cached embedding vectors.",
+)
 @_with_io_failure_handling
-def clear_cache(config_path: str | None, as_json: bool, profile_filter: str | None) -> None:
+def clear_cache(
+    config_path: str | None,
+    as_json: bool,
+    profile_filter: str | None,
+    purge_embedding_ledger: bool,
+) -> None:
     """Clear the index cache."""
     resolved_config_path = _normalize_config_path(config_path)
     config = _load_config(resolved_config_path)
@@ -7500,12 +7898,15 @@ def clear_cache(config_path: str | None, as_json: bool, profile_filter: str | No
                     "cache_dir": config.cache_dir,
                     "cached_index_profile": cached_profile,
                     "profile_filter": profile_filter,
+                    "purged_embedding_ledger": False,
                     "reason": "profile_filter_miss",
                 },
                 as_json,
             )
             return
         cache.clear()
+        if purge_embedding_ledger:
+            cache.clear_embedding_ledger()
         vector_store = _create_vector_store(config, load_existing=False)
         vector_store.clear()
     _emit(
@@ -7514,6 +7915,7 @@ def clear_cache(config_path: str | None, as_json: bool, profile_filter: str | No
             "cache_dir": config.cache_dir,
             "cached_index_profile": cached_profile,
             "profile_filter": profile_filter,
+            "purged_embedding_ledger": purge_embedding_ledger,
         },
         as_json,
     )

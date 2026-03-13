@@ -1,6 +1,6 @@
 # Semantic Search Embedding Breakdown
 
-Generated: `2026-03-13T12:31:25.373033+00:00`
+Generated: `2026-03-13T19:55:26.295922+00:00`
 Source file: `src/gloggur/embeddings/base.py`
 
 ## Embedding Setup

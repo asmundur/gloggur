@@ -10,6 +10,20 @@ from scripts.run_provider_probe import _vector_store_stats
 from scripts.run_provider_probe import test_gemini_embeddings as _probe_gemini_embeddings
 
 
+class _FakeTempDirectory:
+    """Minimal context manager replacement for tempfile.TemporaryDirectory."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def __enter__(self) -> str:
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        _ = exc_type, exc, tb
+        return False
+
+
 def _write_vector_files(cache_dir: Path, id_map_payload: object) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     (cache_dir / "vectors.index").write_text("placeholder", encoding="utf8")
@@ -103,3 +117,108 @@ def test_openai_probe_reports_credential_env_with_openrouter_precedence(
     assert result.status == "passed"
     assert result.details is not None
     assert result.details["credential_env"] == "OPENROUTER_API_KEY"
+
+
+def test_openai_probe_uses_isolated_temp_cache_for_fresh_indexing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    probe_cache_dir = tmp_path / "openai-probe-cache"
+    captured: dict[str, object] = {}
+
+    def _fake_tempdir(*args, **kwargs):  # type: ignore[no-untyped-def]
+        prefix = kwargs.get("prefix")
+        if prefix is None and args:
+            prefix = args[0]
+        captured["prefix"] = prefix
+        return _FakeTempDirectory(str(probe_cache_dir))
+
+    def _fake_run_provider_test(
+        *,
+        name: str,
+        provider: str,
+        query: str,
+        cache_dir: str,
+        runner,
+        model_name: str | None = None,
+    ) -> SimpleNamespace:
+        captured["name"] = name
+        captured["provider"] = provider
+        captured["query"] = query
+        captured["cache_dir"] = cache_dir
+        captured["runner_env"] = dict(runner.env or {})
+        captured["model_name"] = model_name
+        return SimpleNamespace(
+            name=name,
+            status="passed",
+            message="ok",
+            details={"indexed_files": 1},
+        )
+
+    monkeypatch.setattr("scripts.run_provider_probe.tempfile.TemporaryDirectory", _fake_tempdir)
+    monkeypatch.setattr("scripts.run_provider_probe._run_provider_test", _fake_run_provider_test)
+
+    result = _probe_openai_embeddings(tmp_path, GloggurConfig())
+
+    assert result.status == "passed"
+    assert captured["prefix"] == "gloggur-phase2-openai-"
+    assert captured["provider"] == "openai"
+    assert captured["query"] == "vector store"
+    assert captured["cache_dir"] == str(probe_cache_dir)
+    assert isinstance(captured["runner_env"], dict)
+    assert captured["runner_env"]["GLOGGUR_CACHE_DIR"] == str(probe_cache_dir)
+
+
+def test_gemini_probe_uses_isolated_temp_cache_for_fresh_indexing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.delenv("GLOGGUR_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    probe_cache_dir = tmp_path / "gemini-probe-cache"
+    captured: dict[str, object] = {}
+
+    def _fake_tempdir(*args, **kwargs):  # type: ignore[no-untyped-def]
+        prefix = kwargs.get("prefix")
+        if prefix is None and args:
+            prefix = args[0]
+        captured["prefix"] = prefix
+        return _FakeTempDirectory(str(probe_cache_dir))
+
+    def _fake_run_provider_test(
+        *,
+        name: str,
+        provider: str,
+        query: str,
+        cache_dir: str,
+        runner,
+        model_name: str | None = None,
+    ) -> SimpleNamespace:
+        captured["name"] = name
+        captured["provider"] = provider
+        captured["query"] = query
+        captured["cache_dir"] = cache_dir
+        captured["runner_env"] = dict(runner.env or {})
+        captured["model_name"] = model_name
+        return SimpleNamespace(
+            name=name,
+            status="passed",
+            message="ok",
+            details={"indexed_files": 1},
+        )
+
+    monkeypatch.setattr("scripts.run_provider_probe.tempfile.TemporaryDirectory", _fake_tempdir)
+    monkeypatch.setattr("scripts.run_provider_probe._run_provider_test", _fake_run_provider_test)
+
+    result = _probe_gemini_embeddings(tmp_path, GloggurConfig())
+
+    assert result.status == "passed"
+    assert captured["prefix"] == "gloggur-phase2-gemini-"
+    assert captured["provider"] == "gemini"
+    assert captured["query"] == "hybrid search"
+    assert captured["cache_dir"] == str(probe_cache_dir)
+    assert isinstance(captured["runner_env"], dict)
+    assert captured["runner_env"]["GLOGGUR_CACHE_DIR"] == str(probe_cache_dir)

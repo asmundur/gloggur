@@ -353,6 +353,19 @@ def test_openai_provider_embeddings_and_dimension(monkeypatch: pytest.MonkeyPatc
     assert provider.get_dimension() == 2
 
 
+def test_openai_provider_retry_policy_is_bounded_for_batch_and_single_text() -> None:
+    """OpenAI embedding retries should stay bounded with exponential backoff limits."""
+    text_retry = OpenAIEmbeddingProvider.embed_text.retry
+    batch_retry = OpenAIEmbeddingProvider.embed_batch.retry
+
+    assert text_retry.stop.max_attempt_number == 3
+    assert batch_retry.stop.max_attempt_number == 3
+    assert text_retry.wait.min == pytest.approx(1.0)
+    assert text_retry.wait.max == pytest.approx(10.0)
+    assert batch_retry.wait.min == pytest.approx(1.0)
+    assert batch_retry.wait.max == pytest.approx(10.0)
+
+
 def test_openai_embed_batch_empty_returns_empty_without_api_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

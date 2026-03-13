@@ -105,6 +105,12 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```bash
    scripts/gloggur index . --json
    ```
+   `index` now auto-resumes a compatible interrupted staged build instead of
+   discarding it and starting over. For a pre-manifest legacy staged cache that
+   was stranded before this recovery flow shipped, explicitly adopt it once:
+   ```bash
+   scripts/gloggur index . --json --adopt-interrupted-build /path/to/staged-build
+   ```
    Optional one-time repo setup for betatester support bundles:
    ```bash
    scripts/gloggur init . --betatester-support --json
@@ -130,7 +136,9 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ContextPack v2 contract.
    If the cache is not reusable, `search --json` exits non-zero with
    `error.code=search_cache_not_ready` and a top-level `metadata` object that
-   includes resume/build-state details.
+   includes resume/build-state details. Interrupted-build recovery is surfaced
+   additively through `interrupted_resume_available` and `resume_candidate`;
+   search still stays unavailable until the staged build publishes.
 3. **Confirm coverage**:
    ```bash
    scripts/gloggur status --json
@@ -280,6 +288,16 @@ By default, `*.min.js` files are skipped during index/watch; set `include_minifi
 
 Gloggur stores its cache in `.gloggur-cache`. This directory is **local-only** and should never be committed.
 `gloggur status --json` includes `schema_version`, `needs_reindex`, `build_state`, `raw_total_symbols`, and `total_symbols` so agents can distinguish raw on-disk rows from reusable search state without manual cleanup.
+Interrupted-build recovery metadata is also surfaced additively through
+`interrupted_resume_available` plus `resume_candidate` (`build_id`, `source`,
+compatibility, and staged counts).
+Successful embedding batches are deduplicated in the durable ledger
+`.gloggur-cache/embedding-ledger.db`, keyed by canonical embedding profile plus
+content hash, so retries and resumed builds do not repay for already-returned
+vectors.
+`gloggur clear-cache --json` preserves that ledger by default; pass
+`--purge-embedding-ledger` only when you intentionally want to discard cached
+embedding vectors and force future re-embedding.
 Watch mode writes runtime files (`watch_state.json`, `watch.pid`, `watch.log`) under `.gloggur-cache` by default.
 
 Cross-workspace note:
@@ -319,6 +337,21 @@ Publication consistency:
 
 - index writes are staged under `.gloggur-cache/.builds/<build_id>/`
 - the last committed cache remains readable until the staged build publishes successfully
+- startup discovers compatible interrupted staged builds before cleanup; matching
+  manifest-backed builds are resumed in place and unrelated stale stages are the
+  only ones deleted automatically
+- legacy interrupted staged cache directories can be adopted once with
+  `gloggur index . --json --adopt-interrupted-build <stage-dir>` so compatible
+  pre-update work is not thrown away
 - `status --json` exposes in-progress or interrupted writers through `build_state`; stale dead-PID in-progress markers are reclassified to interrupted semantics and surfaced via `stale_build_state`
-- if a first build is interrupted, `status` reports `resume_reason_codes` including `index_interrupted` / `missing_index_metadata`, and `search --json` fails non-zero with `search_cache_not_ready`
+- `status --json` and `search --json` also surface `interrupted_resume_available`
+  plus `resume_candidate` when an interrupted staged build is compatible with the
+  current workspace/profile/schema
+- if a first build is interrupted, `status` reports `resume_reason_codes`
+  including `index_interrupted` / `missing_index_metadata`, and `search --json`
+  still fails non-zero with `search_cache_not_ready`; the remediation now
+  explicitly says that resume is available when the staged build can continue
 - if a rebuild is interrupted after a healthy cache already exists, readers keep using the last committed cache while `build_state.state="interrupted"` signals the abandoned staged build
+- embedding results are also written into the durable ledger immediately after
+  provider success, so a crash between provider return and staged-cache commit
+  can still reuse those vectors on the next run

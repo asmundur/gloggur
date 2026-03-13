@@ -730,6 +730,152 @@ def test_indexer_scan_callback_reports_done_and_total_counts() -> None:
     assert all(status == "prepared" for _, _, status in scan_calls)
 
 
+def _make_embedding_test_chunks(total: int) -> list[SymbolChunk]:
+    """Build deterministic symbol chunks for _apply_embeddings unit tests."""
+    return [
+        SymbolChunk(
+            chunk_id=f"chunk-{index}",
+            symbol_id=f"sym-{index}",
+            chunk_part_index=1,
+            chunk_part_total=1,
+            text=f"def fn_{index}():\n    return {index}",
+            file_path="f.py",
+            start_line=1,
+            end_line=2,
+        )
+        for index in range(total)
+    ]
+
+
+@pytest.mark.parametrize("provider_name", ["local", "openai", "gemini"])
+def test_apply_embeddings_uses_same_batching_for_local_and_remote_provider_configs(
+    provider_name: str,
+) -> None:
+    """Batching shape should be identical regardless of provider id in config."""
+
+    class RecordingProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self._chunk_size = 4
+            self.batch_sizes: list[int] = []
+
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            payload = list(texts)
+            self.batch_sizes.append(len(payload))
+            return [[0.1, 0.2] for _ in payload]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    chunks = _make_embedding_test_chunks(9)
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(cache_dir=cache_dir, embedding_provider=provider_name)
+    cache = CacheManager(CacheConfig(cache_dir))
+    provider = RecordingProvider()
+    indexer = Indexer(
+        config=config,
+        cache=cache,
+        parser_registry=ParserRegistry(),
+        embedding_provider=provider,
+    )
+
+    result = indexer._apply_embeddings(chunks)
+
+    assert len(result) == 9
+    assert provider.batch_sizes == [4, 4, 1]
+    assert all(chunk.embedding_vector == [0.1, 0.2] for chunk in result)
+
+
+def test_apply_embeddings_defaults_to_chunk_size_50_when_provider_has_no_chunk_size() -> None:
+    """Providers without _chunk_size should use indexer default batch size of 50."""
+
+    class NoChunkSizeProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.5, 0.5]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            payload = list(texts)
+            self.batch_sizes.append(len(payload))
+            return [[0.5, 0.5] for _ in payload]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    chunks = _make_embedding_test_chunks(60)
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(cache_dir=cache_dir, embedding_provider="openai")
+    cache = CacheManager(CacheConfig(cache_dir))
+    provider = NoChunkSizeProvider()
+    indexer = Indexer(
+        config=config,
+        cache=cache,
+        parser_registry=ParserRegistry(),
+        embedding_provider=provider,
+    )
+
+    result = indexer._apply_embeddings(chunks)
+
+    assert len(result) == 60
+    assert provider.batch_sizes == [50, 10]
+    assert all(chunk.embedding_vector == [0.5, 0.5] for chunk in result)
+
+
+def test_apply_embeddings_submits_batches_serially_with_single_in_flight_call() -> None:
+    """Embedding batch submission should stay serial (no concurrent in-flight embed_batch calls)."""
+
+    class SerialGuardProvider(EmbeddingProvider):
+        def __init__(self) -> None:
+            self._chunk_size = 2
+            self.in_flight = 0
+            self.max_in_flight = 0
+            self.batch_sizes: list[int] = []
+
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.3, 0.7]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            payload = list(texts)
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            try:
+                if self.in_flight != 1:
+                    raise AssertionError("embed_batch called concurrently")
+                return [[0.3, 0.7] for _ in payload]
+            finally:
+                self.batch_sizes.append(len(payload))
+                self.in_flight -= 1
+
+        def get_dimension(self) -> int:
+            return 2
+
+    chunks = _make_embedding_test_chunks(5)
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(cache_dir=cache_dir, embedding_provider="gemini")
+    cache = CacheManager(CacheConfig(cache_dir))
+    provider = SerialGuardProvider()
+    indexer = Indexer(
+        config=config,
+        cache=cache,
+        parser_registry=ParserRegistry(),
+        embedding_provider=provider,
+    )
+
+    result = indexer._apply_embeddings(chunks)
+
+    assert len(result) == 5
+    assert provider.batch_sizes == [2, 2, 1]
+    assert provider.max_in_flight == 1
+    assert all(chunk.embedding_vector == [0.3, 0.7] for chunk in result)
+
+
 def test_apply_embeddings_calls_progress_callback() -> None:
     """_apply_embeddings fires progress_callback after each chunk with correct counts."""
 

@@ -15,6 +15,7 @@ from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError, wrap_embedding_error
 from gloggur.graph.extractor import GraphEdgeExtractor
 from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.indexer.embedding_ledger import EmbeddingLedger, embedding_text_hash
 from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.models import EdgeRecord, FileMetadata, IndexMetadata, Symbol, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
@@ -196,6 +197,7 @@ class Indexer:
         parser_registry: ParserRegistry | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         vector_store: VectorStore | None = None,
+        embedding_ledger: EmbeddingLedger | None = None,
     ) -> None:
         """Initialize the indexer with cache, parsers, and embeddings."""
 
@@ -207,6 +209,7 @@ class Indexer:
         )
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        self.embedding_ledger = embedding_ledger or EmbeddingLedger(config.cache_dir)
         self._progress_callback: Callable[[int, int], None] | None = None
         self._scan_callback: Callable[[int, int, str], None] | None = None
         self._stage_callback: Callable[[str], None] | None = None
@@ -1091,18 +1094,41 @@ class Indexer:
         if not texts:
             return chunks
         total = len(chunks)
+        embedding_profile = self.config.embedding_profile()
+        text_hashes = [embedding_text_hash(text) for text in texts]
+        cached_vectors = self.embedding_ledger.get_vectors(
+            embedding_profile=embedding_profile,
+            record_kind="chunk",
+            text_hashes=text_hashes,
+        )
         chunk_size = getattr(self.embedding_provider, "_chunk_size", 50)
+        missing_hashes: dict[str, list[int]] = {}
+        missing_items: list[tuple[str, str]] = []
         if progress_callback is not None:
             progress_callback(0, total)
-        for i in range(0, total, chunk_size):
-            chunk_texts = texts[i : i + chunk_size]
-            chunk_rows = chunks[i : i + chunk_size]
+        completed = 0
+        chunk_inputs = zip(chunks, text_hashes, texts, strict=True)
+        for index, (chunk_row, text_hash, text) in enumerate(chunk_inputs):
+            cached_vector = cached_vectors.get(text_hash)
+            if cached_vector is not None:
+                chunk_row.embedding_vector = list(cached_vector)
+                completed += 1
+                continue
+            positions = missing_hashes.setdefault(text_hash, [])
+            positions.append(index)
+            if len(positions) == 1:
+                missing_items.append((text_hash, text))
+        if progress_callback is not None and completed > 0:
+            progress_callback(completed, total)
+        for i in range(0, len(missing_items), chunk_size):
+            batch_items = missing_items[i : i + chunk_size]
+            chunk_texts = [text for _text_hash, text in batch_items]
             try:
                 vectors = self.embedding_provider.embed_batch(chunk_texts)
-                if len(vectors) != len(chunk_rows):
+                if len(vectors) != len(batch_items):
                     raise RuntimeError(
                         "embedding provider returned "
-                        f"{len(vectors)} vectors for {len(chunk_rows)} "
+                        f"{len(vectors)} vectors for {len(batch_items)} "
                         "chunks during indexing"
                     )
             except Exception as exc:
@@ -1111,11 +1137,21 @@ class Indexer:
                     provider=self.config.embedding_provider,
                     operation="embed chunk batch for indexing",
                 ) from exc
-            for chunk_row, vector in zip(chunk_rows, vectors, strict=True):
-                chunk_row.embedding_vector = vector
-            done = min(i + chunk_size, total)
+            ledger_entries: list[tuple[str, list[float]]] = []
+            batch_completed = 0
+            for (text_hash, _text), vector in zip(batch_items, vectors, strict=True):
+                ledger_entries.append((text_hash, vector))
+                for index in missing_hashes.get(text_hash, []):
+                    chunks[index].embedding_vector = vector
+                    batch_completed += 1
+            self.embedding_ledger.upsert_vectors(
+                embedding_profile=embedding_profile,
+                record_kind="chunk",
+                entries=ledger_entries,
+            )
+            completed += batch_completed
             if progress_callback is not None:
-                progress_callback(done, total)
+                progress_callback(completed, total)
         return chunks
 
     def _apply_edge_embeddings(self, edges: list[EdgeRecord]) -> list[EdgeRecord]:
@@ -1127,16 +1163,35 @@ class Indexer:
         texts = [edge.text or "" for edge in edges]
         if not texts:
             return edges
+        embedding_profile = self.config.embedding_profile()
+        text_hashes = [embedding_text_hash(text) for text in texts]
+        cached_vectors = self.embedding_ledger.get_vectors(
+            embedding_profile=embedding_profile,
+            record_kind="edge",
+            text_hashes=text_hashes,
+        )
         batch_size = getattr(self.embedding_provider, "_chunk_size", 50)
-        for offset in range(0, len(edges), batch_size):
-            edge_batch = edges[offset : offset + batch_size]
-            text_batch = texts[offset : offset + batch_size]
+        missing_hashes: dict[str, list[int]] = {}
+        missing_items: list[tuple[str, str]] = []
+        edge_inputs = zip(edges, text_hashes, texts, strict=True)
+        for index, (edge, text_hash, text) in enumerate(edge_inputs):
+            cached_vector = cached_vectors.get(text_hash)
+            if cached_vector is not None:
+                edge.embedding_vector = list(cached_vector)
+                continue
+            positions = missing_hashes.setdefault(text_hash, [])
+            positions.append(index)
+            if len(positions) == 1:
+                missing_items.append((text_hash, text))
+        for offset in range(0, len(missing_items), batch_size):
+            batch_items = missing_items[offset : offset + batch_size]
+            text_batch = [text for _text_hash, text in batch_items]
             try:
                 vectors = self.embedding_provider.embed_batch(text_batch)
-                if len(vectors) != len(edge_batch):
+                if len(vectors) != len(batch_items):
                     raise RuntimeError(
                         "embedding provider returned "
-                        f"{len(vectors)} vectors for {len(edge_batch)} edges during indexing"
+                        f"{len(vectors)} vectors for {len(batch_items)} edges during indexing"
                     )
             except Exception as exc:
                 raise wrap_embedding_error(
@@ -1144,8 +1199,16 @@ class Indexer:
                     provider=self.config.embedding_provider,
                     operation="embed edge batch for indexing",
                 ) from exc
-            for edge_row, vector in zip(edge_batch, vectors, strict=True):
-                edge_row.embedding_vector = vector
+            ledger_entries: list[tuple[str, list[float]]] = []
+            for (text_hash, _text), vector in zip(batch_items, vectors, strict=True):
+                ledger_entries.append((text_hash, vector))
+                for index in missing_hashes.get(text_hash, []):
+                    edges[index].embedding_vector = vector
+            self.embedding_ledger.upsert_vectors(
+                embedding_profile=embedding_profile,
+                record_kind="edge",
+                entries=ledger_entries,
+            )
         return edges
 
     @staticmethod
