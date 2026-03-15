@@ -172,6 +172,28 @@ def apply_access_grant(plan: AccessPlan) -> AccessGrantResult:
     return result
 
 
+def persist_ready_access_grant_state(plan: AccessPlan) -> AccessGrantResult:
+    """Persist access grant state for an already-ready repo without mutating access."""
+    if not plan.access_ready:
+        raise ValueError("ready access grant state requires an access-ready plan")
+    state_file = Path(plan.repo_root) / ACCESS_GRANT_STATE_PATH
+    result = AccessGrantResult(
+        repo_root=plan.repo_root,
+        grantee=plan.grantee,
+        platform=plan.platform,
+        applied_at=_utc_now_iso(),
+        applied_actions=[],
+        blocked_paths=[],
+        manual_actions=[],
+        access_ready=True,
+        manual_action_required=False,
+        manual_os_action_required=False,
+        state_file=str(state_file),
+    )
+    _write_access_grant_result(state_file, result)
+    return result
+
+
 def _required_access_payload() -> list[dict[str, object]]:
     return [
         {

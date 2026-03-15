@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from gloggur.config import GloggurConfig
 
 
@@ -148,6 +150,23 @@ def test_load_env_extract_symbols_timeout_value(monkeypatch) -> None:
     config = GloggurConfig.load(path=None)
 
     assert config.extract_symbols_timeout_seconds == 7.5
+
+
+def test_load_env_build_edges_worker_mode_value(monkeypatch) -> None:
+    """Config loads the build-edges worker mode from the environment."""
+    monkeypatch.setenv("GLOGGUR_BUILD_EDGES_WORKER_MODE", "OFF")
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.build_edges_worker_mode == "off"
+
+
+def test_load_env_invalid_build_edges_worker_mode_raises(monkeypatch) -> None:
+    """Invalid build-edges worker mode env must fail loud."""
+    monkeypatch.setenv("GLOGGUR_BUILD_EDGES_WORKER_MODE", "maybe")
+
+    with pytest.raises(ValueError, match="build_edges_worker_mode"):
+        GloggurConfig.load(path=None)
 
 
 def test_load_env_invalid_watch_debounce_keeps_default(monkeypatch) -> None:

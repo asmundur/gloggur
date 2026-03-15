@@ -35,6 +35,7 @@ from gloggur.access import (
     AccessPlan,
     apply_access_grant,
     build_access_plan,
+    persist_ready_access_grant_state,
 )
 from gloggur.adapters.registry import AdapterResolutionError
 from gloggur.archive_utils import (
@@ -196,6 +197,8 @@ def _init_impl(
         )
         if access_result is not None:
             access_ready = access_result.access_ready
+    elif access_ready:
+        persist_ready_access_grant_state(access_plan)
     response = {
         "initialized": True,
         "repo_root": str(repo_root),
@@ -2906,6 +2909,34 @@ def _record_commit_metadata_stage(
     )
 
 
+def _extract_worker_payload(extract_worker: object) -> dict[str, object] | None:
+    """Normalize additive extract-worker diagnostics when available."""
+    if extract_worker is None:
+        return None
+    if isinstance(extract_worker, dict):
+        return dict(extract_worker)
+    as_payload = getattr(extract_worker, "as_payload", None)
+    if callable(as_payload):
+        payload = as_payload()
+        if isinstance(payload, dict):
+            return payload
+        return None
+    prepare_file_mode = getattr(extract_worker, "prepare_file_mode", None)
+    build_edges_mode = getattr(extract_worker, "build_edges_mode", None)
+    catalog_symbol_count = getattr(extract_worker, "catalog_symbol_count", None)
+    if not isinstance(prepare_file_mode, str) or not isinstance(build_edges_mode, str):
+        return None
+    payload = {
+        "prepare_file_mode": prepare_file_mode,
+        "build_edges_mode": build_edges_mode,
+        "catalog_symbol_count": int(catalog_symbol_count or 0),
+    }
+    reason_code = getattr(extract_worker, "reason_code", None)
+    if isinstance(reason_code, str) and reason_code:
+        payload["reason_code"] = reason_code
+    return payload
+
+
 def _build_search_not_ready_payload(
     *,
     query: str,
@@ -3116,6 +3147,7 @@ def _run_access_grant_flow(
 ) -> AccessGrantResult | None:
     """Run the access grant flow with prompt and JSON semantics."""
     if access_plan.access_ready:
+        persist_ready_access_grant_state(access_plan)
         return None
     if as_json and not approve_access:
         return None
@@ -5662,6 +5694,11 @@ def index(
                     if not as_json:
                         click.echo("", err=True)
                     payload = result.as_payload()
+                    extract_worker_payload = _extract_worker_payload(
+                        getattr(result, "extract_worker", None)
+                    )
+                    if extract_worker_payload is not None and "extract_worker" not in payload:
+                        payload["extract_worker"] = extract_worker_payload
                     payload["failed"] = overall_failed
                     payload["failed_reasons"] = overall_failed_reasons
                     payload["failed_samples"] = overall_failed_samples
@@ -6051,6 +6088,13 @@ def index(
                     "resume_block_reason_codes": list(resume_block_reason_codes),
                     "resume_block_candidates": list(resume_block_candidates),
                 }
+                extract_worker_payload = (
+                    _extract_worker_payload(getattr(execution, "extract_worker", None))
+                    if execution is not None
+                    else None
+                )
+                if extract_worker_payload is not None:
+                    result["extract_worker"] = extract_worker_payload
                 command_duration_ms = int((time.perf_counter() - command_started) * 1000)
                 result["timings_ms"] = {
                     "total": command_duration_ms,

@@ -9,6 +9,7 @@ import yaml
 
 DEFAULT_REPO_CONFIG_TRUST_MODE = "auto"
 REPO_CONFIG_TRUST_MODES = frozenset({"auto", "trusted", "untrusted"})
+BUILD_EDGES_WORKER_MODES = frozenset({"auto", "off", "force"})
 ALLOW_CUSTOM_EMBEDDING_ENDPOINTS_ENV = "GLOGGUR_ALLOW_CUSTOM_EMBEDDING_ENDPOINTS"
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
@@ -151,10 +152,21 @@ class GloggurConfig:
     max_symbol_chunk_bytes: int = 12000
     max_symbol_chunk_tokens: int = 2000
     extract_symbols_timeout_seconds: float = 60.0
+    build_edges_worker_mode: str = "auto"
     config_source: str = "defaults"
     config_source_path: str | None = None
     config_trust_mode: str = DEFAULT_REPO_CONFIG_TRUST_MODE
     security_warning_codes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Normalize and validate configuration fields with strict value contracts."""
+        normalized_mode = str(self.build_edges_worker_mode).strip().lower()
+        if normalized_mode not in BUILD_EDGES_WORKER_MODES:
+            raise ValueError(
+                "build_edges_worker_mode must be one of "
+                f"{sorted(BUILD_EDGES_WORKER_MODES)}; got {self.build_edges_worker_mode!r}"
+            )
+        self.build_edges_worker_mode = normalized_mode
 
     def embedding_profile(self) -> str:
         """Return a stable profile string for the active embedding configuration."""
@@ -438,6 +450,8 @@ class GloggurConfig:
                 )
             except ValueError:
                 pass
+        if _env_value("GLOGGUR_BUILD_EDGES_WORKER_MODE"):
+            data["build_edges_worker_mode"] = _env_value("GLOGGUR_BUILD_EDGES_WORKER_MODE")
         return data
 
     @staticmethod

@@ -41,6 +41,17 @@ def test_run_edge_bench_benchmark_only_passes_on_generated_fixture() -> None:
     assert [test["status"] for test in phase["tests"]] == ["passed", "passed", "passed"]
 
 
+def test_run_edge_bench_accepts_env_passthrough_for_worker_mode() -> None:
+    completed = _run_edge_bench(
+        ["--benchmark-only", "--env", "GLOGGUR_BUILD_EDGES_WORKER_MODE=off"]
+    )
+    assert completed.returncode == 0, f"{completed.stderr}\n{completed.stdout}"
+    payload = json.loads(completed.stdout)
+
+    assert payload["ok"] is True
+    assert payload["mode"] == "benchmark_only"
+
+
 def test_run_edge_bench_writes_and_reuses_baseline_file(tmp_path: Path) -> None:
     baseline_path = tmp_path / "performance-baseline.json"
 

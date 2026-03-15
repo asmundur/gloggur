@@ -94,13 +94,21 @@ def _build_phase_report(
     )
 
 
-def _new_runner(cache_dir: str, timeout: float = 120.0) -> CommandRunner:
+def _new_runner(
+    cache_dir: str,
+    timeout: float = 120.0,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> CommandRunner:
     """Create a command runner with an isolated cache directory."""
+    env = {
+        "GLOGGUR_CACHE_DIR": cache_dir,
+        "GLOGGUR_EMBEDDING_PROVIDER": "test",
+    }
+    if extra_env:
+        env.update(extra_env)
     return CommandRunner(
-        env={
-            "GLOGGUR_CACHE_DIR": cache_dir,
-            "GLOGGUR_EMBEDDING_PROVIDER": "test",
-        },
+        env=env,
         default_timeout=timeout,
     )
 
@@ -109,6 +117,20 @@ def _cleanup_cache_dir(cache_dir: str) -> None:
     """Delete a cache directory if it exists."""
     if cache_dir and Path(cache_dir).exists():
         shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def _parse_env_overrides(values: List[str]) -> Dict[str, str]:
+    """Parse repeated KEY=VALUE overrides for benchmark subprocesses."""
+    overrides: Dict[str, str] = {}
+    for raw in values:
+        if "=" not in raw:
+            raise ValueError(f"Invalid --env override {raw!r}; expected KEY=VALUE")
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Invalid --env override {raw!r}; missing KEY")
+        overrides[key] = value
+    return overrides
 
 
 def _make_large_repo(fixtures: TestFixtures, file_count: int) -> Path:
@@ -181,11 +203,15 @@ def _parse_streaming_output(stdout: str) -> Tuple[bool, List[Dict[str, object]]]
     return True, results
 
 
-def _test_empty_repository(fixtures: TestFixtures) -> TestCaseResult:
+def _test_empty_repository(
+    fixtures: TestFixtures,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> TestCaseResult:
     """Check indexing on an empty repository."""
     repo = fixtures.create_temp_repo({})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir)
+    runner = _new_runner(cache_dir, extra_env=extra_env)
     try:
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
@@ -218,11 +244,15 @@ def _test_empty_repository(fixtures: TestFixtures) -> TestCaseResult:
         _cleanup_cache_dir(cache_dir)
 
 
-def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
+def _test_unsupported_files(
+    fixtures: TestFixtures,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> TestCaseResult:
     """Check indexing skips unsupported files."""
     repo = fixtures.create_temp_repo({"README.txt": "just text\n", "notes.md": "# Notes\n"})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir)
+    runner = _new_runner(cache_dir, extra_env=extra_env)
     try:
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
@@ -255,11 +285,15 @@ def _test_unsupported_files(fixtures: TestFixtures) -> TestCaseResult:
         _cleanup_cache_dir(cache_dir)
 
 
-def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
+def _test_malformed_code(
+    fixtures: TestFixtures,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> TestCaseResult:
     """Check indexing handles malformed code."""
     repo = fixtures.create_temp_repo({"broken.py": "def broken(:\n    pass\n"}, screen=False)
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir)
+    runner = _new_runner(cache_dir, extra_env=extra_env)
     try:
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
@@ -282,11 +316,16 @@ def _test_malformed_code(fixtures: TestFixtures) -> TestCaseResult:
         _cleanup_cache_dir(cache_dir)
 
 
-def _test_large_repository(fixtures: TestFixtures, file_count: int = 500) -> TestCaseResult:
+def _test_large_repository(
+    fixtures: TestFixtures,
+    file_count: int = 500,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> TestCaseResult:
     """Check indexing performance on a large repository."""
     repo = _make_large_repo(fixtures, file_count=file_count)
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir, timeout=300.0)
+    runner = _new_runner(cache_dir, timeout=300.0, extra_env=extra_env)
     try:
         output = runner.run_index(str(repo))
         schema = Checks.check_index_output(output)
@@ -327,11 +366,15 @@ def _test_large_repository(fixtures: TestFixtures, file_count: int = 500) -> Tes
         _cleanup_cache_dir(cache_dir)
 
 
-def _test_streaming_results(fixtures: TestFixtures) -> TestCaseResult:
+def _test_streaming_results(
+    fixtures: TestFixtures,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> TestCaseResult:
     """Check search streaming output format."""
     repo = fixtures.create_temp_repo({"sample.py": fixtures.create_sample_python_file()})
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir)
+    runner = _new_runner(cache_dir, extra_env=extra_env)
     try:
         runner.run_index(str(repo))
         result = runner.run_command(
@@ -366,15 +409,19 @@ def _test_streaming_results(fixtures: TestFixtures) -> TestCaseResult:
         _cleanup_cache_dir(cache_dir)
 
 
-def _run_phase3(skip_large_repo: bool) -> PhaseReport:
+def _run_phase3(
+    skip_large_repo: bool,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> PhaseReport:
     """Run phase 3 edge-case checks."""
     fixtures = TestFixtures()
     tests: List[TestCaseResult] = []
     start = time.perf_counter()
     try:
-        tests.append(_test_empty_repository(fixtures))
-        tests.append(_test_unsupported_files(fixtures))
-        tests.append(_test_malformed_code(fixtures))
+        tests.append(_test_empty_repository(fixtures, extra_env=extra_env))
+        tests.append(_test_unsupported_files(fixtures, extra_env=extra_env))
+        tests.append(_test_malformed_code(fixtures, extra_env=extra_env))
         if skip_large_repo:
             tests.append(
                 TestCaseResult(
@@ -384,8 +431,8 @@ def _run_phase3(skip_large_repo: bool) -> PhaseReport:
                 )
             )
         else:
-            tests.append(_test_large_repository(fixtures))
-        tests.append(_test_streaming_results(fixtures))
+            tests.append(_test_large_repository(fixtures, extra_env=extra_env))
+        tests.append(_test_streaming_results(fixtures, extra_env=extra_env))
     finally:
         fixtures.cleanup_temp_repos()
     duration_ms = (time.perf_counter() - start) * 1000
@@ -410,10 +457,14 @@ def _resolve_benchmark_repo(
     return repo, fixture_info, None
 
 
-def _benchmark_indexing_speed(repo_path: Path) -> Tuple[TestCaseResult, BenchmarkMetric]:
+def _benchmark_indexing_speed(
+    repo_path: Path,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Tuple[TestCaseResult, BenchmarkMetric]:
     """Benchmark cold indexing speed and return a metric."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir, timeout=300.0)
+    runner = _new_runner(cache_dir, timeout=300.0, extra_env=extra_env)
     try:
         output = runner.run_index(str(repo_path))
         schema = Checks.check_index_output(output)
@@ -462,10 +513,14 @@ def _benchmark_indexing_speed(repo_path: Path) -> Tuple[TestCaseResult, Benchmar
         _cleanup_cache_dir(cache_dir)
 
 
-def _benchmark_search_latency(repo_path: Path) -> Tuple[TestCaseResult, BenchmarkMetric]:
+def _benchmark_search_latency(
+    repo_path: Path,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+) -> Tuple[TestCaseResult, BenchmarkMetric]:
     """Benchmark search latency and return a metric."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir, timeout=300.0)
+    runner = _new_runner(cache_dir, timeout=300.0, extra_env=extra_env)
     queries = ["normalize", "summarize", "benchmark", "record", "worker"]
     try:
         index_output = runner.run_index(str(repo_path))
@@ -518,10 +573,12 @@ def _benchmark_search_latency(repo_path: Path) -> Tuple[TestCaseResult, Benchmar
 
 def _benchmark_incremental_reindex(
     repo_path: Path,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> Tuple[TestCaseResult, BenchmarkMetric, BenchmarkMetric]:
     """Benchmark unchanged incremental reindex speed and throughput."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
-    runner = _new_runner(cache_dir, timeout=300.0)
+    runner = _new_runner(cache_dir, timeout=300.0, extra_env=extra_env)
     try:
         first = runner.run_index(str(repo_path))
         second = runner.run_index(str(repo_path))
@@ -669,6 +726,8 @@ def _apply_baseline_contract(
 
 def _run_phase4(
     repo_path: Optional[Path],
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> Tuple[PhaseReport, Dict[str, object], Dict[str, object], Optional[dict[str, object]]]:
     """Run performance benchmarks and return phase report, fixture info, baseline payload, and failure."""
     fixtures = TestFixtures()
@@ -698,16 +757,23 @@ def _run_phase4(
         tests: List[TestCaseResult] = []
         metrics: List[BenchmarkMetric] = []
 
-        indexing_result, cold_metric = _benchmark_indexing_speed(benchmark_repo)
+        indexing_result, cold_metric = _benchmark_indexing_speed(
+            benchmark_repo,
+            extra_env=extra_env,
+        )
         tests.append(indexing_result)
         metrics.append(cold_metric)
 
-        search_result, search_metric = _benchmark_search_latency(benchmark_repo)
+        search_result, search_metric = _benchmark_search_latency(
+            benchmark_repo,
+            extra_env=extra_env,
+        )
         tests.append(search_result)
         metrics.append(search_metric)
 
         incremental_result, unchanged_metric, throughput_metric = _benchmark_incremental_reindex(
-            benchmark_repo
+            benchmark_repo,
+            extra_env=extra_env,
         )
         tests.append(incremental_result)
         metrics.extend([unchanged_metric, throughput_metric])
@@ -744,6 +810,7 @@ def run_edge_bench(
     skip_large_repo: bool,
     benchmark_only: bool,
     repo_path: Optional[Path],
+    extra_env: Optional[Dict[str, str]] = None,
 ) -> Tuple[VerificationReport, Dict[str, object], Dict[str, object], Optional[dict[str, object]]]:
     """Run phase 3 edge cases and/or phase 4 benchmarks."""
     logger.info(
@@ -758,9 +825,12 @@ def run_edge_bench(
     failure: Optional[dict[str, object]] = None
 
     if not benchmark_only:
-        phases.append(_run_phase3(skip_large_repo))
+        phases.append(_run_phase3(skip_large_repo, extra_env=extra_env))
 
-    phase4, fixture_info, baseline_payload, failure = _run_phase4(repo_path)
+    phase4, fixture_info, baseline_payload, failure = _run_phase4(
+        repo_path,
+        extra_env=extra_env,
+    )
     phases.append(phase4)
     report = build_verification_report(phases)
     logger.info("Phase 3/4 run completed")
@@ -828,6 +898,13 @@ def main() -> int:
         default=None,
         help="Benchmark this repo instead of the deterministic generated fixture.",
     )
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Pass additional environment variables through to benchmark subprocesses.",
+    )
     parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
     parser.add_argument(
@@ -849,10 +926,16 @@ def main() -> int:
         force=True,
     )
 
+    try:
+        extra_env = _parse_env_overrides(list(args.env))
+    except ValueError as exc:
+        parser.error(str(exc))
+
     report, fixture_info, generated_baseline, failure = run_edge_bench(
         skip_large_repo=args.skip_large_repo,
         benchmark_only=args.benchmark_only,
         repo_path=args.repo,
+        extra_env=extra_env,
     )
 
     baseline_payload: Optional[Dict[str, object]] = None

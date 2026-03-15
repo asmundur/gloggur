@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from gloggur.graph.extractor import CandidateSymbolIndex
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError
+from gloggur.indexer import indexer as indexer_module
 from gloggur.indexer.cache import (
     BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
     BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
@@ -21,7 +23,7 @@ from gloggur.indexer.indexer import (
     Indexer,
     VerboseLineMetricsAccumulator,
 )
-from gloggur.models import EdgeRecord, SymbolChunk
+from gloggur.models import EdgeRecord, Symbol, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
 from scripts.verification.fixtures import TestFixtures
 
@@ -80,6 +82,30 @@ def _write_timeout_parser_module(tmp_path: Path, *, sleep_seconds: float = 0.2) 
         encoding="utf8",
     )
     return module_name
+
+
+class _DeterministicEmbeddingProvider(EmbeddingProvider):
+    def embed_text(self, text: str) -> list[float]:
+        _ = text
+        return [0.1, 0.2]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1, 0.2] for _ in texts]
+
+    def get_dimension(self) -> int:
+        return 2
+
+
+def _serialized_symbols(cache: CacheManager) -> list[dict[str, object]]:
+    return [symbol.model_dump() for symbol in cache.list_symbols()]
+
+
+def _serialized_chunks(cache: CacheManager) -> list[dict[str, object]]:
+    return [chunk.model_dump() for chunk in cache.list_chunks()]
+
+
+def _serialized_edges(cache: CacheManager) -> list[dict[str, object]]:
+    return [edge.model_dump() for edge in cache.list_edges()]
 
 
 def test_indexer_indexes_repo_and_sets_metadata() -> None:
@@ -1756,3 +1782,296 @@ def test_indexer_builds_repo_symbol_catalog_once_per_run(
 
         assert result.failed == 0
         assert list_symbols_calls == 1
+
+
+def test_indexer_worker_and_inline_modes_preserve_persisted_output() -> None:
+    source_a = (
+        "def helper(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def alpha(value: int) -> int:\n"
+        "    return helper(value)\n"
+    )
+    source_b = (
+        "from a import alpha\n\n"
+        "def beta(value: int) -> int:\n"
+        "    return alpha(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"a.py": source_a, "b.py": source_b})
+        cache_dir_inline = tempfile.mkdtemp(prefix="gloggur-cache-inline-")
+        cache_dir_worker = tempfile.mkdtemp(prefix="gloggur-cache-worker-")
+        inline_cache = CacheManager(CacheConfig(cache_dir_inline))
+        worker_cache = CacheManager(CacheConfig(cache_dir_worker))
+
+        inline_result = Indexer(
+            config=GloggurConfig(
+                cache_dir=cache_dir_inline,
+                build_edges_worker_mode="off",
+            ),
+            cache=inline_cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=_DeterministicEmbeddingProvider(),
+        ).index_repository(str(repo))
+        worker_result = Indexer(
+            config=GloggurConfig(
+                cache_dir=cache_dir_worker,
+                build_edges_worker_mode="force",
+            ),
+            cache=worker_cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=_DeterministicEmbeddingProvider(),
+        ).index_repository(str(repo))
+
+        assert inline_result.failed == 0
+        assert worker_result.failed == 0
+        assert inline_result.extract_worker.build_edges_mode == "inline"
+        assert worker_result.extract_worker.build_edges_mode == "worker"
+        assert _serialized_symbols(worker_cache) == _serialized_symbols(inline_cache)
+        assert _serialized_chunks(worker_cache) == _serialized_chunks(inline_cache)
+        assert _serialized_edges(worker_cache) == _serialized_edges(inline_cache)
+
+
+def test_indexer_auto_large_catalog_falls_back_inline_and_reports_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = (
+        "def alpha(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def beta(value: int) -> int:\n"
+        "    return alpha(value)\n"
+    )
+    monkeypatch.setattr(indexer_module, "_BUILD_EDGES_INLINE_CANDIDATE_SYMBOL_THRESHOLD", 1)
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"a.py": source, "b.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+        result = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir, build_edges_worker_mode="auto"),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=_DeterministicEmbeddingProvider(),
+        ).index_repository(str(repo))
+
+        assert result.failed == 0
+        assert result.extract_worker.prepare_file_mode == "worker"
+        assert result.extract_worker.build_edges_mode == "inline"
+        assert result.extract_worker.reason_code == "candidate_catalog_too_large"
+        assert result.extract_worker.catalog_symbol_count >= 1
+
+
+def test_extract_worker_prime_catalog_reuses_cached_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = indexer_module._ExtractSymbolsWorker(
+        GloggurConfig(cache_dir=tempfile.mkdtemp(prefix="gloggur-cache-"))
+    )
+    calls: list[dict[str, object]] = []
+    candidate_symbols = [
+        Symbol(
+            id="sym-a",
+            name="alpha",
+            kind="function",
+            fqname="pkg.alpha",
+            file_path="sample.py",
+            start_line=1,
+            end_line=2,
+            body_hash="hash-a",
+            language="python",
+        )
+    ]
+
+    monkeypatch.setattr(worker, "ensure_started", lambda: None)
+
+    def _run_job(**kwargs: object) -> dict[str, object]:
+        calls.append(dict(kwargs))
+        return {"catalog_symbol_count": 1}
+
+    monkeypatch.setattr(worker, "run_job", _run_job)
+
+    assert worker.prime_build_edges_catalog(candidate_symbols, timeout_seconds=1.0) == 1
+    assert worker.prime_build_edges_catalog(candidate_symbols, timeout_seconds=1.0) == 1
+    worker._primed_catalog_key = None
+    assert worker.prime_build_edges_catalog(candidate_symbols, timeout_seconds=1.0) == 1
+
+    assert len(calls) == 2
+    assert calls[0]["kind"] == "prime_build_edges_catalog"
+    assert calls[0]["payload"]["candidate_symbols"] == candidate_symbols
+
+
+def test_build_edges_watchdog_uses_primed_catalog_payload() -> None:
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    indexer = Indexer(
+        config=GloggurConfig(cache_dir=cache_dir, build_edges_worker_mode="force"),
+        cache=CacheManager(CacheConfig(cache_dir)),
+        parser_registry=ParserRegistry(),
+        embedding_provider=_DeterministicEmbeddingProvider(),
+    )
+    symbol = Symbol(
+        id="sym-a",
+        name="alpha",
+        kind="function",
+        fqname="pkg.alpha",
+        file_path="sample.py",
+        start_line=1,
+        end_line=2,
+        body_hash="hash-a",
+        language="python",
+        calls=["alpha"],
+    )
+    candidate_symbols = [symbol]
+    candidate_symbol_index = CandidateSymbolIndex.from_symbols(candidate_symbols)
+    prime_calls: list[list[Symbol]] = []
+    run_payloads: list[dict[str, object]] = []
+
+    class FakeWorker:
+        def prime_build_edges_catalog(
+            self,
+            symbols: list[Symbol],
+            *,
+            timeout_seconds: float,
+        ) -> int:
+            _ = timeout_seconds
+            prime_calls.append(list(symbols))
+            return len(symbols)
+
+        def run_job(
+            self,
+            *,
+            kind: str,
+            payload: dict[str, object],
+            timeout_seconds: float,
+            on_poll=None,
+        ) -> dict[str, object]:
+            _ = timeout_seconds
+            _ = on_poll
+            run_payloads.append({"kind": kind, "payload": dict(payload)})
+            return {"edges": []}
+
+    prepared = indexer_module.PreparedFileIndex(
+        path="sample.py",
+        language="python",
+        content_hash="content-hash",
+        source="def alpha() -> int:\n    return alpha()\n",
+        size_bytes=32,
+        repo_id="repo-1",
+        commit="abc123",
+        snapshot=indexer_module.ParsedFileSnapshot(
+            path="sample.py",
+            source="def alpha() -> int:\n    return alpha()\n",
+            content_hash="content-hash",
+            mtime_ns=1,
+            language="python",
+            symbols=[symbol],
+            span_index=indexer_module.LineByteSpanIndex.from_bytes(
+                b"def alpha() -> int:\n    return alpha()\n"
+            ),
+        ),
+        symbols=[symbol],
+        chunks=[],
+        edges=[],
+        previous_symbol_ids=[],
+        previous_chunk_ids=[],
+        previous_metadata=None,
+        previous_symbols=[],
+        previous_chunks=[],
+        previous_edges=[],
+        symbols_added=1,
+        symbols_updated=0,
+        symbols_removed=0,
+        timing=indexer_module.FileTimingTrace(path="sample.py", status="prepared"),
+    )
+
+    execution = indexer._build_edges_with_watchdog(
+        worker=FakeWorker(),
+        use_worker=True,
+        prepared=prepared,
+        candidate_symbols=candidate_symbols,
+        candidate_symbol_index=candidate_symbol_index,
+        files_done=0,
+        files_total=1,
+    )
+
+    assert execution.timed_out is False
+    assert prime_calls == [candidate_symbols]
+    assert run_payloads == [
+        {
+            "kind": "build_edges",
+            "payload": {
+                "path": "sample.py",
+                "source": "def alpha() -> int:\n    return alpha()\n",
+                "symbols": [symbol],
+                "repo_id": "repo-1",
+                "commit": "abc123",
+                "language": "python",
+                "include_text": False,
+                "use_primed_catalog": True,
+            },
+        }
+    ]
+
+
+def test_indexer_resume_preserves_inline_large_catalog_checkpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = "def sample(value: int) -> int:\n    return value + 1\n"
+    monkeypatch.setattr(indexer_module, "_BUILD_EDGES_INLINE_CANDIDATE_SYMBOL_THRESHOLD", 1)
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"a.py": source, "b.py": source})
+        ordered_paths = [str(repo / "a.py"), str(repo / "b.py")]
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+
+        first_indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir, build_edges_worker_mode="auto"),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=_DeterministicEmbeddingProvider(),
+        )
+        first_indexer._iter_source_files = lambda _root: ordered_paths  # type: ignore[method-assign]
+        original_build_edges = first_indexer._build_edges_with_watchdog
+        build_edges_modes: list[bool] = []
+
+        def _halt_on_second_inline_edge(**kwargs: object) -> indexer_module._BuildEdgesExecution:
+            build_edges_modes.append(bool(kwargs["use_worker"]))
+            if len(build_edges_modes) == 2:
+                return indexer_module._BuildEdgesExecution(
+                    edges=None,
+                    edge_ms=0,
+                    timed_out=True,
+                    detail="simulated timeout",
+                    use_worker_next=False,
+                )
+            return original_build_edges(**kwargs)
+
+        monkeypatch.setattr(first_indexer, "_build_edges_with_watchdog", _halt_on_second_inline_edge)
+
+        first_result = first_indexer.index_repository(str(repo))
+
+        assert first_result.failed == 1
+        assert build_edges_modes == [False, False]
+        assert first_result.extract_worker.build_edges_mode == "inline"
+        assert first_result.extract_worker.reason_code == "candidate_catalog_too_large"
+        assert cache.get_build_file_checkpoint(ordered_paths[0]) is not None
+        assert cache.get_build_file_checkpoint(ordered_paths[1]) is None
+
+        second_indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir, build_edges_worker_mode="auto"),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=_DeterministicEmbeddingProvider(),
+        )
+        second_indexer._iter_source_files = lambda _root: ordered_paths  # type: ignore[method-assign]
+        original_prepare = second_indexer._prepare_file_for_index_with_watchdog
+        prepare_calls: list[str] = []
+
+        def _record_prepare(**kwargs: object):
+            prepare_calls.append(str(kwargs["path"]))
+            return original_prepare(**kwargs)
+
+        monkeypatch.setattr(second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare)
+
+        second_result = second_indexer.index_repository(str(repo))
+
+        assert second_result.failed == 0
+        assert second_result.extract_worker.build_edges_mode == "inline"
+        assert prepare_calls == [ordered_paths[1]]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from gloggur.models import EdgeRecord, Symbol
@@ -83,6 +84,57 @@ class _ResolvedTarget:
     confidence: float
 
 
+@dataclass(frozen=True)
+class CandidateSymbolIndex:
+    """Reusable candidate-symbol lookup tables for deterministic edge extraction."""
+
+    symbols: tuple[Symbol, ...]
+    by_id: dict[str, Symbol]
+    by_fqname: dict[str, Symbol]
+    by_name: dict[str, tuple[Symbol, ...]]
+
+    @staticmethod
+    def _symbol_sort_key(symbol: Symbol) -> tuple[str, int, int, str]:
+        return (symbol.file_path, symbol.start_line, symbol.end_line, symbol.id)
+
+    @staticmethod
+    def _name_sort_key(symbol: Symbol) -> tuple[str, int, str]:
+        return (symbol.file_path, symbol.start_line, symbol.id)
+
+    @classmethod
+    def from_symbols(cls, symbols: Sequence[Symbol]) -> CandidateSymbolIndex:
+        """Build one reusable candidate-symbol index with stable merge precedence by id."""
+        merged: dict[str, Symbol] = {}
+        for symbol in symbols:
+            merged[symbol.id] = symbol
+        ordered = sorted(merged.values(), key=cls._symbol_sort_key)
+        by_id = {symbol.id: symbol for symbol in ordered}
+        by_fqname: dict[str, Symbol] = {}
+        by_name_lists: dict[str, list[Symbol]] = {}
+        for symbol in ordered:
+            if symbol.fqname:
+                by_fqname[symbol.fqname] = symbol
+            by_name_lists.setdefault(symbol.name, []).append(symbol)
+        by_name = {
+            name: tuple(sorted(items, key=cls._name_sort_key))
+            for name, items in by_name_lists.items()
+        }
+        return cls(
+            symbols=tuple(ordered),
+            by_id=by_id,
+            by_fqname=by_fqname,
+            by_name=by_name,
+        )
+
+    def with_local_symbols(self, local_symbols: Sequence[Symbol]) -> CandidateSymbolIndex:
+        """Overlay local symbols only when the prebuilt candidate index does not already contain them."""
+        if not local_symbols:
+            return self
+        if all(self.by_id.get(symbol.id) is symbol for symbol in local_symbols):
+            return self
+        return CandidateSymbolIndex.from_symbols([*self.symbols, *local_symbols])
+
+
 class GraphEdgeExtractor:
     """Extract deterministic edge records from symbols plus source text."""
 
@@ -95,25 +147,20 @@ class GraphEdgeExtractor:
         path: str,
         source: str,
         symbols: list[Symbol],
-        candidate_symbols: list[Symbol],
+        candidate_symbols: list[Symbol] | None = None,
+        candidate_symbol_index: CandidateSymbolIndex | None = None,
         repo_id: str,
         commit: str,
         include_text: bool = True,
     ) -> list[EdgeRecord]:
         """Extract DEFINES/CONTAINS/IMPORTS/CALLS/REFERENCES/TESTS edges for one file."""
-        combined = self._build_symbol_index(
-            local_symbols=symbols,
-            candidate_symbols=candidate_symbols,
-        )
-        by_id = {symbol.id: symbol for symbol in combined}
-        by_fqname: dict[str, Symbol] = {}
-        by_name: dict[str, list[Symbol]] = {}
-        for symbol in combined:
-            if symbol.fqname:
-                by_fqname[symbol.fqname] = symbol
-            by_name.setdefault(symbol.name, []).append(symbol)
-        for name in by_name:
-            by_name[name].sort(key=lambda item: (item.file_path, item.start_line, item.id))
+        if candidate_symbol_index is None:
+            candidate_symbol_index = CandidateSymbolIndex.from_symbols(candidate_symbols or [])
+        combined_index = candidate_symbol_index.with_local_symbols(symbols)
+        combined = combined_index.symbols
+        by_id = combined_index.by_id
+        by_fqname = combined_index.by_fqname
+        by_name = combined_index.by_name
 
         file_node_id = self._file_node_id(repo_id=repo_id, path=path)
         edges: list[EdgeRecord] = []
@@ -333,22 +380,6 @@ class GraphEdgeExtractor:
         return edges
 
     @staticmethod
-    def _build_symbol_index(
-        *,
-        local_symbols: list[Symbol],
-        candidate_symbols: list[Symbol],
-    ) -> list[Symbol]:
-        """Merge symbol sets with local-file symbols taking precedence by id."""
-        merged: dict[str, Symbol] = {}
-        for symbol in candidate_symbols:
-            merged[symbol.id] = symbol
-        for symbol in local_symbols:
-            merged[symbol.id] = symbol
-        symbols = list(merged.values())
-        symbols.sort(key=lambda item: (item.file_path, item.start_line, item.end_line, item.id))
-        return symbols
-
-    @staticmethod
     def _file_node_id(*, repo_id: str, path: str) -> str:
         """Return deterministic file-node id used for DEFINES/IMPORTS edges."""
         payload = f"{repo_id}|{os.path.normpath(path)}"
@@ -478,8 +509,8 @@ class GraphEdgeExtractor:
         target: str,
         *,
         current_file: str,
-        by_fqname: dict[str, Symbol],
-        by_name: dict[str, list[Symbol]],
+        by_fqname: Mapping[str, Symbol],
+        by_name: Mapping[str, Sequence[Symbol]],
         container_fqname: str | None,
         unresolved_confidence: float = 0.15,
     ) -> _ResolvedTarget:
@@ -542,9 +573,9 @@ class GraphEdgeExtractor:
     def _resolve_test_reference(
         reference: str,
         *,
-        by_id: dict[str, Symbol],
-        by_fqname: dict[str, Symbol],
-        by_name: dict[str, list[Symbol]],
+        by_id: Mapping[str, Symbol],
+        by_fqname: Mapping[str, Symbol],
+        by_name: Mapping[str, Sequence[Symbol]],
         current_file: str,
     ) -> _ResolvedTarget:
         """Resolve covered_by values into test-symbol endpoints when available."""

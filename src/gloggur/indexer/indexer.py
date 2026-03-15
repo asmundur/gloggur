@@ -16,7 +16,7 @@ from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError, wrap_embedding_error
-from gloggur.graph.extractor import GraphEdgeExtractor
+from gloggur.graph.extractor import CandidateSymbolIndex, GraphEdgeExtractor
 from gloggur.indexer.cache import (
     BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
     BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
@@ -83,6 +83,19 @@ FAILURE_REMEDIATION: dict[str, list[str]] = {
 }
 
 EXTRACT_SYMBOLS_TIMEOUT_REASON = "extract_symbols_timeout"
+_BUILD_EDGES_INLINE_CANDIDATE_SYMBOL_THRESHOLD = 5000
+_BUILD_EDGES_REASON_WORKER_ENABLED = "worker_enabled"
+_BUILD_EDGES_REASON_WORKER_FORCED = "worker_forced"
+_BUILD_EDGES_REASON_WORKER_MODE_OFF = "worker_mode_off"
+_BUILD_EDGES_REASON_CATALOG_TOO_LARGE = "candidate_catalog_too_large"
+_BUILD_EDGES_REASON_PRIME_FAILED = "candidate_catalog_prime_failed"
+_BUILD_EDGES_REASON_TIMEOUT_DISABLED = "extract_worker_timeout_disabled"
+_BUILD_EDGES_REASON_CUSTOM_INDEXER = "extract_worker_custom_indexer"
+_BUILD_EDGES_REASON_CUSTOM_PARSER_REGISTRY = "extract_worker_custom_parser_registry"
+_BUILD_EDGES_REASON_CUSTOM_EXTRACT_SYMBOLS = "extract_worker_custom_extract_symbols"
+_BUILD_EDGES_REASON_CUSTOM_PREPARE_FILE = "extract_worker_custom_prepare_file"
+_BUILD_EDGES_REASON_CUSTOM_BUILD_CHUNKS = "extract_worker_custom_build_chunks"
+_BUILD_EDGES_REASON_CUSTOM_BUILD_EDGES = "extract_worker_custom_build_edges"
 _EXTRACT_WORKER_POLL_SECONDS = 0.1
 _EXTRACT_PROGRESS_HEARTBEAT_SECONDS = 1.0
 _EXTRACT_WORKER_STARTUP_TIMEOUT_SECONDS = 10.0
@@ -121,6 +134,7 @@ def _extract_symbols_worker_main(
     response_queue: object,
 ) -> None:
     """Serve extract-symbols jobs in a reusable child process."""
+    primed_candidate_symbol_index: CandidateSymbolIndex | None = None
     try:
         cache = CacheManager(CacheConfig(config.cache_dir))
         parser_registry = ParserRegistry(
@@ -186,11 +200,22 @@ def _extract_symbols_worker_main(
                 continue
 
             if kind == "build_edges":
+                if bool(payload.get("use_primed_catalog")) and primed_candidate_symbol_index is None:
+                    raise ValueError("build_edges worker catalog was not primed")
                 edges = Indexer._build_graph_edges(
                     path=str(payload["path"]),
                     source=str(payload["source"]),
                     symbols=list(payload.get("symbols") or []),
-                    candidate_symbols=list(payload.get("candidate_symbols") or []),
+                    candidate_symbols=(
+                        list(payload.get("candidate_symbols") or [])
+                        if not bool(payload.get("use_primed_catalog"))
+                        else None
+                    ),
+                    candidate_symbol_index=(
+                        primed_candidate_symbol_index
+                        if bool(payload.get("use_primed_catalog"))
+                        else None
+                    ),
                     repo_id=str(payload["repo_id"]),
                     commit=str(payload["commit"]),
                     language=str(payload["language"]),
@@ -202,6 +227,20 @@ def _extract_symbols_worker_main(
                         "kind": kind,
                         "ok": True,
                         "edges": edges,
+                    }
+                )
+                continue
+
+            if kind == "prime_build_edges_catalog":
+                primed_candidate_symbol_index = CandidateSymbolIndex.from_symbols(
+                    list(payload.get("candidate_symbols") or [])
+                )
+                response_queue.put(
+                    {
+                        "job_id": job_id,
+                        "kind": kind,
+                        "ok": True,
+                        "catalog_symbol_count": len(primed_candidate_symbol_index.symbols),
                     }
                 )
                 continue
@@ -235,6 +274,7 @@ class _ExtractSymbolsWorker:
         self._response_queue: object | None = None
         self._next_job_id = 0
         self._ready = False
+        self._primed_catalog_key: str | None = None
 
     @property
     def pid(self) -> int | None:
@@ -355,6 +395,43 @@ class _ExtractSymbolsWorker:
                 detail = f"{detail}\n{trace_text}"
             raise _ExtractWorkerError(detail)
 
+    @staticmethod
+    def _catalog_key(candidate_symbols: list[Symbol]) -> str:
+        """Build a stable fingerprint for one candidate-symbol catalog payload."""
+        digest = hashlib.sha256()
+        for symbol in candidate_symbols:
+            digest.update(symbol.id.encode("utf8"))
+            digest.update(b"\0")
+            digest.update(symbol.file_path.encode("utf8"))
+            digest.update(b"\0")
+            digest.update(str(symbol.start_line).encode("utf8"))
+            digest.update(b"\0")
+            digest.update(str(symbol.end_line).encode("utf8"))
+            digest.update(b"\0")
+        return f"{len(candidate_symbols)}:{digest.hexdigest()}"
+
+    def prime_build_edges_catalog(
+        self,
+        candidate_symbols: list[Symbol],
+        *,
+        timeout_seconds: float,
+    ) -> int:
+        """Prime shared candidate-symbol state once per worker lifetime."""
+        catalog_key = self._catalog_key(candidate_symbols)
+        self.ensure_started()
+        if self._primed_catalog_key == catalog_key:
+            return len(candidate_symbols)
+        response = self.run_job(
+            kind="prime_build_edges_catalog",
+            payload={
+                "path": "<build_edges_catalog>",
+                "candidate_symbols": candidate_symbols,
+            },
+            timeout_seconds=max(0.001, float(timeout_seconds)),
+        )
+        self._primed_catalog_key = catalog_key
+        return int(response.get("catalog_symbol_count", len(candidate_symbols)) or 0)
+
     def restart(self) -> None:
         """Restart the worker after a timeout so later jobs can continue safely."""
         self._shutdown(force=True)
@@ -373,6 +450,7 @@ class _ExtractSymbolsWorker:
         self._request_queue = None
         self._response_queue = None
         self._ready = False
+        self._primed_catalog_key = None
         if process is not None:
             try:
                 if process.is_alive() and request_queue is not None and not force:
@@ -400,6 +478,57 @@ class _ExtractSymbolsWorker:
 
 
 @dataclass
+class ExtractWorkerInfo:
+    """Additive extract-worker execution diagnostics surfaced in index JSON output."""
+
+    prepare_file_mode: str = "inline"
+    build_edges_mode: str = "inline"
+    catalog_symbol_count: int = 0
+    reason_code: str | None = None
+
+    def as_payload(self) -> dict[str, object]:
+        """Serialize extract-worker diagnostics for CLI output."""
+        payload: dict[str, object] = {
+            "prepare_file_mode": self.prepare_file_mode,
+            "build_edges_mode": self.build_edges_mode,
+            "catalog_symbol_count": max(0, int(self.catalog_symbol_count)),
+        }
+        if self.reason_code is not None:
+            payload["reason_code"] = self.reason_code
+        return payload
+
+
+@dataclass(frozen=True)
+class _BuildEdgesExecution:
+    """Internal build-edges execution result with worker-mode transitions."""
+
+    edges: list[EdgeRecord] | None
+    edge_ms: int
+    timed_out: bool
+    detail: str | None
+    use_worker_next: bool
+    fallback_reason_code: str | None = None
+
+
+def _coerce_build_edges_execution(
+    result: _BuildEdgesExecution | tuple[list[EdgeRecord] | None, int, bool, str | None],
+    *,
+    use_worker_next: bool,
+) -> _BuildEdgesExecution:
+    """Support legacy tuple-style test shims around _build_edges_with_watchdog."""
+    if isinstance(result, _BuildEdgesExecution):
+        return result
+    edges, edge_ms, timed_out, detail = result
+    return _BuildEdgesExecution(
+        edges=edges,
+        edge_ms=edge_ms,
+        timed_out=timed_out,
+        detail=detail,
+        use_worker_next=use_worker_next,
+    )
+
+
+@dataclass
 class IndexResult:
     """Dataclass for indexing results with explicit terminal file outcomes."""
 
@@ -422,6 +551,7 @@ class IndexResult:
     parsed_files: list[ParsedFileSnapshot] = field(default_factory=list)
     source_files: list[str] = field(default_factory=list)
     verbose_lines: VerboseLineMetrics | None = None
+    extract_worker: ExtractWorkerInfo = field(default_factory=ExtractWorkerInfo)
 
     @property
     def indexed_files(self) -> int:
@@ -455,6 +585,7 @@ class IndexResult:
             "indexed_files": self.indexed_files,
             "skipped_files": self.skipped_files,
             "index_stats": dict(self.index_stats),
+            "extract_worker": self.extract_worker.as_payload(),
         }
         if self.failed_reasons:
             payload["failure_codes"] = sorted(self.failed_reasons)
@@ -662,6 +793,7 @@ class FileIndexExecution:
     prepared: PreparedFileIndex | None = None
     timing: FileTimingTrace | None = None
     verbose_lines: VerboseLineMetrics | None = None
+    extract_worker: ExtractWorkerInfo = field(default_factory=ExtractWorkerInfo)
 
 
 @dataclass
@@ -748,34 +880,78 @@ class Indexer:
             timeout_seconds = 0.0
         return max(0.0, timeout_seconds)
 
-    def _can_use_extract_worker(self) -> bool:
+    def _extract_worker_availability(self) -> tuple[bool, str]:
         """Return whether the current indexer wiring is safe to reproduce in a spawned worker."""
         if self._extract_timeout_seconds() <= 0:
-            return False
+            return False, _BUILD_EDGES_REASON_TIMEOUT_DISABLED
         if type(self) is not Indexer:
-            return False
+            return False, _BUILD_EDGES_REASON_CUSTOM_INDEXER
         if type(self.parser_registry) is not ParserRegistry:
-            return False
+            return False, _BUILD_EDGES_REASON_CUSTOM_PARSER_REGISTRY
         if TreeSitterParser.extract_symbols is not _TREE_SITTER_EXTRACT_SYMBOLS_IMPL:
-            return False
+            return False, _BUILD_EDGES_REASON_CUSTOM_EXTRACT_SYMBOLS
         prepare_impl = getattr(
             self._prepare_file_for_index,
             "__func__",
             self._prepare_file_for_index,
         )
         if prepare_impl is not Indexer._prepare_file_for_index:
-            return False
+            return False, _BUILD_EDGES_REASON_CUSTOM_PREPARE_FILE
         build_chunks_impl = getattr(
             self._build_symbol_chunks,
             "__func__",
             self._build_symbol_chunks,
         )
         if build_chunks_impl is not Indexer._build_symbol_chunks:
-            return False
+            return False, _BUILD_EDGES_REASON_CUSTOM_BUILD_CHUNKS
         build_edges_impl = getattr(self._build_graph_edges, "__func__", self._build_graph_edges)
         if build_edges_impl is not Indexer._build_graph_edges:
-            return False
-        return True
+            return False, _BUILD_EDGES_REASON_CUSTOM_BUILD_EDGES
+        return True, _BUILD_EDGES_REASON_WORKER_ENABLED
+
+    def _can_use_extract_worker(self) -> bool:
+        """Return whether the current indexer wiring is safe to reproduce in a spawned worker."""
+        available, _reason_code = self._extract_worker_availability()
+        return available
+
+    def _resolve_extract_worker_info(
+        self,
+        *,
+        worker_available: bool,
+        availability_reason_code: str,
+        catalog_symbol_count: int,
+    ) -> ExtractWorkerInfo:
+        """Return per-run extract-worker mode diagnostics for prepare and build_edges."""
+        info = ExtractWorkerInfo(
+            prepare_file_mode="worker" if worker_available else "inline",
+            build_edges_mode="inline",
+            catalog_symbol_count=max(0, int(catalog_symbol_count)),
+            reason_code=availability_reason_code,
+        )
+        mode = self.config.build_edges_worker_mode
+        if not worker_available:
+            if mode == "force":
+                raise _ExtractWorkerError(
+                    "build_edges worker mode 'force' requires the extract worker, "
+                    f"but it is unavailable ({availability_reason_code})"
+                )
+            return info
+        if mode == "off":
+            info.reason_code = _BUILD_EDGES_REASON_WORKER_MODE_OFF
+            return info
+        if (
+            mode == "auto"
+            and info.catalog_symbol_count >= _BUILD_EDGES_INLINE_CANDIDATE_SYMBOL_THRESHOLD
+        ):
+            info.reason_code = _BUILD_EDGES_REASON_CATALOG_TOO_LARGE
+            return info
+        info.build_edges_mode = "worker"
+        info.reason_code = (
+            _BUILD_EDGES_REASON_WORKER_FORCED
+            if mode == "force"
+            else _BUILD_EDGES_REASON_WORKER_ENABLED
+        )
+        return info
 
     def _build_extract_progress(
         self,
@@ -1067,11 +1243,13 @@ class Indexer:
         self,
         *,
         worker: _ExtractSymbolsWorker | None,
+        use_worker: bool,
         prepared: PreparedFileIndex,
         candidate_symbols: list[Symbol],
+        candidate_symbol_index: CandidateSymbolIndex | None,
         files_done: int,
         files_total: int,
-    ) -> tuple[list[EdgeRecord] | None, int, bool, str | None]:
+    ) -> _BuildEdgesExecution:
         """Run build_edges inline or in the watchdog worker."""
         progress = self._build_extract_progress(
             path=prepared.path,
@@ -1081,18 +1259,25 @@ class Indexer:
         )
         self._publish_extract_progress(progress)
         started = time.perf_counter()
-        if worker is None:
+        if worker is None or not use_worker:
             edges = self._build_graph_edges(
                 path=prepared.path,
                 source=prepared.source,
                 symbols=prepared.symbols,
                 candidate_symbols=candidate_symbols,
+                candidate_symbol_index=candidate_symbol_index,
                 repo_id=prepared.repo_id,
                 commit=prepared.commit,
                 language=prepared.language or "unknown",
                 include_text=self.config.embed_graph_edges,
             )
-            return edges, int((time.perf_counter() - started) * 1000), False, None
+            return _BuildEdgesExecution(
+                edges=edges,
+                edge_ms=int((time.perf_counter() - started) * 1000),
+                timed_out=False,
+                detail=None,
+                use_worker_next=False,
+            )
 
         next_heartbeat = time.monotonic() + _EXTRACT_PROGRESS_HEARTBEAT_SECONDS
         progress_started_at = str(progress["started_at"])
@@ -1113,17 +1298,44 @@ class Indexer:
             next_heartbeat = time.monotonic() + _EXTRACT_PROGRESS_HEARTBEAT_SECONDS
 
         try:
+            worker.prime_build_edges_catalog(
+                candidate_symbols,
+                timeout_seconds=self._extract_timeout_seconds(),
+            )
+        except (_ExtractWorkerError, _ExtractWorkerTimeout):
+            if self.config.build_edges_worker_mode == "force":
+                raise
+            edges = self._build_graph_edges(
+                path=prepared.path,
+                source=prepared.source,
+                symbols=prepared.symbols,
+                candidate_symbols=candidate_symbols,
+                candidate_symbol_index=candidate_symbol_index,
+                repo_id=prepared.repo_id,
+                commit=prepared.commit,
+                language=prepared.language or "unknown",
+                include_text=self.config.embed_graph_edges,
+            )
+            return _BuildEdgesExecution(
+                edges=edges,
+                edge_ms=int((time.perf_counter() - started) * 1000),
+                timed_out=False,
+                detail=None,
+                use_worker_next=False,
+                fallback_reason_code=_BUILD_EDGES_REASON_PRIME_FAILED,
+            )
+        try:
             response = worker.run_job(
                 kind="build_edges",
                 payload={
                     "path": prepared.path,
                     "source": prepared.source,
                     "symbols": prepared.symbols,
-                    "candidate_symbols": candidate_symbols,
                     "repo_id": prepared.repo_id,
                     "commit": prepared.commit,
                     "language": prepared.language or "unknown",
                     "include_text": self.config.embed_graph_edges,
+                    "use_primed_catalog": True,
                 },
                 timeout_seconds=self._extract_timeout_seconds(),
                 on_poll=_heartbeat,
@@ -1135,11 +1347,23 @@ class Indexer:
                 timeout_seconds=exc.timeout_seconds,
                 worker_pid=exc.worker_pid,
             )
-            return None, int((time.perf_counter() - started) * 1000), True, detail
+            return _BuildEdgesExecution(
+                edges=None,
+                edge_ms=int((time.perf_counter() - started) * 1000),
+                timed_out=True,
+                detail=detail,
+                use_worker_next=True,
+            )
         edges = response.get("edges")
         if not isinstance(edges, list):
             raise _ExtractWorkerError("build_edges worker returned an invalid payload")
-        return list(edges), int((time.perf_counter() - started) * 1000), False, None
+        return _BuildEdgesExecution(
+            edges=list(edges),
+            edge_ms=int((time.perf_counter() - started) * 1000),
+            timed_out=False,
+            detail=None,
+            use_worker_next=True,
+        )
 
     def index_repository(self, path: str, *, capture_verbose_metrics: bool = False) -> IndexResult:
         """Index all supported files under a repository root."""
@@ -1189,7 +1413,13 @@ class Indexer:
         terminal_extract_files = 0
         extract_timeout_halted = False
         timed_out_symbol_ids: set[str] = set()
-        worker = _ExtractSymbolsWorker(self.config) if self._can_use_extract_worker() else None
+        worker_available, worker_reason_code = self._extract_worker_availability()
+        worker = _ExtractSymbolsWorker(self.config) if worker_available else None
+        extract_worker_info = self._resolve_extract_worker_info(
+            worker_available=worker_available,
+            availability_reason_code=worker_reason_code,
+            catalog_symbol_count=0,
+        )
 
         try:
             if self._stage_callback is not None:
@@ -1308,19 +1538,35 @@ class Indexer:
                     prepared_candidates,
                     excluded_paths=catalog_excluded_paths,
                 )
+                repo_candidate_symbol_index = CandidateSymbolIndex.from_symbols(repo_symbol_catalog)
+                extract_worker_info = self._resolve_extract_worker_info(
+                    worker_available=worker_available,
+                    availability_reason_code=worker_reason_code,
+                    catalog_symbol_count=len(repo_candidate_symbol_index.symbols),
+                )
+                build_edges_use_worker = extract_worker_info.build_edges_mode == "worker"
                 for prepared in prepared_candidates:
-                    edges, edge_ms, timed_out, timeout_detail = self._build_edges_with_watchdog(
-                        worker=worker,
-                        prepared=prepared,
-                        candidate_symbols=repo_symbol_catalog,
-                        files_done=terminal_extract_files + len(prepared_files),
-                        files_total=total_files,
+                    edge_execution = _coerce_build_edges_execution(
+                        self._build_edges_with_watchdog(
+                            worker=worker,
+                            use_worker=build_edges_use_worker,
+                            prepared=prepared,
+                            candidate_symbols=repo_symbol_catalog,
+                            candidate_symbol_index=repo_candidate_symbol_index,
+                            files_done=terminal_extract_files + len(prepared_files),
+                            files_total=total_files,
+                        ),
+                        use_worker_next=build_edges_use_worker,
                     )
-                    prepared.timing.edge_ms = edge_ms
-                    if timed_out:
+                    build_edges_use_worker = edge_execution.use_worker_next
+                    if edge_execution.fallback_reason_code is not None:
+                        extract_worker_info.build_edges_mode = "inline"
+                        extract_worker_info.reason_code = edge_execution.fallback_reason_code
+                    prepared.timing.edge_ms = edge_execution.edge_ms
+                    if edge_execution.timed_out:
                         prepared.timing.status = "failed"
                         prepared.timing.reason = EXTRACT_SYMBOLS_TIMEOUT_REASON
-                        prepared.timing.detail = timeout_detail
+                        prepared.timing.detail = edge_execution.detail
                         failed_files += 1
                         failed_reasons[EXTRACT_SYMBOLS_TIMEOUT_REASON] = (
                             failed_reasons.get(EXTRACT_SYMBOLS_TIMEOUT_REASON, 0) + 1
@@ -1328,7 +1574,7 @@ class Indexer:
                         if len(failed_samples) < 5:
                             failed_samples.append(
                                 f"{prepared.path}: "
-                                f"{timeout_detail or EXTRACT_SYMBOLS_TIMEOUT_REASON}"
+                                f"{edge_execution.detail or EXTRACT_SYMBOLS_TIMEOUT_REASON}"
                             )
                         timed_out_symbol_ids.update(
                             symbol.id for symbol in prepared.symbols if symbol.id
@@ -1339,7 +1585,7 @@ class Indexer:
                             continue
                         extract_timeout_halted = True
                         break
-                    prepared.edges = edges or []
+                    prepared.edges = edge_execution.edges or []
                     try:
                         self._persist_extract_checkpoint(prepared)
                     except Exception as exc:
@@ -1417,6 +1663,7 @@ class Indexer:
                     parsed_files=parsed_files,
                     source_files=source_files,
                     verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                    extract_worker=extract_worker_info,
                 )
         finally:
             if worker is not None:
@@ -1581,6 +1828,7 @@ class Indexer:
             parsed_files=parsed_files,
             source_files=source_files,
             verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+            extract_worker=extract_worker_info,
         )
 
     @staticmethod
@@ -1614,7 +1862,13 @@ class Indexer:
         """Index a file and return outcome plus shared parse/timing state."""
 
         existing = self.cache.get_file_metadata(path)
-        worker = _ExtractSymbolsWorker(self.config) if self._can_use_extract_worker() else None
+        worker_available, worker_reason_code = self._extract_worker_availability()
+        worker = _ExtractSymbolsWorker(self.config) if worker_available else None
+        extract_worker_info = self._resolve_extract_worker_info(
+            worker_available=worker_available,
+            availability_reason_code=worker_reason_code,
+            catalog_symbol_count=0,
+        )
         try:
             prepared, outcome, timing, _timed_out = self._prepare_file_for_index_with_watchdog(
                 worker=worker,
@@ -1639,35 +1893,51 @@ class Indexer:
                     outcome=outcome,
                     timing=timing,
                     verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                    extract_worker=extract_worker_info,
                 )
 
             candidate_symbols = [
                 symbol for symbol in self.cache.list_symbols() if symbol.file_path != prepared.path
             ]
             candidate_symbols.extend(prepared.symbols)
-            edges, edge_ms, timed_out, timeout_detail = self._build_edges_with_watchdog(
-                worker=worker,
-                prepared=prepared,
-                candidate_symbols=candidate_symbols,
-                files_done=0,
-                files_total=1,
+            candidate_symbol_index = CandidateSymbolIndex.from_symbols(candidate_symbols)
+            extract_worker_info = self._resolve_extract_worker_info(
+                worker_available=worker_available,
+                availability_reason_code=worker_reason_code,
+                catalog_symbol_count=len(candidate_symbol_index.symbols),
             )
-            timing.edge_ms = edge_ms
-            if timed_out:
+            edge_execution = _coerce_build_edges_execution(
+                self._build_edges_with_watchdog(
+                    worker=worker,
+                    use_worker=extract_worker_info.build_edges_mode == "worker",
+                    prepared=prepared,
+                    candidate_symbols=candidate_symbols,
+                    candidate_symbol_index=candidate_symbol_index,
+                    files_done=0,
+                    files_total=1,
+                ),
+                use_worker_next=extract_worker_info.build_edges_mode == "worker",
+            )
+            if edge_execution.fallback_reason_code is not None:
+                extract_worker_info.build_edges_mode = "inline"
+                extract_worker_info.reason_code = edge_execution.fallback_reason_code
+            timing.edge_ms = edge_execution.edge_ms
+            if edge_execution.timed_out:
                 timing.status = "failed"
                 timing.reason = EXTRACT_SYMBOLS_TIMEOUT_REASON
-                timing.detail = timeout_detail
+                timing.detail = edge_execution.detail
                 return FileIndexExecution(
                     outcome=FileIndexOutcome(
                         status="failed",
                         source_line_count=prepared.snapshot.span_index.line_count,
                         reason=EXTRACT_SYMBOLS_TIMEOUT_REASON,
-                        detail=timeout_detail,
+                        detail=edge_execution.detail,
                     ),
                     timing=timing,
                     verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                    extract_worker=extract_worker_info,
                 )
-            prepared.edges = edges or []
+            prepared.edges = edge_execution.edges or []
 
             try:
                 embed_started = time.perf_counter()
@@ -1699,6 +1969,7 @@ class Indexer:
                     prepared=prepared,
                     timing=timing,
                     verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                    extract_worker=extract_worker_info,
                 )
 
             timing.status = "indexed"
@@ -1717,6 +1988,7 @@ class Indexer:
                 prepared=prepared,
                 timing=timing,
                 verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                extract_worker=extract_worker_info,
             )
         finally:
             if worker is not None:
@@ -2421,7 +2693,8 @@ class Indexer:
         path: str,
         source: str,
         symbols: list[Symbol],
-        candidate_symbols: list[Symbol],
+        candidate_symbols: list[Symbol] | None,
+        candidate_symbol_index: CandidateSymbolIndex | None,
         repo_id: str,
         commit: str,
         language: str,
@@ -2434,6 +2707,7 @@ class Indexer:
             source=source,
             symbols=symbols,
             candidate_symbols=candidate_symbols,
+            candidate_symbol_index=candidate_symbol_index,
             repo_id=repo_id,
             commit=commit,
             include_text=include_text,

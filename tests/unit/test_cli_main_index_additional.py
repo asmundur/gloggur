@@ -87,6 +87,7 @@ def _fake_directory_result(
     failed: int = 0,
     failed_reasons: dict[str, int] | None = None,
     failed_samples: list[str] | None = None,
+    extract_worker: object | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         failed=failed,
@@ -110,6 +111,7 @@ def _fake_directory_result(
             "consistency_checks": 2,
         },
         file_timings=[],
+        extract_worker=extract_worker,
         as_payload=lambda: {
             "files_considered": 1,
             "indexed": 1,
@@ -128,6 +130,7 @@ def _fake_execution(
     status: str = "indexed",
     reason: str | None = None,
     detail: str | None = None,
+    extract_worker: object | None = None,
 ) -> SimpleNamespace:
     timing = SimpleNamespace(
         parse_ms=2,
@@ -148,7 +151,12 @@ def _fake_execution(
         detail=detail,
     )
     prepared = SimpleNamespace(snapshot=object())
-    return SimpleNamespace(outcome=outcome, timing=timing, prepared=prepared)
+    return SimpleNamespace(
+        outcome=outcome,
+        timing=timing,
+        prepared=prepared,
+        extract_worker=extract_worker,
+    )
 
 
 @contextmanager
@@ -332,6 +340,67 @@ def test_index_directory_ignores_non_mapping_failure_reasons_and_non_list_sample
     assert payload["failed"] == 2
     assert payload["failed_reasons"] == {"repo_error": 1}
     assert payload["failed_samples"] == ["repo-error-sample"]
+
+
+def test_index_directory_surfaces_extract_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = GloggurConfig(cache_dir=str(tmp_path / "cache"), embedding_provider="test")
+    active_cache = _FakeActiveCache(tmp_path / "staged")
+    stage_cache = _FakeStageCache()
+    extract_worker = SimpleNamespace(
+        prepare_file_mode="worker",
+        build_edges_mode="inline",
+        catalog_symbol_count=7000,
+        reason_code="candidate_catalog_too_large",
+    )
+
+    class FakeIndexer:
+        def __init__(self, **_kwargs: object) -> None:
+            self._stage_callback = None
+            self._scan_callback = None
+            self._progress_callback = None
+
+        def index_repository(self, _path: str, **_kwargs: object) -> SimpleNamespace:
+            return _fake_directory_result(extract_worker=extract_worker)
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
+    monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
+    monkeypatch.setattr(
+        cli_main,
+        "_initialize_runtime",
+        lambda stage_config, **_kwargs: (stage_config, stage_cache, object()),
+    )
+    monkeypatch.setattr(cli_main, "ParserRegistry", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_main, "Indexer", FakeIndexer)
+    monkeypatch.setattr(
+        cli_main,
+        "_run_symbol_index",
+        lambda **_kwargs: {"failed": 0, "duration_ms": 0},
+    )
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
+
+    result = runner.invoke(cli_main.cli, ["index", str(repo), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["extract_worker"] == {
+        "prepare_file_mode": "worker",
+        "build_edges_mode": "inline",
+        "catalog_symbol_count": 7000,
+        "reason_code": "candidate_catalog_too_large",
+    }
 
 
 @pytest.mark.parametrize(
@@ -630,6 +699,85 @@ def test_index_single_file_debug_timings_adds_slow_file_and_missing_integrity_ma
     assert vector_cache["status"] == "missing"
     assert vector_cache["reason_codes"] == ["vector_integrity_missing"]
     assert vector_store.saved == 1
+
+
+def test_index_single_file_surfaces_extract_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    target = tmp_path / "sample.py"
+    target.write_text("def sample() -> None:\n    pass\n", encoding="utf8")
+    config = GloggurConfig(cache_dir=str(tmp_path / "cache"), embedding_provider="test")
+    active_cache = _FakeActiveCache(tmp_path / "staged")
+    stage_cache = _FakeStageCache()
+
+    class FakeVectorStore:
+        def save(self) -> None:
+            pass
+
+    vector_store = FakeVectorStore()
+    extract_worker = SimpleNamespace(
+        prepare_file_mode="worker",
+        build_edges_mode="worker",
+        catalog_symbol_count=4,
+        reason_code="worker_forced",
+    )
+
+    class FakeIndexer:
+        def __init__(self, **_kwargs: object) -> None:
+            self._stage_callback = None
+            self._scan_callback = None
+            self._progress_callback = None
+
+        def index_file_with_details(self, _path: str, **_kwargs: object) -> SimpleNamespace:
+            return _fake_execution(status="indexed", extract_worker=extract_worker)
+
+        def prune_missing_file_entries(self) -> dict[str, object]:
+            return {
+                "files_removed": 0,
+                "symbols_removed": 0,
+                "failed": 0,
+                "failed_reasons": {},
+                "failed_samples": [],
+            }
+
+        def validate_vector_metadata_consistency(self) -> dict[str, object]:
+            return {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
+    monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
+    monkeypatch.setattr(
+        cli_main,
+        "_initialize_runtime",
+        lambda stage_config, **_kwargs: (stage_config, stage_cache, vector_store),
+    )
+    monkeypatch.setattr(cli_main, "ParserRegistry", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_main, "Indexer", FakeIndexer)
+    monkeypatch.setattr(
+        cli_main,
+        "_run_symbol_index",
+        lambda **_kwargs: {"failed": 0, "duration_ms": 0},
+    )
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
+
+    result = runner.invoke(cli_main.cli, ["index", str(target), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["extract_worker"] == {
+        "prepare_file_mode": "worker",
+        "build_edges_mode": "worker",
+        "catalog_symbol_count": 4,
+        "reason_code": "worker_forced",
+    }
 
 
 def test_index_interrupt_handler_marks_build_interrupted_and_terminates_children(

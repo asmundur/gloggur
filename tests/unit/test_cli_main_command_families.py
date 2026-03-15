@@ -1115,6 +1115,46 @@ def test_init_text_decline_returns_incomplete_access_failure(tmp_path: Path) -> 
     assert not (repo / ".gloggur-cache").exists()
 
 
+def _make_ready_repo_missing_access_marker(repo: Path) -> None:
+    (repo / ".gloggur").mkdir(parents=True, exist_ok=True)
+    (repo / ".gloggur-cache").mkdir(parents=True, exist_ok=True)
+    (repo / ".gloggur" / "config.toml").write_text("[support]\nenabled = true\n", encoding="utf8")
+
+
+def test_init_json_repairs_missing_access_marker_for_ready_repo(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _make_ready_repo_missing_access_marker(repo)
+
+    result = runner.invoke(cli_main.cli, ["init", str(repo), "--yes", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["initialized"] is True
+    assert payload["access_ready"] is True
+    assert payload["access_result"] is None
+    assert (repo / ".gloggur" / "access_grants.json").exists()
+
+
+def test_init_json_no_grant_access_repairs_missing_access_marker_for_ready_repo(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _make_ready_repo_missing_access_marker(repo)
+
+    result = runner.invoke(cli_main.cli, ["init", str(repo), "--no-grant-access", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["initialized"] is True
+    assert payload["access_ready"] is True
+    assert payload["access_result"] is None
+    assert (repo / ".gloggur" / "access_grants.json").exists()
+
+
 def test_access_plan_json_returns_deterministic_plan(tmp_path: Path) -> None:
     runner = CliRunner()
     repo = tmp_path / "repo"
@@ -1156,6 +1196,38 @@ def test_access_grant_json_yes_applies_and_persists_result(tmp_path: Path) -> No
     assert payload["access_ready"] is True
     assert payload["access_result"]["access_ready"] is True
     assert (repo / ".gloggur-cache").exists()
+    assert (repo / ".gloggur" / "access_grants.json").exists()
+
+
+def test_access_grant_json_yes_repairs_missing_access_marker_for_ready_repo(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _make_ready_repo_missing_access_marker(repo)
+
+    result = runner.invoke(cli_main.cli, ["access", "grant", str(repo), "--yes", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["access_ready"] is True
+    assert payload["access_result"] is None
+    assert (repo / ".gloggur" / "access_grants.json").exists()
+
+
+def test_access_grant_json_without_yes_repairs_missing_access_marker_for_ready_repo(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _make_ready_repo_missing_access_marker(repo)
+
+    result = runner.invoke(cli_main.cli, ["access", "grant", str(repo), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["access_ready"] is True
+    assert payload["access_result"] is None
     assert (repo / ".gloggur" / "access_grants.json").exists()
 
 

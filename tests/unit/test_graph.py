@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from gloggur.embeddings.base import EmbeddingProvider
-from gloggur.graph.extractor import GraphEdgeExtractor
+from gloggur.graph.extractor import CandidateSymbolIndex, GraphEdgeExtractor
 from gloggur.graph.service import GraphService
 from gloggur.models import EdgeRecord, Symbol
 
@@ -88,6 +88,66 @@ def test_graph_edge_extractor_emits_core_edge_types_with_unresolved_fallback() -
     assert any(
         edge.from_id == "sym-test-target" and edge.to_id == "sym-target" for edge in test_edges
     )
+
+
+def test_candidate_symbol_index_matches_raw_catalog_edge_output() -> None:
+    extractor = GraphEdgeExtractor("python")
+    helper = _symbol(
+        symbol_id="sym-helper",
+        name="helper",
+        fqname="sample.helper",
+        file_path="sample.py",
+        start_line=3,
+        end_line=4,
+    )
+    target = _symbol(
+        symbol_id="sym-target",
+        name="target",
+        fqname="sample.target",
+        file_path="sample.py",
+        start_line=6,
+        end_line=8,
+        calls=["helper", "tests.test_sample.test_target"],
+        covered_by=["test_target"],
+    )
+    test_symbol = _symbol(
+        symbol_id="sym-test-target",
+        name="test_target",
+        fqname="tests.test_sample.test_target",
+        file_path="tests/test_sample.py",
+        start_line=1,
+        end_line=2,
+    )
+    candidate_symbols = [helper, target, test_symbol]
+    source = (
+        "import math\n\n"
+        "def helper(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def target(value: int) -> int:\n"
+        "    computed = helper(value)\n"
+        "    return tests.test_sample.test_target(computed)\n"
+    )
+
+    raw_edges = extractor.extract_edges(
+        path="sample.py",
+        source=source,
+        symbols=[helper, target],
+        candidate_symbols=candidate_symbols,
+        repo_id="repo-1",
+        commit="abc123",
+    )
+    indexed_edges = extractor.extract_edges(
+        path="sample.py",
+        source=source,
+        symbols=[helper, target],
+        candidate_symbol_index=CandidateSymbolIndex.from_symbols(candidate_symbols),
+        repo_id="repo-1",
+        commit="abc123",
+    )
+
+    assert [edge.model_dump() for edge in indexed_edges] == [
+        edge.model_dump() for edge in raw_edges
+    ]
 
 
 class _FakeMetadataStore:

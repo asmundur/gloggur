@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import sys
 
-from scripts.run_edge_bench import BenchmarkMetric, _apply_baseline_contract, _new_runner
+import pytest
+
+from scripts.run_edge_bench import (
+    BenchmarkMetric,
+    _apply_baseline_contract,
+    _new_runner,
+    _parse_env_overrides,
+)
 
 
 def test_apply_baseline_contract_adds_thresholds_and_comparisons() -> None:
@@ -78,3 +85,17 @@ def test_benchmark_runner_pins_test_embedding_provider_env() -> None:
     assert runner.env is not None
     assert runner.env.get("GLOGGUR_EMBEDDING_PROVIDER") == "test"
     assert "GLOGGUR_LOCAL_FALLBACK" not in runner.env
+
+
+def test_benchmark_runner_merges_extra_env_overrides() -> None:
+    runner = _new_runner(
+        "/tmp/gloggur-cache-test",
+        extra_env={"GLOGGUR_BUILD_EDGES_WORKER_MODE": "off"},
+    )
+    assert runner.env is not None
+    assert runner.env["GLOGGUR_BUILD_EDGES_WORKER_MODE"] == "off"
+
+
+def test_parse_env_overrides_rejects_invalid_format() -> None:
+    with pytest.raises(ValueError, match="KEY=VALUE"):
+        _parse_env_overrides(["BROKEN"])
