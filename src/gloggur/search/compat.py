@@ -3,6 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 
+def _legacy_query_intent(summary: dict[str, object]) -> str:
+    """Map router strategies onto the older search metadata contract."""
+    strategy = summary.get("strategy")
+    if strategy == "symbol":
+        return "exact"
+    if isinstance(strategy, str) and strategy:
+        return strategy
+    return "auto"
+
+
 def attach_legacy_search_contract(payload: dict[str, object]) -> dict[str, object]:
     """Attach legacy `results`/`metadata` views for internal migrations.
 
@@ -95,7 +105,7 @@ def attach_legacy_search_contract(payload: dict[str, object]) -> dict[str, objec
         "low_confidence": bool(results == [] or (threshold > 0.0 and top_score < threshold)),
         "grounding_validation_enabled": False,
         "grounding_validation_passed": None,
-        "query_intent": summary.get("strategy", "auto"),
+        "query_intent": _legacy_query_intent(summary),
         "explicit_test_intent": False,
         "test_penalty_applied": False,
         "tool_version": summary.get("tool_version"),

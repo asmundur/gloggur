@@ -84,6 +84,7 @@ def test_error_catalog_contract_passes_when_required_headings_and_codes_exist(
                 "`read_error`",
                 "`parser_unavailable`",
                 "`parse_error`",
+                "`extract_symbols_timeout`",
                 "`storage_error`",
                 "`embedding_provider_error`",
                 "`stale_cleanup_error`",

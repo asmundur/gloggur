@@ -58,6 +58,7 @@ class _FakeStageCache:
         self.metadata_cleared = 0
         self.index_metadata = None
         self.index_profile = None
+        self.clear_build_file_checkpoints_calls = 0
 
     def delete_index_metadata(self) -> None:
         self.metadata_cleared += 1
@@ -76,6 +77,9 @@ class _FakeStageCache:
 
     def set_index_profile(self, profile: str) -> None:
         self.index_profile = profile
+
+    def clear_build_file_checkpoints(self) -> None:
+        self.clear_build_file_checkpoints_calls += 1
 
 
 def _fake_directory_result(
@@ -169,7 +173,7 @@ def test_index_directory_merges_symbol_failures_and_caps_samples(
             self._scan_callback = None
             self._progress_callback = None
 
-        def index_repository(self, _path: str) -> SimpleNamespace:
+        def index_repository(self, _path: str, **_kwargs: object) -> SimpleNamespace:
             return _fake_directory_result(
                 failed_samples=[
                     "repo-1",
@@ -219,6 +223,56 @@ def test_index_directory_merges_symbol_failures_and_caps_samples(
     assert active_cache.publish_calls == []
 
 
+def test_index_directory_clears_stage_checkpoints_before_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = GloggurConfig(cache_dir=str(tmp_path / "cache"), embedding_provider="test")
+    active_cache = _FakeActiveCache(tmp_path / "staged")
+    stage_cache = _FakeStageCache()
+
+    class FakeIndexer:
+        def __init__(self, **_kwargs: object) -> None:
+            self._stage_callback = None
+            self._scan_callback = None
+            self._progress_callback = None
+
+        def index_repository(self, _path: str, **_kwargs: object) -> SimpleNamespace:
+            return _fake_directory_result()
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
+    monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
+    monkeypatch.setattr(
+        cli_main,
+        "_initialize_runtime",
+        lambda stage_config, **_kwargs: (stage_config, stage_cache, object()),
+    )
+    monkeypatch.setattr(cli_main, "ParserRegistry", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_main, "Indexer", FakeIndexer)
+    monkeypatch.setattr(
+        cli_main,
+        "_run_symbol_index",
+        lambda **_kwargs: {"failed": 0, "duration_ms": 0},
+    )
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
+
+    result = runner.invoke(cli_main.cli, ["index", str(repo), "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert stage_cache.clear_build_file_checkpoints_calls == 1
+    assert len(active_cache.publish_calls) == 1
+
+
 def test_index_directory_ignores_non_mapping_failure_reasons_and_non_list_samples(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -236,7 +290,7 @@ def test_index_directory_ignores_non_mapping_failure_reasons_and_non_list_sample
             self._scan_callback = None
             self._progress_callback = None
 
-        def index_repository(self, _path: str) -> SimpleNamespace:
+        def index_repository(self, _path: str, **_kwargs: object) -> SimpleNamespace:
             return _fake_directory_result(
                 failed=1,
                 failed_reasons={"repo_error": 1},
@@ -314,7 +368,7 @@ def test_index_cli_overrides_embed_graph_edges_flag(
             self._scan_callback = None
             self._progress_callback = None
 
-        def index_repository(self, _path: str) -> SimpleNamespace:
+        def index_repository(self, _path: str, **_kwargs: object) -> SimpleNamespace:
             return _fake_directory_result()
 
     monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
@@ -383,7 +437,7 @@ def test_index_single_file_noops_for_excluded_or_unsupported_paths(
             self._scan_callback = None
             self._progress_callback = None
 
-        def index_file_with_details(self, _path: str) -> SimpleNamespace:
+        def index_file_with_details(self, _path: str, **_kwargs: object) -> SimpleNamespace:
             raise AssertionError("single-file indexing should not run for skipped files")
 
         def prune_missing_file_entries(self) -> dict[str, object]:
@@ -422,7 +476,7 @@ def test_index_single_file_noops_for_excluded_or_unsupported_paths(
     assert payload["files_considered"] == 0
     assert payload["failed"] == 0
     assert payload["indexed"] == 0
-    assert symbol_calls[0]["file_paths"] is None
+    assert symbol_calls == []
 
 
 def test_index_single_file_warns_on_skipped_extensions_when_enabled(
@@ -448,7 +502,7 @@ def test_index_single_file_warns_on_skipped_extensions_when_enabled(
             self._scan_callback = None
             self._progress_callback = None
 
-        def index_file_with_details(self, _path: str) -> SimpleNamespace:
+        def index_file_with_details(self, _path: str, **_kwargs: object) -> SimpleNamespace:
             raise AssertionError("single-file indexing should not run for skipped files")
 
         def prune_missing_file_entries(self) -> dict[str, object]:
@@ -497,7 +551,7 @@ def test_index_single_file_warns_on_skipped_extensions_when_enabled(
     assert diagnostics["by_extension"] == {".txt": 1}
     assert str(target) in diagnostics["sample_paths"]
     assert payload["warning_codes"] == ["unsupported_extensions_skipped"]
-    assert symbol_calls[0]["file_paths"] is None
+    assert symbol_calls == []
 
 
 def test_index_single_file_debug_timings_adds_slow_file_and_missing_integrity_marker(
@@ -526,7 +580,7 @@ def test_index_single_file_debug_timings_adds_slow_file_and_missing_integrity_ma
             self._scan_callback = None
             self._progress_callback = None
 
-        def index_file_with_details(self, _path: str) -> SimpleNamespace:
+        def index_file_with_details(self, _path: str, **_kwargs: object) -> SimpleNamespace:
             return _fake_execution(status="indexed")
 
         def prune_missing_file_entries(self) -> dict[str, object]:
@@ -597,7 +651,7 @@ def test_index_interrupt_handler_marks_build_interrupted_and_terminates_children
             self._scan_callback = None
             self._progress_callback = None
 
-        def index_repository(self, _path: str) -> SimpleNamespace:
+        def index_repository(self, _path: str, **_kwargs: object) -> SimpleNamespace:
             return _fake_directory_result()
 
     @contextmanager
@@ -645,3 +699,107 @@ def test_index_interrupt_handler_marks_build_interrupted_and_terminates_children
         call["state"] == "interrupted" and call["stage"] == "scan_source"
         for call in build_state_calls
     )
+
+
+def test_index_directory_extract_timeout_preserves_progress_and_skips_symbol_index(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = GloggurConfig(cache_dir=str(tmp_path / "cache"), embedding_provider="test")
+    active_cache = _FakeActiveCache(tmp_path / "staged")
+    stage_cache = _FakeStageCache()
+    progress = {
+        "current_file": "hang.py",
+        "subphase": "prepare_file",
+        "files_done": 1,
+        "files_total": 3,
+        "started_at": "2026-03-14T10:00:00+00:00",
+        "updated_at": "2026-03-14T10:00:05+00:00",
+    }
+
+    class FakeIndexer:
+        def __init__(self, **_kwargs: object) -> None:
+            self._stage_callback = None
+            self._scan_callback = None
+            self._progress_callback = None
+            self._extract_progress_callback = None
+            self._allow_partial_failures = False
+
+        def index_repository(self, _path: str, **_kwargs: object) -> SimpleNamespace:
+            if self._stage_callback is not None:
+                self._stage_callback("extract_symbols")
+            assert self._extract_progress_callback is not None
+            self._extract_progress_callback(progress)
+            return SimpleNamespace(
+                failed=1,
+                failed_reasons={"extract_symbols_timeout": 1},
+                failed_samples=["hang.py: prepare_file timed out"],
+                files_considered=2,
+                indexed_symbols=0,
+                files_changed=0,
+                files_removed=0,
+                symbols_removed=0,
+                parsed_files=[],
+                source_files=["hang.py", "ok.py"],
+                duration_ms=12,
+                phase_timings_ms={
+                    "scan_source": 1,
+                    "extract_symbols": 8,
+                    "embed_chunks": 0,
+                    "persist_cache": 0,
+                    "validate_integrity": 0,
+                    "cleanup": 0,
+                    "consistency_checks": 0,
+                },
+                file_timings=[SimpleNamespace(path="hang.py", reason="extract_symbols_timeout")],
+                as_payload=lambda: {
+                    "files_considered": 2,
+                    "indexed": 0,
+                    "unchanged": 0,
+                    "indexed_files": 0,
+                    "indexed_symbols": 0,
+                    "failed": 1,
+                    "failed_reasons": {"extract_symbols_timeout": 1},
+                    "failed_samples": ["hang.py: prepare_file timed out"],
+                },
+            )
+
+    monkeypatch.setattr(cli_main, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(cli_main, "_warm_embedding_provider", lambda _embedding: {})
+    monkeypatch.setattr(cli_main, "cache_write_lock", _no_lock)
+    monkeypatch.setattr(cli_main, "_create_cache_manager", lambda _dir: active_cache)
+    monkeypatch.setattr(
+        cli_main,
+        "_initialize_runtime",
+        lambda stage_config, **_kwargs: (stage_config, stage_cache, object()),
+    )
+    monkeypatch.setattr(cli_main, "ParserRegistry", lambda **_kwargs: object())
+    monkeypatch.setattr(cli_main, "Indexer", FakeIndexer)
+    monkeypatch.setattr(
+        cli_main,
+        "_run_symbol_index",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("symbol index should not run")),
+    )
+    monkeypatch.setattr(
+        cli_main, "_persist_last_success_resume_state", lambda *args, **kwargs: None
+    )
+
+    result = runner.invoke(cli_main.cli, ["index", str(repo), "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = _payload(result.output)
+    assert payload["failure_codes"] == ["extract_symbols_timeout"]
+    stage_status = {entry["name"]: entry["status"] for entry in payload["stages"]}
+    assert stage_status["update_symbol_index"] == "not_run"
+    assert stage_status["commit_metadata"] == "not_run"
+    interrupted_payloads = [
+        item for item in active_cache.build_state_payloads if item["state"] == "interrupted"
+    ]
+    assert interrupted_payloads
+    assert interrupted_payloads[-1]["progress"] == progress

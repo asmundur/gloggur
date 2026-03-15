@@ -141,6 +141,15 @@ def test_load_env_watch_values(monkeypatch) -> None:
     assert config.watch_log_file == "/tmp/watch.log"
 
 
+def test_load_env_extract_symbols_timeout_value(monkeypatch) -> None:
+    """Config loads the extract-symbols watchdog timeout from the environment."""
+    monkeypatch.setenv("GLOGGUR_EXTRACT_SYMBOLS_TIMEOUT_SECONDS", "7.5")
+
+    config = GloggurConfig.load(path=None)
+
+    assert config.extract_symbols_timeout_seconds == 7.5
+
+
 def test_load_env_invalid_watch_debounce_keeps_default(monkeypatch) -> None:
     """Invalid debounce env should not override the default value."""
     monkeypatch.setenv("GLOGGUR_WATCH_DEBOUNCE_MS", "not-a-number")

@@ -27,7 +27,7 @@ LAST_SUCCESS_RESUME_FINGERPRINT_KEY = "last_success_resume_fingerprint"
 LAST_SUCCESS_RESUME_AT_KEY = "last_success_resume_at"
 LAST_SUCCESS_TOOL_VERSION_KEY = "last_success_tool_version"
 SEARCH_INTEGRITY_KEY = "search_integrity"
-CACHE_SCHEMA_VERSION = "7"
+CACHE_SCHEMA_VERSION = "9"
 SQLITE_BUSY_TIMEOUT_MS = 5_000
 SQLITE_CONNECT_TIMEOUT_SECONDS = SQLITE_BUSY_TIMEOUT_MS / 1000
 SQLITE_JOURNAL_MODE = "WAL"
@@ -35,6 +35,12 @@ SQLITE_SYNCHRONOUS = "NORMAL"
 BUILD_STATE_FILE_NAME = ".build-state.json"
 BUILD_STAGING_DIR_NAME = ".builds"
 BUILD_RESUME_MANIFEST_FILE_NAME = "resume-manifest.json"
+BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE = "extract_complete"
+BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE = "embedded_complete"
+BUILD_FILE_CHECKPOINT_STATES = {
+    BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+    BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
+}
 MANAGED_CACHE_ARTIFACT_NAMES = (
     "index.db",
     "index.db-wal",
@@ -45,11 +51,48 @@ MANAGED_CACHE_ARTIFACT_NAMES = (
 )
 BUILD_STATE_STATES = {"building", "interrupted"}
 
+
+def _normalize_extract_progress_payload(payload: object) -> dict[str, object] | None:
+    """Normalize additive extract-progress metadata or return None when invalid."""
+    if not isinstance(payload, dict):
+        return None
+
+    def _optional_string(value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    current_file = _optional_string(payload.get("current_file"))
+    subphase = _optional_string(payload.get("subphase"))
+    if current_file is None or subphase not in {"prepare_file", "build_edges"}:
+        return None
+
+    def _non_negative_int(value: object) -> int:
+        try:
+            normalized = int(value or 0)
+        except (TypeError, ValueError):
+            normalized = 0
+        return max(0, normalized)
+
+    started_at = _optional_string(payload.get("started_at"))
+    updated_at = _optional_string(payload.get("updated_at"))
+    return {
+        "current_file": current_file,
+        "subphase": subphase,
+        "files_done": _non_negative_int(payload.get("files_done")),
+        "files_total": _non_negative_int(payload.get("files_total")),
+        "started_at": started_at,
+        "updated_at": updated_at,
+    }
+
+
 REQUIRED_TABLES = {
     "files",
     "symbols",
     "chunks",
     "edges",
+    "build_file_checkpoints",
     "metadata",
     "audits",
     "audit_files",
@@ -118,6 +161,22 @@ REQUIRED_COLUMNS = {
         "text",
         "embedding_vector",
     },
+    "build_file_checkpoints": {
+        "path",
+        "state",
+        "content_hash",
+        "mtime_ns",
+        "size_bytes",
+        "language",
+        "symbol_count",
+        "chunk_count",
+        "edge_count",
+        "symbols_added",
+        "symbols_updated",
+        "symbols_removed",
+        "created_at",
+        "updated_at",
+    },
     "metadata": {"key", "value"},
     "audits": {"symbol_id", "warnings", "file_path"},
     "audit_files": {"path", "content_hash", "last_audited"},
@@ -143,6 +202,26 @@ class CacheConfig:
     def db_path(self) -> str:
         """Return the path to the SQLite index database."""
         return os.path.join(self.cache_dir, "index.db")
+
+
+@dataclass(frozen=True)
+class BuildFileCheckpoint:
+    """Build-scoped per-file checkpoint summary used for staged-build resume."""
+
+    path: str
+    state: str
+    content_hash: str
+    mtime_ns: int | None
+    size_bytes: int | None
+    language: str | None
+    symbol_count: int
+    chunk_count: int
+    edge_count: int
+    symbols_added: int
+    symbols_updated: int
+    symbols_removed: int
+    created_at: str
+    updated_at: str
 
 
 class CacheManager:
@@ -293,6 +372,22 @@ class CacheManager:
                     text TEXT,
                     embedding_vector TEXT
                 );
+                CREATE TABLE IF NOT EXISTS build_file_checkpoints (
+                    path TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    mtime_ns INTEGER,
+                    size_bytes INTEGER,
+                    language TEXT,
+                    symbol_count INTEGER NOT NULL,
+                    chunk_count INTEGER NOT NULL,
+                    edge_count INTEGER NOT NULL,
+                    symbols_added INTEGER NOT NULL,
+                    symbols_updated INTEGER NOT NULL,
+                    symbols_removed INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -319,6 +414,8 @@ class CacheManager:
                 CREATE INDEX IF NOT EXISTS idx_edges_to_id ON edges (to_id);
                 CREATE INDEX IF NOT EXISTS idx_edges_type ON edges (edge_type);
                 CREATE INDEX IF NOT EXISTS idx_edges_file_path ON edges (file_path);
+                CREATE INDEX IF NOT EXISTS idx_build_file_checkpoints_state
+                    ON build_file_checkpoints (state);
                 """)
             conn.execute(
                 """
@@ -465,6 +562,157 @@ class CacheManager:
             "embedded_edge_vectors": embedded_edge_vectors,
             "embedded_vector_count": embedded_symbol_vectors + embedded_edge_vectors,
         }
+
+    def get_build_checkpoint_stats(self) -> dict[str, int]:
+        """Return build-local resume checkpoint counts for the staged cache."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS extract_completed_files,
+                    SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS embedded_completed_files,
+                    SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS pending_embed_files
+                FROM build_file_checkpoints
+                """
+                ,
+                (
+                    BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
+                    BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+                ),
+            ).fetchone()
+        return {
+            "extract_completed_files": int((row["extract_completed_files"] if row else 0) or 0),
+            "embedded_completed_files": int((row["embedded_completed_files"] if row else 0) or 0),
+            "pending_embed_files": int((row["pending_embed_files"] if row else 0) or 0),
+        }
+
+    def get_build_file_checkpoint(self, path: str) -> BuildFileCheckpoint | None:
+        """Return one build-scoped file checkpoint summary."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM build_file_checkpoints WHERE path = ?",
+                (path,),
+            ).fetchone()
+            return self._row_to_build_file_checkpoint(row) if row is not None else None
+
+    def list_build_file_checkpoints(
+        self,
+        *,
+        states: Iterable[str] | None = None,
+    ) -> list[BuildFileCheckpoint]:
+        """Return checkpoint summaries ordered by state and path."""
+        normalized_states = self._normalize_build_file_checkpoint_states(states)
+        query = "SELECT * FROM build_file_checkpoints"
+        params: list[object] = []
+        if normalized_states:
+            placeholders = ", ".join("?" for _ in normalized_states)
+            query += f" WHERE state IN ({placeholders})"
+            params.extend(normalized_states)
+        query += " ORDER BY updated_at, path"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_to_build_file_checkpoint(row) for row in rows]
+
+    def upsert_build_file_checkpoint(
+        self,
+        *,
+        path: str,
+        state: str,
+        content_hash: str,
+        mtime_ns: int | None,
+        size_bytes: int | None,
+        language: str | None,
+        symbol_count: int,
+        chunk_count: int,
+        edge_count: int,
+        symbols_added: int,
+        symbols_updated: int,
+        symbols_removed: int,
+    ) -> BuildFileCheckpoint:
+        """Persist or replace one build-scoped extract checkpoint summary."""
+        normalized_state = self._normalize_build_file_checkpoint_state(state)
+        if normalized_state is None:
+            raise ValueError(f"invalid build checkpoint state: {state!r}")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT created_at FROM build_file_checkpoints WHERE path = ?",
+                (path,),
+            ).fetchone()
+            created_at = str(existing["created_at"]) if existing else timestamp
+            conn.execute(
+                """
+                INSERT INTO build_file_checkpoints (
+                    path, state, content_hash, mtime_ns, size_bytes, language,
+                    symbol_count, chunk_count, edge_count,
+                    symbols_added, symbols_updated, symbols_removed,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    state = excluded.state,
+                    content_hash = excluded.content_hash,
+                    mtime_ns = excluded.mtime_ns,
+                    size_bytes = excluded.size_bytes,
+                    language = excluded.language,
+                    symbol_count = excluded.symbol_count,
+                    chunk_count = excluded.chunk_count,
+                    edge_count = excluded.edge_count,
+                    symbols_added = excluded.symbols_added,
+                    symbols_updated = excluded.symbols_updated,
+                    symbols_removed = excluded.symbols_removed,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    path,
+                    normalized_state,
+                    content_hash,
+                    mtime_ns,
+                    size_bytes,
+                    language,
+                    max(0, int(symbol_count)),
+                    max(0, int(chunk_count)),
+                    max(0, int(edge_count)),
+                    max(0, int(symbols_added)),
+                    max(0, int(symbols_updated)),
+                    max(0, int(symbols_removed)),
+                    created_at,
+                    timestamp,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM build_file_checkpoints WHERE path = ?",
+                (path,),
+            ).fetchone()
+        assert row is not None
+        return self._row_to_build_file_checkpoint(row)
+
+    def mark_build_file_checkpoint_embedded(self, path: str) -> None:
+        """Mark one checkpointed file as fully embedded in the staged canonical cache."""
+        updated_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE build_file_checkpoints
+                SET state = ?, updated_at = ?
+                WHERE path = ?
+                """,
+                (
+                    BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
+                    updated_at,
+                    path,
+                ),
+            )
+
+    def delete_build_file_checkpoint(self, path: str) -> None:
+        """Delete one checkpoint summary row."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM build_file_checkpoints WHERE path = ?", (path,))
+
+    def clear_build_file_checkpoints(self) -> None:
+        """Delete all build-scoped checkpoint summary rows."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM build_file_checkpoints")
 
     def list_file_paths(self) -> list[str]:
         """Return all indexed file paths in deterministic order."""
@@ -856,6 +1104,7 @@ class CacheManager:
         """Clear all cached data."""
         with self._connect() as conn:
             conn.executescript("""
+                DELETE FROM build_file_checkpoints;
                 DELETE FROM audits;
                 DELETE FROM audit_files;
                 DELETE FROM edges;
@@ -918,8 +1167,7 @@ class CacheManager:
 
     def get_build_state(self) -> dict[str, object] | None:
         """Return normalized build-state metadata, inferring stale staged builds when needed."""
-        payload = self._read_json_file(self.build_state_path)
-        normalized = self._normalize_build_state(payload)
+        normalized = self.get_persisted_build_state()
         staged_builds = self.list_staged_build_ids()
         if normalized is None:
             if not staged_builds:
@@ -946,6 +1194,11 @@ class CacheManager:
         elif normalized["state"] == "interrupted" and active_build_id in staged_builds:
             normalized["cleanup_pending"] = True
         return normalized
+
+    def get_persisted_build_state(self) -> dict[str, object] | None:
+        """Return only the persisted build-state sidecar without staged-build inference."""
+        payload = self._read_json_file(self.build_state_path)
+        return self._normalize_build_state(payload)
 
     def write_build_state(self, payload: dict[str, object]) -> dict[str, object]:
         """Persist normalized build-state metadata outside the active SQLite database."""
@@ -1149,15 +1402,26 @@ class CacheManager:
                 "chunks": 0,
                 "embedded_chunks": 0,
                 "embedded_edges": 0,
+                "extract_completed_files": 0,
+                "embedded_completed_files": 0,
+                "pending_embed_files": 0,
             }
         stage_cache = CacheManager(CacheConfig(stage_dir))
         stats = stage_cache.get_index_stats()
+        checkpoint_stats = stage_cache.get_build_checkpoint_stats()
         return {
             "files": stage_cache.count_files(),
             "symbols": int(stats.get("symbol_count", 0) or 0),
             "chunks": int(stats.get("chunk_count", 0) or 0),
             "embedded_chunks": int(stats.get("embedded_symbol_vectors", 0) or 0),
             "embedded_edges": int(stats.get("embedded_edge_vectors", 0) or 0),
+            "extract_completed_files": int(
+                checkpoint_stats.get("extract_completed_files", 0) or 0
+            ),
+            "embedded_completed_files": int(
+                checkpoint_stats.get("embedded_completed_files", 0) or 0
+            ),
+            "pending_embed_files": int(checkpoint_stats.get("pending_embed_files", 0) or 0),
         }
 
     def publish_staged_build(self, build_id: str) -> None:
@@ -1428,7 +1692,8 @@ class CacheManager:
             normalized_stage = None
 
         cleanup_pending = bool(payload.get("cleanup_pending"))
-        return {
+        progress = _normalize_extract_progress_payload(payload.get("progress"))
+        normalized = {
             "state": state,
             "build_id": normalized_build_id,
             "pid": normalized_pid,
@@ -1437,6 +1702,9 @@ class CacheManager:
             "stage": normalized_stage,
             "cleanup_pending": cleanup_pending,
         }
+        if progress is not None:
+            normalized["progress"] = progress
+        return normalized
 
     def _normalize_staged_build_resume_manifest(
         self,
@@ -1467,6 +1735,9 @@ class CacheManager:
             "chunks": 0,
             "embedded_chunks": 0,
             "embedded_edges": 0,
+            "extract_completed_files": 0,
+            "embedded_completed_files": 0,
+            "pending_embed_files": 0,
         }
         if isinstance(counts_raw, dict):
             for key in normalized_counts:
@@ -1484,7 +1755,7 @@ class CacheManager:
             normalized = str(value).strip()
             return normalized or None
 
-        return {
+        normalized = {
             "build_id": normalized_build_id,
             "source": source,
             "workspace_path_hash": _optional_string(payload.get("workspace_path_hash")),
@@ -1499,6 +1770,10 @@ class CacheManager:
             "stage": _optional_string(payload.get("stage")),
             "counts": normalized_counts,
         }
+        progress = _normalize_extract_progress_payload(payload.get("progress"))
+        if progress is not None:
+            normalized["progress"] = progress
+        return normalized
 
     def _list_tables(self, conn: sqlite3.Connection) -> set[str]:
         """Return all non-internal table names in the SQLite database."""
@@ -1854,6 +2129,51 @@ class CacheManager:
                 metadata.content_hash,
                 metadata.last_indexed.isoformat(),
             ),
+        )
+
+    @staticmethod
+    def _normalize_build_file_checkpoint_state(state: object) -> str | None:
+        """Normalize one checkpoint state or return None when unsupported."""
+        normalized = str(state).strip() if state is not None else ""
+        return normalized if normalized in BUILD_FILE_CHECKPOINT_STATES else None
+
+    @classmethod
+    def _normalize_build_file_checkpoint_states(
+        cls,
+        states: Iterable[str] | None,
+    ) -> list[str]:
+        """Normalize one optional checkpoint-state filter list."""
+        if states is None:
+            return []
+        normalized: list[str] = []
+        for state in states:
+            normalized_state = cls._normalize_build_file_checkpoint_state(state)
+            if normalized_state is None or normalized_state in normalized:
+                continue
+            normalized.append(normalized_state)
+        return normalized
+
+    @classmethod
+    def _row_to_build_file_checkpoint(cls, row: sqlite3.Row) -> BuildFileCheckpoint:
+        """Convert a database row into a build-scoped checkpoint summary."""
+        state = cls._normalize_build_file_checkpoint_state(row["state"])
+        if state is None:
+            raise ValueError(f"invalid build checkpoint state in row: {row['state']!r}")
+        return BuildFileCheckpoint(
+            path=str(row["path"]),
+            state=state,
+            content_hash=str(row["content_hash"]),
+            mtime_ns=int(row["mtime_ns"]) if row["mtime_ns"] is not None else None,
+            size_bytes=int(row["size_bytes"]) if row["size_bytes"] is not None else None,
+            language=str(row["language"]) if row["language"] is not None else None,
+            symbol_count=int(row["symbol_count"]),
+            chunk_count=int(row["chunk_count"]),
+            edge_count=int(row["edge_count"]),
+            symbols_added=int(row["symbols_added"]),
+            symbols_updated=int(row["symbols_updated"]),
+            symbols_removed=int(row["symbols_removed"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
         )
 
 

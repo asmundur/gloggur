@@ -544,6 +544,114 @@ def test_cli_index_json_reports_truthful_timings_and_debug_slow_files() -> None:
             assert key in first
 
 
+def test_cli_index_verbose_json_reports_source_and_embedded_line_metrics() -> None:
+    runner = CliRunner()
+    source = (
+        "class Example:\n"
+        "    def first(self) -> int:\n"
+        "        return 1\n"
+        "    def second(self) -> int:\n"
+        "        return self.first()\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["index", str(repo), "--json", "--verbose"], env=env)
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        verbose = payload.get("verbose")
+        assert isinstance(verbose, dict)
+        lines = verbose.get("lines")
+        assert isinstance(lines, dict)
+        index_lines = lines.get("index")
+        assert isinstance(index_lines, dict)
+        assert index_lines["source_total"] == 5
+        assert index_lines["embedded_total"] == 9
+        assert index_lines["embedded_unique"] == 5
+        assert index_lines["embedded_duplicate"] == 4
+        assert index_lines["vector_count"] == 3
+        by_kind = index_lines["by_kind"]
+        assert by_kind["symbol_chunks"] == {
+            "vector_count": 3,
+            "line_total": 9,
+            "line_unique": 5,
+        }
+        assert by_kind["graph_edges"] == {
+            "vector_count": 0,
+            "line_total": 0,
+            "line_unique": 0,
+        }
+        assert "inspect" not in lines
+
+
+def test_cli_index_verbose_json_is_stable_across_unchanged_reruns() -> None:
+    runner = CliRunner()
+    source = (
+        "class Example:\n"
+        "    def first(self) -> int:\n"
+        "        return 1\n"
+        "    def second(self) -> int:\n"
+        "        return self.first()\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        first = runner.invoke(cli, ["index", str(repo), "--json", "--verbose"], env=env)
+        second = runner.invoke(cli, ["index", str(repo), "--json", "--verbose"], env=env)
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        first_payload = _parse_json_output(first.output)
+        second_payload = _parse_json_output(second.output)
+        assert second_payload["unchanged"] == 1
+        assert second_payload["verbose"] == first_payload["verbose"]
+
+
+def test_cli_index_verbose_json_reports_graph_edge_metrics_when_enabled() -> None:
+    runner = CliRunner()
+    source = (
+        "def helper(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def caller(value: int) -> int:\n"
+        "    return helper(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(
+            cli,
+            ["index", str(repo), "--json", "--verbose", "--embed-graph-edges"],
+            env=env,
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        index_lines = payload["verbose"]["lines"]["index"]
+        graph_edges = index_lines["by_kind"]["graph_edges"]
+        assert graph_edges["vector_count"] > 0
+        assert graph_edges["line_total"] >= graph_edges["line_unique"] > 0
+        assert (
+            index_lines["embedded_total"]
+            == index_lines["by_kind"]["symbol_chunks"]["line_total"] + graph_edges["line_total"]
+        )
+
+
 def test_cli_index_parses_changed_files_once_across_legacy_and_symbol_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2810,6 +2918,30 @@ def test_cli_inspect_allow_partial_emits_failure_contract_for_decode_errors() ->
         samples = payload["failed_samples"]
         assert isinstance(samples, list)
         assert samples
+
+
+def test_cli_inspect_json_does_not_emit_index_verbose_payload() -> None:
+    """Inspect payloads should stay isolated from index verbose metrics."""
+    runner = CliRunner()
+    source = (
+        "def sample(value: int) -> int:\n"
+        '    """Return the incremented value."""\n'
+        "    return value + 1\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"src/main.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+
+        result = runner.invoke(cli, ["inspect", str(repo), "--json", "--force"], env=env)
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        assert "verbose" not in payload
 
 
 def test_cli_inspect_fails_closed_without_allow_partial_on_decode_errors() -> None:

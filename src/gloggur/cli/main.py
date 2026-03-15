@@ -75,7 +75,7 @@ from gloggur.indexer.cache import (
 )
 from gloggur.indexer.concurrency import cache_write_lock
 from gloggur.indexer.embedding_ledger import EmbeddingLedger
-from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer
+from gloggur.indexer.indexer import FAILURE_REMEDIATION, Indexer, VerboseLineMetrics
 from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.io_failures import StorageIOError, format_io_error_message, wrap_io_error
 from gloggur.models import AuditFileMetadata, IndexMetadata
@@ -606,6 +606,8 @@ INDEX_STAGE_REASON_CODES: dict[str, tuple[str, ...]] = {
         "parser_unavailable",
         "parse_error",
         "chunk_span_integrity_error",
+        "extract_symbols_timeout",
+        "storage_error",
     ),
     "embed_chunks": ("embedding_provider_error",),
     "persist_cache": ("storage_error", "stale_cleanup_error"),
@@ -1439,6 +1441,41 @@ def _profile_reindex_reason(
     return None
 
 
+def _normalize_extract_progress_payload(payload: object) -> dict[str, object] | None:
+    """Normalize additive extract-progress metadata or return None when invalid."""
+    if not isinstance(payload, dict):
+        return None
+
+    def _optional_string(value: object) -> str | None:
+        """Coerce one optional string field from a cache or CLI payload."""
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    current_file = _optional_string(payload.get("current_file"))
+    subphase = _optional_string(payload.get("subphase"))
+    if current_file is None or subphase not in {"prepare_file", "build_edges"}:
+        return None
+
+    def _non_negative_int(value: object) -> int:
+        """Coerce one progress counter to a non-negative integer."""
+        try:
+            normalized = int(value or 0)
+        except (TypeError, ValueError):
+            normalized = 0
+        return max(0, normalized)
+
+    return {
+        "current_file": current_file,
+        "subphase": subphase,
+        "files_done": _non_negative_int(payload.get("files_done")),
+        "files_total": _non_negative_int(payload.get("files_total")),
+        "started_at": _optional_string(payload.get("started_at")),
+        "updated_at": _optional_string(payload.get("updated_at")),
+    }
+
+
 def _normalize_build_state_payload(build_state: object) -> dict[str, object] | None:
     """Normalize build-state payloads from cache/test doubles into a stable shape."""
     if not isinstance(build_state, dict):
@@ -1456,7 +1493,21 @@ def _normalize_build_state_payload(build_state: object) -> dict[str, object] | N
         "stage": build_state.get("stage"),
         "cleanup_pending": bool(build_state.get("cleanup_pending")),
     }
+    progress = _normalize_extract_progress_payload(build_state.get("progress"))
+    if progress is not None:
+        payload["progress"] = progress
     return payload
+
+
+def _load_persisted_build_state(cache: object) -> dict[str, object] | None:
+    """Return the persisted build-state sidecar without inferred staged-build fallback."""
+    get_persisted_build_state = getattr(cache, "get_persisted_build_state", None)
+    if callable(get_persisted_build_state):
+        return get_persisted_build_state()
+    get_build_state = getattr(cache, "get_build_state", None)
+    if callable(get_build_state):
+        return get_build_state()
+    return None
 
 
 def _build_state_pid(build_state: dict[str, object] | None) -> int | None:
@@ -1839,22 +1890,19 @@ def _build_search_health_snapshot(
     """Build shared search-health payload for status, CLI search, and legacy searcher calls."""
     expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     metadata = cache.get_index_metadata()
-    get_build_state = getattr(cache, "get_build_state", None)
-    raw_build_state = get_build_state() if callable(get_build_state) else None
+    raw_build_state = _load_persisted_build_state(cache)
     build_state, stale_build_state = _classify_build_state_for_health(raw_build_state)
-    resume_candidate = _build_resume_candidate_payload(
+    resume_discovery = _discover_resume_candidates(
         cache,
         build_state=build_state,
         expected_profile=expected_profile,
         index_target_path=None,
     )
-    interrupted_resume_available = bool(
-        isinstance(build_state, dict)
-        and str(build_state.get("state")) == "interrupted"
-        and isinstance(resume_candidate, dict)
-        and isinstance(resume_candidate.get("compatibility"), dict)
-        and bool(resume_candidate["compatibility"].get("compatible"))
-    )
+    resume_candidate = resume_discovery["resume_candidate"]
+    interrupted_resume_available = bool(resume_discovery["interrupted_resume_available"])
+    resume_blocked = bool(resume_discovery["resume_blocked"])
+    resume_block_reason_codes = list(resume_discovery["resume_block_reason_codes"])
+    resume_block_candidates = list(resume_discovery["resume_block_candidates"])
     cached_profile = _normalized_cached_embedding_profile(
         cache.get_index_profile(),
         expected_profile,
@@ -1920,6 +1968,8 @@ def _build_search_health_snapshot(
         warning_codes.append("reindex_required")
     if tool_version_reason is not None and "tool_version_changed" not in warning_codes:
         warning_codes.append("tool_version_changed")
+    if resume_blocked and "resume_blocked" not in warning_codes:
+        warning_codes.append("resume_blocked")
     if build_state is not None:
         state = str(build_state.get("state"))
         if stale_build_state and "stale_build_state" not in warning_codes:
@@ -1960,6 +2010,9 @@ def _build_search_health_snapshot(
         "build_state": build_state,
         "interrupted_resume_available": interrupted_resume_available,
         "resume_candidate": resume_candidate,
+        "resume_blocked": resume_blocked,
+        "resume_block_reason_codes": resume_block_reason_codes,
+        "resume_block_candidates": resume_block_candidates,
         "resume_contract": resume_contract,
     }
 
@@ -2039,29 +2092,36 @@ def _write_cache_build_state(
     started_at: str,
     stage: str | None,
     cleanup_pending: bool = False,
+    progress: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Persist cache build-state sidecar updates with stable timestamps."""
     updated_at = datetime.now(timezone.utc).isoformat()
-    payload = cache.write_build_state(
-        {
-            "state": state,
-            "build_id": build_id,
-            "pid": os.getpid(),
-            "started_at": started_at,
-            "updated_at": updated_at,
-            "stage": stage,
-            "cleanup_pending": cleanup_pending,
-        }
-    )
+    payload_dict: dict[str, object] = {
+        "state": state,
+        "build_id": build_id,
+        "pid": os.getpid(),
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "stage": stage,
+        "cleanup_pending": cleanup_pending,
+    }
+    normalized_progress = _normalize_extract_progress_payload(progress)
+    if normalized_progress is not None:
+        payload_dict["progress"] = normalized_progress
+    payload = cache.write_build_state(payload_dict)
     trace_session = current_trace_session()
     if trace_session is not None:
         trace_session.update_build_state(payload)
     return payload
 
 
-def _current_workspace_path_hash() -> str:
-    """Return the current workspace hash used by resume compatibility checks."""
-    return _hash_content(os.path.abspath(os.getcwd()))
+def _current_workspace_path_hash(path: str | os.PathLike[str] | None = None) -> str:
+    """Return the workspace hash used by resume compatibility checks."""
+    if path is None:
+        workspace_path = os.path.abspath(os.getcwd())
+    else:
+        workspace_path = os.path.abspath(os.fspath(path))
+    return _hash_content(workspace_path)
 
 
 def _stage_resume_counts(stage_cache: CacheManager) -> dict[str, int]:
@@ -2071,12 +2131,23 @@ def _stage_resume_counts(stage_cache: CacheManager) -> dict[str, int]:
     if not isinstance(stats, dict):
         stats = {}
     count_files = getattr(stage_cache, "count_files", None)
+    get_build_checkpoint_stats = getattr(stage_cache, "get_build_checkpoint_stats", None)
+    checkpoint_stats = (
+        get_build_checkpoint_stats() if callable(get_build_checkpoint_stats) else {}
+    )
+    if not isinstance(checkpoint_stats, dict):
+        checkpoint_stats = {}
     return {
         "files": int(count_files() or 0) if callable(count_files) else 0,
         "symbols": int(stats.get("symbol_count", 0) or 0),
         "chunks": int(stats.get("chunk_count", 0) or 0),
         "embedded_chunks": int(stats.get("embedded_symbol_vectors", 0) or 0),
         "embedded_edges": int(stats.get("embedded_edge_vectors", 0) or 0),
+        "extract_completed_files": int(checkpoint_stats.get("extract_completed_files", 0) or 0),
+        "embedded_completed_files": int(
+            checkpoint_stats.get("embedded_completed_files", 0) or 0
+        ),
+        "pending_embed_files": int(checkpoint_stats.get("pending_embed_files", 0) or 0),
     }
 
 
@@ -2092,6 +2163,7 @@ def _write_staged_build_resume_manifest(
     embedding_profile: str,
     index_target_path: str,
     source: str,
+    progress: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Persist staged-build resume metadata for future interrupted-run recovery."""
     write_resume_manifest = getattr(active_cache, "write_staged_build_resume_manifest", None)
@@ -2105,26 +2177,27 @@ def _write_staged_build_resume_manifest(
     )
     stage_cache_config = getattr(stage_cache, "config", None)
     stage_cache_dir = getattr(stage_cache_config, "cache_dir", None)
-    return write_resume_manifest(
-        build_id,
-        {
-            "build_id": build_id,
-            "source": source,
-            "workspace_path_hash": _current_workspace_path_hash(),
-            "index_target_path": index_target_path,
-            "embedding_profile": embedding_profile,
-            "schema_version": schema_version,
-            "tool_version": GLOGGUR_VERSION,
-            "stage_cache_dir": (
-                str(stage_cache_dir) if isinstance(stage_cache_dir, (str, os.PathLike)) else None
-            ),
-            "state": state,
-            "started_at": started_at,
-            "updated_at": updated_at,
-            "stage": stage,
-            "counts": _stage_resume_counts(stage_cache),
-        },
-    )
+    payload: dict[str, object] = {
+        "build_id": build_id,
+        "source": source,
+        "workspace_path_hash": _current_workspace_path_hash(index_target_path),
+        "index_target_path": index_target_path,
+        "embedding_profile": embedding_profile,
+        "schema_version": schema_version,
+        "tool_version": GLOGGUR_VERSION,
+        "stage_cache_dir": (
+            str(stage_cache_dir) if isinstance(stage_cache_dir, (str, os.PathLike)) else None
+        ),
+        "state": state,
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "stage": stage,
+        "counts": _stage_resume_counts(stage_cache),
+    }
+    normalized_progress = _normalize_extract_progress_payload(progress)
+    if normalized_progress is not None:
+        payload["progress"] = normalized_progress
+    return write_resume_manifest(build_id, payload)
 
 
 def _build_state_updated_at(value: object) -> str:
@@ -2134,6 +2207,277 @@ def _build_state_updated_at(value: object) -> str:
         if isinstance(updated_at, str) and updated_at:
             return updated_at
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_resume_counts(counts: object) -> dict[str, int]:
+    """Return stable resume counters from manifest or staged-cache stats payloads."""
+    if not isinstance(counts, dict):
+        counts = {}
+    return {
+        "files": int(counts.get("files", 0) or 0),
+        "symbols": int(counts.get("symbols", 0) or 0),
+        "chunks": int(counts.get("chunks", 0) or 0),
+        "embedded_chunks": int(counts.get("embedded_chunks", 0) or 0),
+        "embedded_edges": int(counts.get("embedded_edges", 0) or 0),
+        "extract_completed_files": int(counts.get("extract_completed_files", 0) or 0),
+        "embedded_completed_files": int(counts.get("embedded_completed_files", 0) or 0),
+        "pending_embed_files": int(counts.get("pending_embed_files", 0) or 0),
+    }
+
+
+def _refresh_resume_candidate_counts(
+    cache: object,
+    *,
+    build_id: str,
+    fallback_counts: dict[str, int],
+) -> tuple[dict[str, int], list[str]]:
+    """Refresh staged-build counters from the staged SQLite cache when possible."""
+    get_index_stats = getattr(cache, "get_staged_build_index_stats", None)
+    if not callable(get_index_stats):
+        return fallback_counts, []
+    try:
+        raw_counts = get_index_stats(build_id)
+    except Exception:
+        return fallback_counts, ["staged_cache_unreadable"]
+    try:
+        return _normalize_resume_counts(raw_counts), []
+    except (TypeError, ValueError):
+        return fallback_counts, ["staged_cache_unreadable"]
+
+
+def _build_resume_candidate_from_manifest(
+    cache: object,
+    *,
+    build_id: str,
+    manifest: dict[str, object],
+    expected_profile: str,
+    index_target_path: str | None = None,
+    preferred_build_id: str | None = None,
+) -> dict[str, object] | None:
+    """Return normalized staged-build compatibility metadata for one manifest."""
+    normalized_build_id = str(build_id).strip()
+    if not normalized_build_id or not isinstance(manifest, dict):
+        return None
+
+    reason_codes: list[str] = []
+    manifest_workspace = manifest.get("workspace_path_hash")
+    manifest_target_raw = manifest.get("index_target_path")
+    manifest_target = (
+        os.path.abspath(manifest_target_raw)
+        if isinstance(manifest_target_raw, str) and manifest_target_raw
+        else None
+    )
+    normalized_index_target_path = (
+        os.path.abspath(index_target_path) if index_target_path is not None else None
+    )
+    target_path_matches = bool(
+        normalized_index_target_path is not None
+        and manifest_target is not None
+        and manifest_target == normalized_index_target_path
+    )
+    workspace_hash_path = normalized_index_target_path or manifest_target
+    workspace_path_hash = _current_workspace_path_hash(workspace_hash_path)
+    trust_manifest_target_identity = manifest_target is not None and (
+        target_path_matches or normalized_index_target_path is None
+    )
+    if isinstance(manifest_workspace, str) and manifest_workspace != workspace_path_hash:
+        # Older manifests keyed workspace identity off caller cwd. When the
+        # manifest already records the indexed target path, prefer that stronger
+        # identity signal for both explicit resume and orphaned-build discovery.
+        if not trust_manifest_target_identity:
+            reason_codes.append("workspace_path_hash_mismatch")
+
+    manifest_profile = manifest.get("embedding_profile")
+    if isinstance(manifest_profile, str) and manifest_profile != expected_profile:
+        reason_codes.append("embedding_profile_changed")
+
+    get_schema_version = getattr(cache, "get_schema_version", None)
+    current_schema_version = (
+        str(get_schema_version() or CACHE_SCHEMA_VERSION)
+        if callable(get_schema_version)
+        else CACHE_SCHEMA_VERSION
+    )
+    manifest_schema_version = manifest.get("schema_version")
+    if (
+        isinstance(manifest_schema_version, str)
+        and manifest_schema_version
+        and manifest_schema_version != current_schema_version
+    ):
+        reason_codes.append("schema_version_changed")
+    if (
+        normalized_index_target_path is not None
+        and manifest_target is not None
+        and manifest_target != normalized_index_target_path
+    ):
+        reason_codes.append("index_target_path_changed")
+
+    counts = _normalize_resume_counts(manifest.get("counts"))
+    counts, count_reason_codes = _refresh_resume_candidate_counts(
+        cache,
+        build_id=normalized_build_id,
+        fallback_counts=counts,
+    )
+    for code in count_reason_codes:
+        if code not in reason_codes:
+            reason_codes.append(code)
+
+    candidate = {
+        "build_id": normalized_build_id,
+        "source": str(manifest.get("source") or "manifest"),
+        "stage": manifest.get("stage"),
+        "started_at": manifest.get("started_at"),
+        "updated_at": manifest.get("updated_at"),
+        "counts": counts,
+        "preferred": preferred_build_id == normalized_build_id,
+        "compatibility": {
+            "compatible": len(reason_codes) == 0,
+            "reason_codes": reason_codes,
+        },
+    }
+    progress = _normalize_extract_progress_payload(manifest.get("progress"))
+    if progress is not None:
+        candidate["progress"] = progress
+    return candidate
+
+
+def _resume_candidate_sort_key(candidate: dict[str, object]) -> tuple[object, ...]:
+    """Return deterministic ranking key for discovered staged-build candidates."""
+    counts = _normalize_resume_counts(candidate.get("counts"))
+    return (
+        bool(candidate.get("preferred")),
+        int(counts.get("embedded_completed_files", 0)),
+        int(counts.get("extract_completed_files", 0)),
+        int(counts.get("pending_embed_files", 0)),
+        int(counts.get("embedded_chunks", 0)),
+        int(counts.get("embedded_edges", 0)),
+        int(counts.get("files", 0)),
+        str(candidate.get("updated_at") or ""),
+        str(candidate.get("build_id") or ""),
+    )
+
+
+def _discover_resume_candidates(
+    cache: object,
+    *,
+    build_state: dict[str, object] | None,
+    expected_profile: str,
+    index_target_path: str | None = None,
+) -> dict[str, object]:
+    """Discover and rank manifest-backed staged builds before any cleanup occurs."""
+    preferred_build_id = None
+    if isinstance(build_state, dict):
+        build_id_raw = build_state.get("build_id")
+        if build_id_raw is not None and str(build_id_raw).strip():
+            preferred_build_id = str(build_id_raw).strip()
+
+    candidates: list[dict[str, object]] = []
+    manifest_build_ids: set[str] = set()
+    staged_build_ids: list[str] = []
+    list_staged_build_ids = getattr(cache, "list_staged_build_ids", None)
+    if callable(list_staged_build_ids):
+        raw_staged_build_ids = list_staged_build_ids()
+        if isinstance(raw_staged_build_ids, list):
+            staged_build_ids = [
+                build_id
+                for build_id in (str(value).strip() for value in raw_staged_build_ids)
+                if build_id
+            ]
+    list_manifests = getattr(cache, "list_staged_build_resume_manifests", None)
+    if callable(list_manifests):
+        raw_manifests = list_manifests()
+        if isinstance(raw_manifests, list):
+            for manifest in raw_manifests:
+                if not isinstance(manifest, dict):
+                    continue
+                build_id_raw = manifest.get("build_id")
+                build_id = str(build_id_raw).strip() if build_id_raw is not None else ""
+                if build_id:
+                    manifest_build_ids.add(build_id)
+                candidate = _build_resume_candidate_from_manifest(
+                    cache,
+                    build_id=build_id,
+                    manifest=manifest,
+                    expected_profile=expected_profile,
+                    index_target_path=index_target_path,
+                    preferred_build_id=preferred_build_id,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+    elif isinstance(build_state, dict):
+        candidate = _build_resume_candidate_payload(
+            cache,
+            build_state=build_state,
+            expected_profile=expected_profile,
+            index_target_path=index_target_path,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+
+    missing_manifest_candidates: list[dict[str, object]] = []
+    for build_id in staged_build_ids:
+        if build_id in manifest_build_ids:
+            continue
+        counts, count_reason_codes = _refresh_resume_candidate_counts(
+            cache,
+            build_id=build_id,
+            fallback_counts=_normalize_resume_counts(None),
+        )
+        reason_codes = ["resume_manifest_missing"]
+        for code in count_reason_codes:
+            if code not in reason_codes:
+                reason_codes.append(code)
+        missing_manifest_candidates.append(
+            {
+                "build_id": build_id,
+                "source": "staged_build",
+                "stage": None,
+                "started_at": None,
+                "updated_at": None,
+                "counts": counts,
+                "preferred": preferred_build_id == build_id,
+                "compatibility": {
+                    "compatible": False,
+                    "reason_codes": reason_codes,
+                },
+            }
+        )
+    candidates.extend(missing_manifest_candidates)
+
+    compatible_candidates = sorted(
+        [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate.get("compatibility"), dict)
+            and bool(candidate["compatibility"].get("compatible"))
+        ],
+        key=_resume_candidate_sort_key,
+        reverse=True,
+    )
+    blocked_candidates: list[dict[str, object]] = []
+    blocked_reason_codes: list[str] = []
+    if candidates and not compatible_candidates:
+        blocked_candidates = sorted(candidates, key=_resume_candidate_sort_key, reverse=True)
+        blocked_reason_codes.append("no_compatible_staged_build")
+        for candidate in blocked_candidates:
+            compatibility = candidate.get("compatibility")
+            if not isinstance(compatibility, dict):
+                continue
+            raw_codes = compatibility.get("reason_codes")
+            if not isinstance(raw_codes, list):
+                continue
+            for code in raw_codes:
+                if not isinstance(code, str) or not code or code in blocked_reason_codes:
+                    continue
+                blocked_reason_codes.append(code)
+
+    return {
+        "compatible_candidates": compatible_candidates,
+        "resume_candidate": compatible_candidates[0] if compatible_candidates else None,
+        "interrupted_resume_available": bool(compatible_candidates),
+        "resume_blocked": bool(blocked_candidates),
+        "resume_block_reason_codes": blocked_reason_codes,
+        "resume_block_candidates": blocked_candidates,
+    }
 
 
 def _build_resume_candidate_payload(
@@ -2154,58 +2498,14 @@ def _build_resume_candidate_payload(
     if not callable(get_manifest):
         return None
     manifest = get_manifest(build_id)
-    if not isinstance(manifest, dict):
-        return None
-    reason_codes: list[str] = []
-    workspace_path_hash = _current_workspace_path_hash()
-    manifest_workspace = manifest.get("workspace_path_hash")
-    if isinstance(manifest_workspace, str) and manifest_workspace != workspace_path_hash:
-        reason_codes.append("workspace_path_hash_mismatch")
-    manifest_profile = manifest.get("embedding_profile")
-    if isinstance(manifest_profile, str) and manifest_profile != expected_profile:
-        reason_codes.append("embedding_profile_changed")
-    get_schema_version = getattr(cache, "get_schema_version", None)
-    current_schema_version = (
-        str(get_schema_version() or CACHE_SCHEMA_VERSION)
-        if callable(get_schema_version)
-        else CACHE_SCHEMA_VERSION
+    return _build_resume_candidate_from_manifest(
+        cache,
+        build_id=build_id,
+        manifest=manifest,
+        expected_profile=expected_profile,
+        index_target_path=index_target_path,
+        preferred_build_id=build_id,
     )
-    manifest_schema_version = manifest.get("schema_version")
-    if (
-        isinstance(manifest_schema_version, str)
-        and manifest_schema_version
-        and manifest_schema_version != current_schema_version
-    ):
-        reason_codes.append("schema_version_changed")
-    manifest_target = manifest.get("index_target_path")
-    if (
-        index_target_path is not None
-        and isinstance(manifest_target, str)
-        and manifest_target
-        and manifest_target != index_target_path
-    ):
-        reason_codes.append("index_target_path_changed")
-
-    counts = manifest.get("counts")
-    if not isinstance(counts, dict):
-        counts = {}
-    normalized_counts = {
-        "files": int(counts.get("files", 0) or 0),
-        "symbols": int(counts.get("symbols", 0) or 0),
-        "chunks": int(counts.get("chunks", 0) or 0),
-        "embedded_chunks": int(counts.get("embedded_chunks", 0) or 0),
-        "embedded_edges": int(counts.get("embedded_edges", 0) or 0),
-    }
-    return {
-        "build_id": build_id,
-        "source": str(manifest.get("source") or "manifest"),
-        "stage": manifest.get("stage"),
-        "counts": normalized_counts,
-        "compatibility": {
-            "compatible": len(reason_codes) == 0,
-            "reason_codes": reason_codes,
-        },
-    }
 
 
 def _resume_available_guidance(*, resume_source: str | None) -> list[str]:
@@ -2226,6 +2526,19 @@ def _resume_available_guidance(*, resume_source: str | None) -> list[str]:
     ]
 
 
+def _resume_blocked_guidance() -> list[str]:
+    """Return user-facing guidance when interrupted staged work blocks a fresh rebuild."""
+    return [
+        "Interrupted staged builds were found, but none are safely resumable. "
+        "A fresh index was blocked to avoid discarding staged paid embedding work.",
+        "Inspect `status --json` for `resume_block_candidates`, then either "
+        "use `gloggur index . --json --adopt-interrupted-build <stage-dir>` "
+        "to rescue a compatible legacy build, rerun with "
+        "`--discard-interrupted-builds` to intentionally throw staged work away, "
+        "or run `gloggur clear-cache --json` to reset the cache.",
+    ]
+
+
 def _health_interrupted_resume_available(health: dict[str, object]) -> bool:
     """Return additive interrupted-build recovery availability with legacy fallback."""
     return bool(health.get("interrupted_resume_available", False))
@@ -2235,6 +2548,27 @@ def _health_resume_candidate(health: dict[str, object]) -> dict[str, object] | N
     """Return normalized interrupted-build recovery candidate metadata when present."""
     candidate = health.get("resume_candidate")
     return candidate if isinstance(candidate, dict) else None
+
+
+def _health_resume_blocked(health: dict[str, object]) -> bool:
+    """Return whether staged interrupted work blocked a fresh rebuild."""
+    return bool(health.get("resume_blocked", False))
+
+
+def _health_resume_block_reason_codes(health: dict[str, object]) -> list[str]:
+    """Return normalized blocked-resume reason codes."""
+    raw_codes = health.get("resume_block_reason_codes")
+    if not isinstance(raw_codes, list):
+        return []
+    return [str(code) for code in raw_codes if str(code)]
+
+
+def _health_resume_block_candidates(health: dict[str, object]) -> list[dict[str, object]]:
+    """Return normalized blocked staged-build candidates."""
+    raw_candidates = health.get("resume_block_candidates")
+    if not isinstance(raw_candidates, list):
+        return []
+    return [candidate for candidate in raw_candidates if isinstance(candidate, dict)]
 
 
 def _staged_cache_resume_incompatibility_reason(
@@ -2454,6 +2788,9 @@ def _build_search_not_ready_payload(
     assert isinstance(resume_contract, dict)
     interrupted_resume_available = _health_interrupted_resume_available(health)
     resume_candidate = _health_resume_candidate(health)
+    resume_blocked = _health_resume_blocked(health)
+    resume_block_reason_codes = _health_resume_block_reason_codes(health)
+    resume_block_candidates = _health_resume_block_candidates(health)
     metadata: dict[str, object] = {
         "total_results": 0,
         "needs_reindex": bool(health["needs_reindex"]),
@@ -2468,12 +2805,17 @@ def _build_search_not_ready_payload(
         "cached_index_profile": health["cached_index_profile"],
         "interrupted_resume_available": interrupted_resume_available,
         "resume_candidate": resume_candidate,
+        "resume_blocked": resume_blocked,
+        "resume_block_reason_codes": resume_block_reason_codes,
+        "resume_block_candidates": resume_block_candidates,
     }
     metadata.update(resume_contract)
     if interrupted_resume_available:
         guidance = _resume_available_guidance(
             resume_source=(str(resume_candidate.get("source")) if resume_candidate else None),
         )
+    elif resume_blocked:
+        guidance = _resume_blocked_guidance()
     else:
         guidance = CLI_FAILURE_REMEDIATION["search_cache_not_ready"]
     return {
@@ -3002,6 +3344,48 @@ def _create_vector_store(config: GloggurConfig, *, load_existing: bool = True):
     return storage_backend.create_vector_store(config.cache_dir, load_existing=load_existing)
 
 
+def _is_vector_store_load_error(error: StorageIOError) -> bool:
+    """Return True when a vector store failed while loading persisted artifacts."""
+    return error.operation in {
+        "read faiss index file",
+        "read vector id map",
+        "read fallback vector matrix",
+    }
+
+
+def _rebuild_vector_store_from_cache(
+    *,
+    cache: CacheManager,
+    vector_store: object,
+) -> None:
+    """Rebuild vector artifacts from staged chunk rows after load-time corruption."""
+    clear_vectors = getattr(vector_store, "clear", None)
+    upsert_vectors = getattr(vector_store, "upsert_vectors", None)
+    save_vectors = getattr(vector_store, "save", None)
+    if not callable(clear_vectors) or not callable(upsert_vectors) or not callable(save_vectors):
+        raise RuntimeError("vector store does not support rebuild from staged chunk cache")
+    clear_vectors()
+    upsert_vectors(cache.list_chunks())
+    save_vectors()
+
+
+def _ensure_vector_store_matches_cache(
+    *,
+    cache: CacheManager,
+    vector_store: object,
+) -> None:
+    """Rebuild staged vector artifacts when persisted rows and vector ids diverge."""
+    list_symbol_ids = getattr(vector_store, "list_symbol_ids", None)
+    expected_vector_count = cache.count_embedded_chunks()
+    if callable(list_symbol_ids):
+        try:
+            if len(list_symbol_ids()) == expected_vector_count:
+                return
+        except Exception:
+            pass
+    _rebuild_vector_store_from_cache(cache=cache, vector_store=vector_store)
+
+
 def _create_metadata_store(config: GloggurConfig):
     """Create metadata backend with legacy-compatible default class behavior."""
     if _uses_default_storage_backend(config):
@@ -3046,12 +3430,21 @@ def _initialize_runtime(
     config: GloggurConfig,
     *,
     rebuild_on_profile_change: bool = False,
+    recover_vector_store_from_cache: bool = False,
     write_locked: bool = False,
 ) -> tuple[GloggurConfig, CacheManager, object]:
     """Create cache/vector runtime for an already-loaded config instance."""
     expected_profile = _canonicalize_embedding_profile(config.embedding_profile()) or ""
     cache = _create_cache_manager(config.cache_dir)
-    vector_store = _create_vector_store(config)
+    try:
+        vector_store = _create_vector_store(config)
+    except StorageIOError as exc:
+        if not recover_vector_store_from_cache or not _is_vector_store_load_error(exc):
+            raise
+        vector_store = _create_vector_store(config, load_existing=False)
+        _rebuild_vector_store_from_cache(cache=cache, vector_store=vector_store)
+    if recover_vector_store_from_cache:
+        _ensure_vector_store_matches_cache(cache=cache, vector_store=vector_store)
     if cache.last_reset_reason:
         vector_store.clear()
     metadata_present = cache.get_index_metadata() is not None
@@ -3181,6 +3574,9 @@ def _build_status_payload(
         "build_state": health["build_state"],
         "interrupted_resume_available": _health_interrupted_resume_available(health),
         "resume_candidate": _health_resume_candidate(health),
+        "resume_blocked": _health_resume_blocked(health),
+        "resume_block_reason_codes": _health_resume_block_reason_codes(health),
+        "resume_block_candidates": _health_resume_block_candidates(health),
         "extension_policy": _build_extension_policy_contract(config),
         "language_support_contract": build_language_support_contract(config=config),
         "raw_total_symbols": raw_total_symbols,
@@ -4262,6 +4658,81 @@ def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str,
     )
 
 
+def _build_index_resume_blocked_payload(
+    *,
+    config: GloggurConfig,
+    path: str,
+    build_state: dict[str, object] | None,
+    resume_block_reason_codes: list[str],
+    resume_block_candidates: list[dict[str, object]],
+    expected_profile: str,
+) -> dict[str, object]:
+    """Build a stable fail-closed payload when interrupted staged work blocks a fresh build."""
+    guidance = _resume_blocked_guidance()
+    payload: dict[str, object] = {
+        "path": path,
+        "cache_dir": config.cache_dir,
+        "indexed": 0,
+        "indexed_files": 0,
+        "indexed_symbols": 0,
+        "failed": 1,
+        "failed_reasons": {"resume_blocked": 1},
+        "failed_samples": [],
+        "build_state": build_state,
+        "expected_index_profile": expected_profile,
+        "interrupted_resume_available": False,
+        "resume_candidate": None,
+        "resume_blocked": True,
+        "resume_block_reason_codes": list(resume_block_reason_codes),
+        "resume_block_candidates": list(resume_block_candidates),
+        "resumed_build": False,
+        "resume_source": None,
+        "failure_codes": ["resume_blocked"],
+        "failure_guidance": {"resume_blocked": guidance},
+    }
+    payload["error"] = {
+        "type": "index_unavailable",
+        "code": "resume_blocked",
+        "detail": (
+            "Interrupted staged builds exist, but none are safely resumable. "
+            "Refusing to start a fresh index."
+        ),
+        "probable_cause": (
+            "Creating a new build would discard staged interrupted work that may "
+            "already contain paid embeddings."
+        ),
+        "remediation": guidance,
+    }
+    return _decorate_payload_with_security_metadata(payload, config=config)
+
+
+def _emit_index_resume_blocked(
+    *,
+    config: GloggurConfig,
+    path: str,
+    as_json: bool,
+    build_state: dict[str, object] | None,
+    resume_block_reason_codes: list[str],
+    resume_block_candidates: list[dict[str, object]],
+    expected_profile: str,
+) -> None:
+    """Fail closed when staged interrupted work exists but cannot be resumed safely."""
+    payload = _build_index_resume_blocked_payload(
+        config=config,
+        path=path,
+        build_state=build_state,
+        resume_block_reason_codes=resume_block_reason_codes,
+        resume_block_candidates=resume_block_candidates,
+        expected_profile=expected_profile,
+    )
+    if as_json:
+        _emit(payload, as_json=True)
+        raise click.exceptions.Exit(1)
+    for line in _resume_blocked_guidance():
+        click.echo(line, err=True)
+    raise click.exceptions.Exit(1)
+
+
 @cli.command()
 @click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.option("--config", "config_path", type=click.Path(), default=None)
@@ -4282,6 +4753,15 @@ def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str,
     ),
 )
 @click.option(
+    "--discard-interrupted-builds",
+    is_flag=True,
+    default=False,
+    help=(
+        "Explicitly discard all interrupted staged builds under this cache root "
+        "before starting a fresh index."
+    ),
+)
+@click.option(
     "--allow-partial",
     is_flag=True,
     default=False,
@@ -4299,6 +4779,12 @@ def _build_inspect_failure_contract(failed_reasons: dict[str, int]) -> dict[str,
     default=False,
     help="Include diagnostics for unsupported file extensions skipped during indexing.",
 )
+@click.option(
+    "--verbose",
+    is_flag=True,
+    default=False,
+    help="Include additive source-line and embedded-line metrics in index output.",
+)
 @_with_io_failure_handling
 def index(
     path: str,
@@ -4307,9 +4793,11 @@ def index(
     embedding_provider: str | None,
     embed_graph_edges: bool | None,
     adopt_interrupted_build: str | None,
+    discard_interrupted_builds: bool,
     allow_partial: bool,
     debug_timings: bool,
     warn_on_skipped_extensions: bool,
+    verbose: bool,
 ) -> None:
     """Load config/runtime, index path, and emit summary counts."""
     command_started = time.perf_counter()
@@ -4348,10 +4836,14 @@ def index(
     build_id = _new_build_id()
     build_started_at = datetime.now(timezone.utc).isoformat()
     current_stage = "bootstrap_model"
+    current_extract_progress: dict[str, object] | None = None
     active_cache: CacheManager | None = None
     publish_succeeded = False
     resume_source: str | None = None
     resumed_build = False
+    resume_blocked = False
+    resume_block_reason_codes: list[str] = []
+    resume_block_candidates: list[dict[str, object]] = []
 
     def _merge_failure_reasons(
         target: dict[str, int],
@@ -4387,24 +4879,63 @@ def index(
         click.echo("Indexing...", err=True)
         active_cache = _create_cache_manager(config.cache_dir)
         embedding_ledger = EmbeddingLedger(config.cache_dir)
-        get_prior_build_state = getattr(active_cache, "get_build_state", None)
-        raw_prior_build_state = get_prior_build_state() if callable(get_prior_build_state) else None
+        if adopt_interrupted_build is not None and discard_interrupted_builds:
+            raise click.BadParameter(
+                "--discard-interrupted-builds cannot be combined with " "--adopt-interrupted-build",
+                param_hint="--discard-interrupted-builds",
+            )
+        raw_prior_build_state = _load_persisted_build_state(active_cache)
         prior_build_state, _stale_prior_build_state = _classify_build_state_for_health(
             raw_prior_build_state
         )
-        resume_candidate = _build_resume_candidate_payload(
+        resume_discovery = _discover_resume_candidates(
             active_cache,
             build_state=prior_build_state,
             expected_profile=expected_profile,
             index_target_path=requested_index_target_path,
         )
+        raw_compatible_candidates = resume_discovery.get("compatible_candidates")
+        compatible_candidates = (
+            [candidate for candidate in raw_compatible_candidates if isinstance(candidate, dict)]
+            if isinstance(raw_compatible_candidates, list)
+            else []
+        )
+        resume_blocked = bool(resume_discovery.get("resume_blocked"))
+        raw_resume_block_reason_codes = resume_discovery.get("resume_block_reason_codes")
+        resume_block_reason_codes = (
+            [str(code) for code in raw_resume_block_reason_codes if str(code)]
+            if isinstance(raw_resume_block_reason_codes, list)
+            else []
+        )
+        raw_resume_block_candidates = resume_discovery.get("resume_block_candidates")
+        resume_block_candidates = (
+            [candidate for candidate in raw_resume_block_candidates if isinstance(candidate, dict)]
+            if isinstance(raw_resume_block_candidates, list)
+            else []
+        )
 
-        if adopt_interrupted_build is not None:
+        if discard_interrupted_builds:
+            active_cache.cleanup_staged_builds()
+            active_cache.clear_build_state()
+            resume_blocked = False
+            resume_block_reason_codes = []
+            resume_block_candidates = []
+            build_id = _new_build_id()
+            build_started_at = datetime.now(timezone.utc).isoformat()
+            stage_dir = active_cache.prepare_staged_build(build_id)
+            stage_config = replace(config, cache_dir=stage_dir)
+            stage_config, cache, vector_store = _initialize_runtime(
+                stage_config,
+                rebuild_on_profile_change=True,
+                write_locked=True,
+            )
+        elif adopt_interrupted_build is not None:
             build_id, stage_dir = active_cache.adopt_staged_build(adopt_interrupted_build)
             stage_config = replace(config, cache_dir=stage_dir)
             stage_config, cache, vector_store = _initialize_runtime(
                 stage_config,
                 rebuild_on_profile_change=False,
+                recover_vector_store_from_cache=True,
                 write_locked=True,
             )
             incompatibility_reason = _staged_cache_resume_incompatibility_reason(
@@ -4419,51 +4950,101 @@ def index(
                 )
             resume_source = "legacy_adopted"
             resumed_build = True
-            active_cache.cleanup_staged_builds(keep_build_ids=(build_id,))
-        elif (
-            isinstance(resume_candidate, dict)
-            and isinstance(resume_candidate.get("compatibility"), dict)
-            and bool(resume_candidate["compatibility"].get("compatible"))
-        ):
-            build_id = str(resume_candidate["build_id"])
-            if isinstance(prior_build_state, dict):
-                prior_started_at = prior_build_state.get("started_at")
-                if isinstance(prior_started_at, str) and prior_started_at:
-                    build_started_at = prior_started_at
-            stage_dir = active_cache.build_cache_dir(build_id)
-            stage_config = replace(config, cache_dir=stage_dir)
-            stage_config, cache, vector_store = _initialize_runtime(
-                stage_config,
-                rebuild_on_profile_change=False,
-                write_locked=True,
-            )
-            incompatibility_reason = _staged_cache_resume_incompatibility_reason(
-                cache,
+        elif compatible_candidates:
+            runtime_block_candidates: list[dict[str, object]] = []
+            for candidate in compatible_candidates:
+                candidate_build_id = str(candidate.get("build_id") or "").strip()
+                if not candidate_build_id:
+                    continue
+                candidate_stage_dir = active_cache.build_cache_dir(candidate_build_id)
+                candidate_stage_config = replace(config, cache_dir=candidate_stage_dir)
+                candidate_stage_config, candidate_cache, candidate_vector_store = (
+                    _initialize_runtime(
+                        candidate_stage_config,
+                        rebuild_on_profile_change=False,
+                        recover_vector_store_from_cache=True,
+                        write_locked=True,
+                    )
+                )
+                incompatibility_reason = _staged_cache_resume_incompatibility_reason(
+                    candidate_cache,
+                    expected_profile=expected_profile,
+                )
+                if incompatibility_reason is None:
+                    build_id = candidate_build_id
+                    stage_dir = candidate_stage_dir
+                    stage_config = candidate_stage_config
+                    cache = candidate_cache
+                    vector_store = candidate_vector_store
+                    candidate_started_at = candidate.get("started_at")
+                    if isinstance(candidate_started_at, str) and candidate_started_at:
+                        build_started_at = candidate_started_at
+                    resume_source = str(candidate.get("source") or "manifest")
+                    resumed_build = True
+                    break
+
+                blocked_candidate = dict(candidate)
+                compatibility = candidate.get("compatibility")
+                reason_codes = []
+                if isinstance(compatibility, dict):
+                    raw_codes = compatibility.get("reason_codes")
+                    if isinstance(raw_codes, list):
+                        reason_codes = [str(code) for code in raw_codes if str(code)]
+                if "staged_cache_runtime_incompatible" not in reason_codes:
+                    reason_codes.append("staged_cache_runtime_incompatible")
+                blocked_candidate["compatibility"] = {
+                    "compatible": False,
+                    "reason_codes": reason_codes,
+                }
+                blocked_candidate["runtime_incompatibility_reason"] = incompatibility_reason
+                runtime_block_candidates.append(blocked_candidate)
+            else:
+                resume_blocked = True
+                resume_block_candidates = runtime_block_candidates
+                resume_block_reason_codes = ["no_safely_resumable_staged_build"]
+                for candidate in runtime_block_candidates:
+                    compatibility = candidate.get("compatibility")
+                    if not isinstance(compatibility, dict):
+                        continue
+                    raw_codes = compatibility.get("reason_codes")
+                    if not isinstance(raw_codes, list):
+                        continue
+                    for code in raw_codes:
+                        normalized_code = str(code)
+                        if normalized_code and normalized_code not in resume_block_reason_codes:
+                            resume_block_reason_codes.append(normalized_code)
+        elif resume_blocked:
+            _emit_index_resume_blocked(
+                config=config,
+                path=path,
+                as_json=as_json,
+                build_state=prior_build_state,
+                resume_block_reason_codes=resume_block_reason_codes,
+                resume_block_candidates=resume_block_candidates,
                 expected_profile=expected_profile,
             )
-            if incompatibility_reason is None:
-                resume_source = str(resume_candidate.get("source") or "manifest")
-                resumed_build = True
-                active_cache.cleanup_staged_builds(keep_build_ids=(build_id,))
-            else:
-                active_cache.cleanup_staged_builds()
-                build_id = _new_build_id()
-                build_started_at = datetime.now(timezone.utc).isoformat()
-                stage_dir = active_cache.prepare_staged_build(build_id)
-                stage_config = replace(config, cache_dir=stage_dir)
-                stage_config, cache, vector_store = _initialize_runtime(
-                    stage_config,
-                    rebuild_on_profile_change=True,
-                    write_locked=True,
-                )
         else:
-            active_cache.cleanup_staged_builds()
             stage_dir = active_cache.prepare_staged_build(build_id)
             stage_config = replace(config, cache_dir=stage_dir)
             stage_config, cache, vector_store = _initialize_runtime(
                 stage_config,
                 rebuild_on_profile_change=True,
                 write_locked=True,
+            )
+        if (
+            resume_blocked
+            and not resumed_build
+            and adopt_interrupted_build is None
+            and not discard_interrupted_builds
+        ):
+            _emit_index_resume_blocked(
+                config=config,
+                path=path,
+                as_json=as_json,
+                build_state=prior_build_state,
+                resume_block_reason_codes=resume_block_reason_codes,
+                resume_block_candidates=resume_block_candidates,
+                expected_profile=expected_profile,
             )
         indexer = Indexer(
             config=stage_config,
@@ -4473,11 +5054,55 @@ def index(
             vector_store=vector_store,
             embedding_ledger=embedding_ledger,
         )
+        indexer._allow_partial_failures = allow_partial
+
+        def _active_extract_progress(
+            stage_name: str | None = None,
+        ) -> dict[str, object] | None:
+            """Return normalized extract-progress only while extract_symbols is active."""
+            target_stage = stage_name if stage_name is not None else current_stage
+            if target_stage != "extract_symbols":
+                return None
+            return _normalize_extract_progress_payload(current_extract_progress)
+
+        def _update_extract_progress(progress: dict[str, object] | None) -> None:
+            """Persist additive extract progress while the extract_symbols stage is active."""
+            nonlocal current_extract_progress
+            normalized = _normalize_extract_progress_payload(progress)
+            if normalized is None:
+                current_extract_progress = None
+                return
+            current_extract_progress = normalized
+            if active_cache is None or current_stage != "extract_symbols":
+                return
+            build_state_payload = _write_cache_build_state(
+                active_cache,
+                state="building",
+                build_id=build_id,
+                started_at=build_started_at,
+                stage=current_stage,
+                progress=normalized,
+            )
+            _write_staged_build_resume_manifest(
+                active_cache,
+                build_id=build_id,
+                state="building",
+                started_at=build_started_at,
+                updated_at=_build_state_updated_at(build_state_payload),
+                stage=current_stage,
+                stage_cache=cache,
+                embedding_profile=expected_profile,
+                index_target_path=requested_index_target_path,
+                source=resume_source or "manifest",
+                progress=normalized,
+            )
 
         def _update_build_stage(stage_name: str) -> None:
             """Advance the active build-state sidecar to the current lifecycle stage."""
-            nonlocal current_stage
+            nonlocal current_stage, current_extract_progress
             current_stage = stage_name
+            if stage_name != "extract_symbols":
+                current_extract_progress = None
             assert active_cache is not None
             trace_session = current_trace_session()
             if trace_session is not None:
@@ -4488,6 +5113,7 @@ def index(
                 build_id=build_id,
                 started_at=build_started_at,
                 stage=stage_name,
+                progress=_active_extract_progress(stage_name),
             )
             _write_staged_build_resume_manifest(
                 active_cache,
@@ -4500,10 +5126,12 @@ def index(
                 embedding_profile=expected_profile,
                 index_target_path=requested_index_target_path,
                 source=resume_source or "manifest",
+                progress=_active_extract_progress(stage_name),
             )
 
         _update_build_stage("scan_source")
         indexer._stage_callback = _update_build_stage
+        indexer._extract_progress_callback = _update_extract_progress
 
         if not as_json:
 
@@ -4534,6 +5162,7 @@ def index(
                 started_at=build_started_at,
                 stage=current_stage,
                 cleanup_pending=True,
+                progress=_active_extract_progress(),
             )
             _write_staged_build_resume_manifest(
                 active_cache,
@@ -4546,24 +5175,119 @@ def index(
                 embedding_profile=expected_profile,
                 index_target_path=requested_index_target_path,
                 source=resume_source or "manifest",
+                progress=_active_extract_progress(),
             )
             _terminate_index_children()
 
         try:
             with _index_signal_guard(_handle_interrupt):
                 if os.path.isdir(path):
-                    result = indexer.index_repository(path)
-                    _record_repository_index_stages(stage_recorder, result)
-
-                    _update_build_stage("update_symbol_index")
-                    symbol_payload = _run_symbol_index(
-                        index_target=path,
-                        config=config,
-                        parser_registry=parser_registry,
-                        prefetched_files=result.parsed_files,
-                        file_paths=result.source_files,
+                    result = indexer.index_repository(
+                        path,
+                        capture_verbose_metrics=verbose,
                     )
-                    _record_symbol_index_stage(stage_recorder, symbol_payload)
+                    _record_repository_index_stages(stage_recorder, result)
+                    extract_timeout_paths = {
+                        str(timing.path)
+                        for timing in result.file_timings
+                        if str(timing.reason or "") == "extract_symbols_timeout"
+                    }
+                    fail_fast_extract_timeout = (
+                        bool(result.failed_reasons.get("extract_symbols_timeout"))
+                        and not allow_partial
+                    )
+                    symbol_index_file_paths = [
+                        file_path
+                        for file_path in result.source_files
+                        if file_path not in extract_timeout_paths
+                    ]
+                    symbol_payload: dict[str, object] = {
+                        "failed": 0,
+                        "failed_reasons": {},
+                        "failed_samples": [],
+                        "duration_ms": 0,
+                        "files_considered": 0,
+                        "defs_indexed": 0,
+                        "refs_indexed": 0,
+                    }
+                    if fail_fast_extract_timeout:
+                        stage_recorder.record(
+                            "embed_chunks",
+                            status="not_run",
+                            duration_ms=0,
+                            counts={"indexed_symbols": 0},
+                        )
+                        stage_recorder.record(
+                            "persist_cache",
+                            status="not_run",
+                            duration_ms=0,
+                            counts={
+                                "files_changed": 0,
+                                "files_removed": 0,
+                                "symbols_removed": 0,
+                            },
+                        )
+                        stage_recorder.record(
+                            "validate_integrity",
+                            status="not_run",
+                            duration_ms=0,
+                            counts={"failed_reasons": 0},
+                        )
+                        stage_recorder.record(
+                            "update_symbol_index",
+                            status="not_run",
+                            duration_ms=0,
+                            counts={
+                                "files_considered": 0,
+                                "defs_indexed": 0,
+                                "refs_indexed": 0,
+                                "failed": 0,
+                            },
+                        )
+                        build_state_payload = _write_cache_build_state(
+                            active_cache,
+                            state="interrupted",
+                            build_id=build_id,
+                            started_at=build_started_at,
+                            stage=current_stage,
+                            cleanup_pending=True,
+                            progress=_active_extract_progress(),
+                        )
+                        _write_staged_build_resume_manifest(
+                            active_cache,
+                            build_id=build_id,
+                            state="interrupted",
+                            started_at=build_started_at,
+                            updated_at=_build_state_updated_at(build_state_payload),
+                            stage=current_stage,
+                            stage_cache=cache,
+                            embedding_profile=expected_profile,
+                            index_target_path=requested_index_target_path,
+                            source=resume_source or "manifest",
+                            progress=_active_extract_progress(),
+                        )
+                    elif symbol_index_file_paths:
+                        _update_build_stage("update_symbol_index")
+                        symbol_payload = _run_symbol_index(
+                            index_target=path,
+                            config=config,
+                            parser_registry=parser_registry,
+                            prefetched_files=result.parsed_files,
+                            file_paths=symbol_index_file_paths,
+                        )
+                        _record_symbol_index_stage(stage_recorder, symbol_payload)
+                    else:
+                        stage_recorder.record(
+                            "update_symbol_index",
+                            status="not_run",
+                            duration_ms=0,
+                            counts={
+                                "files_considered": 0,
+                                "defs_indexed": 0,
+                                "refs_indexed": 0,
+                                "failed": 0,
+                            },
+                        )
 
                     overall_failed_reasons = dict(result.failed_reasons)
                     _merge_failure_reasons(
@@ -4583,12 +5307,20 @@ def index(
                     if overall_failed == 0:
                         _update_build_stage("commit_metadata")
                         commit_started = time.perf_counter()
+                        clear_build_file_checkpoints = getattr(
+                            cache,
+                            "clear_build_file_checkpoints",
+                            None,
+                        )
+                        if callable(clear_build_file_checkpoints):
+                            clear_build_file_checkpoints()
                         active_cache.publish_staged_build(build_id)
                         publish_succeeded = True
                         total_symbols = active_cache.count_symbols()
                         indexed_files = active_cache.count_files()
                         _persist_last_success_resume_state(config, active_cache)
                         active_cache.clear_build_state()
+                        active_cache.cleanup_staged_builds()
                         commit_duration_ms = int((time.perf_counter() - commit_started) * 1000)
                         _record_commit_metadata_stage(
                             stage_recorder,
@@ -4596,6 +5328,12 @@ def index(
                             duration_ms=commit_duration_ms,
                             total_symbols=total_symbols,
                             indexed_files=indexed_files,
+                        )
+                    elif fail_fast_extract_timeout:
+                        _record_commit_metadata_stage(
+                            stage_recorder,
+                            status="not_run",
+                            duration_ms=0,
                         )
                     else:
                         build_state_payload = _write_cache_build_state(
@@ -4605,6 +5343,7 @@ def index(
                             started_at=build_started_at,
                             stage=current_stage,
                             cleanup_pending=True,
+                            progress=_active_extract_progress(),
                         )
                         _write_staged_build_resume_manifest(
                             active_cache,
@@ -4617,6 +5356,7 @@ def index(
                             embedding_profile=expected_profile,
                             index_target_path=requested_index_target_path,
                             source=resume_source or "manifest",
+                            progress=_active_extract_progress(),
                         )
                         _record_commit_metadata_stage(
                             stage_recorder,
@@ -4634,6 +5374,9 @@ def index(
                     payload["symbol_index"] = symbol_payload
                     payload["resumed_build"] = resumed_build
                     payload["resume_source"] = resume_source
+                    payload["resume_blocked"] = resume_blocked
+                    payload["resume_block_reason_codes"] = list(resume_block_reason_codes)
+                    payload["resume_block_candidates"] = list(resume_block_candidates)
                     payload["timings_ms"] = {
                         "total": command_duration_ms,
                         "legacy_index": result.duration_ms,
@@ -4647,6 +5390,8 @@ def index(
                     payload["stages"] = stage_recorder.as_payload()
                     if active_cache is not None:
                         payload["index_stats"] = _cache_index_stats(active_cache)
+                    if verbose:
+                        _attach_index_verbose_payload(payload, result.verbose_lines)
                     if as_json and debug_timings:
                         payload["slow_files"] = _build_slow_files_payload(result.file_timings)
                     _attach_skipped_extension_diagnostics(
@@ -4694,33 +5439,56 @@ def index(
 
                 _update_build_stage("extract_symbols")
                 single_index_started = time.perf_counter()
-                execution = indexer.index_file_with_details(path) if files_considered else None
-                legacy_index_ms = int((time.perf_counter() - single_index_started) * 1000)
-
-                cleanup_started = time.perf_counter()
-                stale_cleanup = (
-                    indexer.prune_missing_file_entries()
+                execution = (
+                    indexer.index_file_with_details(
+                        path,
+                        capture_verbose_metrics=verbose,
+                    )
                     if files_considered
-                    else {
+                    else None
+                )
+                legacy_index_ms = int((time.perf_counter() - single_index_started) * 1000)
+                extract_timeout_failed = bool(
+                    execution is not None and execution.outcome.reason == "extract_symbols_timeout"
+                )
+                skip_post_extract_work = extract_timeout_failed
+
+                if skip_post_extract_work:
+                    stale_cleanup = {
                         "files_removed": 0,
                         "symbols_removed": 0,
                         "failed": 0,
                         "failed_reasons": {},
                         "failed_samples": [],
                     }
-                )
-                if vector_store and files_considered:
-                    vector_store.save()
-                cleanup_ms = int((time.perf_counter() - cleanup_started) * 1000)
+                    cleanup_ms = 0
+                    consistency = {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+                    consistency_ms = 0
+                else:
+                    cleanup_started = time.perf_counter()
+                    stale_cleanup = (
+                        indexer.prune_missing_file_entries()
+                        if files_considered
+                        else {
+                            "files_removed": 0,
+                            "symbols_removed": 0,
+                            "failed": 0,
+                            "failed_reasons": {},
+                            "failed_samples": [],
+                        }
+                    )
+                    if vector_store and files_considered:
+                        vector_store.save()
+                    cleanup_ms = int((time.perf_counter() - cleanup_started) * 1000)
 
-                _update_build_stage("validate_integrity")
-                consistency_started = time.perf_counter()
-                consistency = (
-                    indexer.validate_vector_metadata_consistency()
-                    if files_considered
-                    else {"failed": 0, "failed_reasons": {}, "failed_samples": []}
-                )
-                consistency_ms = int((time.perf_counter() - consistency_started) * 1000)
+                    _update_build_stage("validate_integrity")
+                    consistency_started = time.perf_counter()
+                    consistency = (
+                        indexer.validate_vector_metadata_consistency()
+                        if files_considered
+                        else {"failed": 0, "failed_reasons": {}, "failed_samples": []}
+                    )
+                    consistency_ms = int((time.perf_counter() - consistency_started) * 1000)
 
                 failed_reasons: dict[str, int] = {}
                 failed_samples: list[str] = []
@@ -4813,20 +5581,24 @@ def index(
                     "embed_chunks",
                     status=(
                         _stage_status_from_reasons(failed_reasons, "embed_chunks")
-                        if files_considered
+                        if files_considered and not skip_post_extract_work
                         else "not_run"
                     ),
-                    duration_ms=embed_duration_ms,
+                    duration_ms=embed_duration_ms if not skip_post_extract_work else 0,
                     counts={"indexed_symbols": indexed_symbols},
                 )
                 stage_recorder.record(
                     "persist_cache",
                     status=(
                         _stage_status_from_reasons(failed_reasons, "persist_cache")
-                        if files_considered
+                        if files_considered and not skip_post_extract_work
                         else "not_run"
                     ),
-                    duration_ms=persist_duration_ms if files_considered else 0,
+                    duration_ms=(
+                        persist_duration_ms
+                        if files_considered and not skip_post_extract_work
+                        else 0
+                    ),
                     counts={
                         "files_changed": indexed,
                         "files_removed": files_removed,
@@ -4838,14 +5610,21 @@ def index(
                     "validate_integrity",
                     status=(
                         _stage_status_from_reasons(failed_reasons, "validate_integrity")
-                        if files_considered
+                        if files_considered and not skip_post_extract_work
                         else "not_run"
                     ),
-                    duration_ms=consistency_ms if files_considered else 0,
+                    duration_ms=(
+                        consistency_ms if files_considered and not skip_post_extract_work else 0
+                    ),
                     counts={"failed": int(consistency.get("failed", 0) or 0)},
                 )
 
-                if outcome and outcome.status != "failed" and failed == 0:
+                if (
+                    outcome
+                    and outcome.status != "failed"
+                    and failed == 0
+                    and not skip_post_extract_work
+                ):
                     metadata = IndexMetadata(
                         version=config.index_version,
                         total_symbols=cache.count_symbols(),
@@ -4854,17 +5633,41 @@ def index(
                     cache.set_index_metadata(metadata)
                     cache.set_index_profile(config.embedding_profile())
 
-                _update_build_stage("update_symbol_index")
-                symbol_payload = _run_symbol_index(
-                    index_target=path,
-                    config=config,
-                    parser_registry=parser_registry,
-                    prefetched_files=(
-                        [execution.prepared.snapshot] if execution and execution.prepared else None
-                    ),
-                    file_paths=[path] if files_considered else None,
-                )
-                _record_symbol_index_stage(stage_recorder, symbol_payload)
+                if files_considered and not skip_post_extract_work:
+                    _update_build_stage("update_symbol_index")
+                    symbol_payload = _run_symbol_index(
+                        index_target=path,
+                        config=config,
+                        parser_registry=parser_registry,
+                        prefetched_files=(
+                            [execution.prepared.snapshot]
+                            if execution and execution.prepared
+                            else None
+                        ),
+                        file_paths=[path],
+                    )
+                    _record_symbol_index_stage(stage_recorder, symbol_payload)
+                else:
+                    symbol_payload = {
+                        "failed": 0,
+                        "failed_reasons": {},
+                        "failed_samples": [],
+                        "duration_ms": 0,
+                        "files_considered": 0,
+                        "defs_indexed": 0,
+                        "refs_indexed": 0,
+                    }
+                    stage_recorder.record(
+                        "update_symbol_index",
+                        status="not_run",
+                        duration_ms=0,
+                        counts={
+                            "files_considered": 0,
+                            "defs_indexed": 0,
+                            "refs_indexed": 0,
+                            "failed": 0,
+                        },
+                    )
 
                 overall_failed_reasons = dict(failed_reasons)
                 _merge_failure_reasons(
@@ -4881,10 +5684,18 @@ def index(
                 if overall_failed == 0:
                     _update_build_stage("commit_metadata")
                     commit_started = time.perf_counter()
+                    clear_build_file_checkpoints = getattr(
+                        cache,
+                        "clear_build_file_checkpoints",
+                        None,
+                    )
+                    if callable(clear_build_file_checkpoints):
+                        clear_build_file_checkpoints()
                     active_cache.publish_staged_build(build_id)
                     publish_succeeded = True
                     _persist_last_success_resume_state(config, active_cache)
                     active_cache.clear_build_state()
+                    active_cache.cleanup_staged_builds()
                     commit_duration_ms = int((time.perf_counter() - commit_started) * 1000)
                     _record_commit_metadata_stage(
                         stage_recorder,
@@ -4901,6 +5712,7 @@ def index(
                         started_at=build_started_at,
                         stage=current_stage,
                         cleanup_pending=True,
+                        progress=_active_extract_progress(),
                     )
                     _write_staged_build_resume_manifest(
                         active_cache,
@@ -4913,6 +5725,7 @@ def index(
                         embedding_profile=expected_profile,
                         index_target_path=requested_index_target_path,
                         source=resume_source or "manifest",
+                        progress=_active_extract_progress(),
                     )
                     _record_commit_metadata_stage(
                         stage_recorder,
@@ -4940,6 +5753,9 @@ def index(
                     "symbol_index": symbol_payload,
                     "resumed_build": resumed_build,
                     "resume_source": resume_source,
+                    "resume_blocked": resume_blocked,
+                    "resume_block_reason_codes": list(resume_block_reason_codes),
+                    "resume_block_candidates": list(resume_block_candidates),
                 }
                 command_duration_ms = int((time.perf_counter() - command_started) * 1000)
                 result["timings_ms"] = {
@@ -4953,6 +5769,11 @@ def index(
                 result["stages"] = stage_recorder.as_payload()
                 if active_cache is not None:
                     result["index_stats"] = _cache_index_stats(active_cache)
+                if verbose:
+                    _attach_index_verbose_payload(
+                        result,
+                        execution.verbose_lines if execution is not None else None,
+                    )
                 if as_json and debug_timings and execution_timing is not None:
                     result["slow_files"] = [execution_timing.as_payload()]
                 _attach_skipped_extension_diagnostics(
@@ -4981,6 +5802,7 @@ def index(
                 try:
                     if publish_succeeded:
                         active_cache.clear_build_state()
+                        active_cache.cleanup_staged_builds()
                     else:
                         build_state_payload = _write_cache_build_state(
                             active_cache,
@@ -4989,6 +5811,7 @@ def index(
                             started_at=build_started_at,
                             stage=current_stage,
                             cleanup_pending=True,
+                            progress=_active_extract_progress(),
                         )
                         _write_staged_build_resume_manifest(
                             active_cache,
@@ -5001,6 +5824,7 @@ def index(
                             embedding_profile=expected_profile,
                             index_target_path=requested_index_target_path,
                             source=resume_source or "manifest",
+                            progress=_active_extract_progress(),
                         )
                 except Exception:
                     pass
@@ -5372,6 +6196,22 @@ def _build_slow_files_payload(
         reverse=True,
     )
     return [timing.as_payload() for timing in ranked[:limit]]
+
+
+def _attach_index_verbose_payload(
+    payload: dict[str, object],
+    verbose_lines: VerboseLineMetrics | None,
+) -> None:
+    """Attach additive verbose index line metrics to a CLI payload."""
+    payload["verbose"] = {
+        "lines": {
+            "index": (
+                verbose_lines.as_payload()
+                if verbose_lines is not None
+                else VerboseLineMetrics().as_payload()
+            )
+        }
+    }
 
 
 def _resolve_search_ranking_metadata(

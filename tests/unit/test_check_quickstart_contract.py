@@ -46,6 +46,7 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
                 'scripts/gloggur support collect --json --note "manual support snapshot"',
                 "## Troubleshooting by Failure Code",
                 "embedding_provider_error",
+                "extract_symbols_timeout",
                 "watch_mode_conflict",
                 "watch_path_missing",
                 "search_contract_v1_removed",
@@ -61,6 +62,7 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
                 "watch_path_missing",
                 "search_contract_v1_removed",
                 "search_router_backends_failed",
+                "extract_symbols_timeout",
             ]
         ),
     )

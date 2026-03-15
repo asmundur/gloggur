@@ -386,6 +386,14 @@ def test_support_collect_captures_active_index_trace_and_stack_dump(
                         "build_id": "build-live",
                         "pid": os.getpid(),
                         "stage": "extract_symbols",
+                        "progress": {
+                            "current_file": "sample.py",
+                            "subphase": "prepare_file",
+                            "files_done": 0,
+                            "files_total": 1,
+                            "started_at": "2026-03-14T00:00:00+00:00",
+                            "updated_at": "2026-03-14T00:00:01+00:00",
+                        },
                     }
                 )
                 print("index still running")
@@ -440,6 +448,7 @@ def test_support_collect_captures_active_index_trace_and_stack_dump(
             assert meta_payload["command_name"] == "index"
             assert meta_payload["stage"] == "extract_symbols"
             assert meta_payload["build_state"]["build_id"] == "build-live"
+            assert meta_payload["build_state"]["progress"]["current_file"] == "sample.py"
             assert "Thread" in stack_text or "Current thread" in stack_text
         finally:
             process.terminate()

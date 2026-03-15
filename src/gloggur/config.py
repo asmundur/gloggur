@@ -150,6 +150,7 @@ class GloggurConfig:
     index_version: str = "1"
     max_symbol_chunk_bytes: int = 12000
     max_symbol_chunk_tokens: int = 2000
+    extract_symbols_timeout_seconds: float = 60.0
     config_source: str = "defaults"
     config_source_path: str | None = None
     config_trust_mode: str = DEFAULT_REPO_CONFIG_TRUST_MODE
@@ -427,6 +428,13 @@ class GloggurConfig:
             try:
                 data["max_symbol_chunk_tokens"] = int(
                     _env_value("GLOGGUR_MAX_SYMBOL_CHUNK_TOKENS") or "2000"
+                )
+            except ValueError:
+                pass
+        if _env_value("GLOGGUR_EXTRACT_SYMBOLS_TIMEOUT_SECONDS"):
+            try:
+                data["extract_symbols_timeout_seconds"] = float(
+                    _env_value("GLOGGUR_EXTRACT_SYMBOLS_TIMEOUT_SECONDS") or "60"
                 )
             except ValueError:
                 pass

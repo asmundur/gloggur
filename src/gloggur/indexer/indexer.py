@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
 import os
+import queue
 import re
 import subprocess
 import time
+import traceback
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,11 +17,18 @@ from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError, wrap_embedding_error
 from gloggur.graph.extractor import GraphEdgeExtractor
-from gloggur.indexer.cache import CacheConfig, CacheManager
+from gloggur.indexer.cache import (
+    BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
+    BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+    BuildFileCheckpoint,
+    CacheConfig,
+    CacheManager,
+)
 from gloggur.indexer.embedding_ledger import EmbeddingLedger, embedding_text_hash
 from gloggur.indexer.shared import FileTimingTrace, ParsedFileSnapshot
 from gloggur.models import EdgeRecord, FileMetadata, IndexMetadata, Symbol, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
+from gloggur.parsers.treesitter_parser import TreeSitterParser
 from gloggur.path_filters import filter_index_walk_dirs, is_indexable_source_path
 from gloggur.storage.vector_store import VectorStore
 
@@ -64,7 +74,329 @@ FAILURE_REMEDIATION: dict[str, list[str]] = {
         "Inspect symbol boundaries and persisted chunk spans for the failed file.",
         "Rerun `gloggur index . --json` after fixing parser output or chunk construction drift.",
     ],
+    "extract_symbols_timeout": [
+        "Inspect `status --json` or `support collect --json` for extract progress metadata "
+        "showing the stuck file and subphase.",
+        "Retry indexing after investigating the parser or graph-edge extraction path for that "
+        "file, or use --allow-partial to continue past the timed-out file.",
+    ],
 }
+
+EXTRACT_SYMBOLS_TIMEOUT_REASON = "extract_symbols_timeout"
+_EXTRACT_WORKER_POLL_SECONDS = 0.1
+_EXTRACT_PROGRESS_HEARTBEAT_SECONDS = 1.0
+_EXTRACT_WORKER_STARTUP_TIMEOUT_SECONDS = 10.0
+_TREE_SITTER_EXTRACT_SYMBOLS_IMPL = TreeSitterParser.extract_symbols
+
+
+class _ExtractWorkerError(RuntimeError):
+    """Raised when the extract-symbols worker reports a non-timeout failure."""
+
+
+class _ExtractWorkerTimeout(RuntimeError):
+    """Raised when one extract-symbols worker job exceeds the configured timeout."""
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        path: str,
+        timeout_seconds: float,
+        worker_pid: int | None,
+    ) -> None:
+        """Initialize the timeout with stable reporting fields for CLI consumers."""
+        self.kind = kind
+        self.path = path
+        self.timeout_seconds = timeout_seconds
+        self.worker_pid = worker_pid
+        super().__init__(
+            f"{kind} timed out for {path} after {timeout_seconds:.3f}s"
+            + (f" (worker_pid={worker_pid})" if worker_pid is not None else "")
+        )
+
+
+def _extract_symbols_worker_main(
+    config: GloggurConfig,
+    request_queue: object,
+    response_queue: object,
+) -> None:
+    """Serve extract-symbols jobs in a reusable child process."""
+    try:
+        cache = CacheManager(CacheConfig(config.cache_dir))
+        parser_registry = ParserRegistry(
+            extension_map=config.parser_extension_map,
+            adapter_overrides=config.adapters if isinstance(config.adapters, dict) else None,
+        )
+        indexer = Indexer(
+            config=config,
+            cache=cache,
+            parser_registry=parser_registry,
+        )
+    except BaseException as exc:
+        try:
+            response_queue.put(
+                {
+                    "kind": "startup_error",
+                    "ok": False,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+        except Exception:
+            pass
+        return
+
+    try:
+        response_queue.put({"kind": "ready", "ok": True})
+    except Exception:
+        return
+
+    while True:
+        request = request_queue.get()
+        if request is None:
+            return
+
+        job_id = int(request.get("job_id", 0) or 0)
+        kind = str(request.get("kind") or "")
+        payload = request.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        try:
+            if kind == "prepare_file":
+                prepared, outcome, timing = indexer._prepare_file_for_index(
+                    str(payload["path"]),
+                    existing_content_hash=(
+                        str(payload["existing_content_hash"])
+                        if payload.get("existing_content_hash") is not None
+                        else None
+                    ),
+                    capture_verbose_metrics=bool(payload.get("capture_verbose_metrics")),
+                )
+                response_queue.put(
+                    {
+                        "job_id": job_id,
+                        "kind": kind,
+                        "ok": True,
+                        "prepared": prepared,
+                        "outcome": outcome,
+                        "timing": timing,
+                    }
+                )
+                continue
+
+            if kind == "build_edges":
+                edges = Indexer._build_graph_edges(
+                    path=str(payload["path"]),
+                    source=str(payload["source"]),
+                    symbols=list(payload.get("symbols") or []),
+                    candidate_symbols=list(payload.get("candidate_symbols") or []),
+                    repo_id=str(payload["repo_id"]),
+                    commit=str(payload["commit"]),
+                    language=str(payload["language"]),
+                    include_text=bool(payload.get("include_text")),
+                )
+                response_queue.put(
+                    {
+                        "job_id": job_id,
+                        "kind": kind,
+                        "ok": True,
+                        "edges": edges,
+                    }
+                )
+                continue
+
+            raise ValueError(f"unsupported extract worker job kind: {kind}")
+        except BaseException as exc:
+            try:
+                response_queue.put(
+                    {
+                        "job_id": job_id,
+                        "kind": kind,
+                        "ok": False,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                        "traceback": traceback.format_exc(),
+                    }
+                )
+            except Exception:
+                return
+
+
+class _ExtractSymbolsWorker:
+    """Reusable spawned worker for extract-symbols subphases."""
+
+    def __init__(self, config: GloggurConfig) -> None:
+        """Capture worker config and initialize lazy process state."""
+        self._config = config
+        self._ctx = multiprocessing.get_context("spawn")
+        self._process: multiprocessing.Process | None = None
+        self._request_queue: object | None = None
+        self._response_queue: object | None = None
+        self._next_job_id = 0
+        self._ready = False
+
+    @property
+    def pid(self) -> int | None:
+        """Return the active worker pid when the child process is running."""
+        process = self._process
+        return process.pid if process is not None else None
+
+    def ensure_started(self) -> None:
+        """Start the worker when it is not already alive."""
+        process = self._process
+        if process is not None and process.is_alive() and self._ready:
+            return
+        self._shutdown(force=True)
+        self._request_queue = self._ctx.Queue()
+        self._response_queue = self._ctx.Queue()
+        self._process = self._ctx.Process(
+            target=_extract_symbols_worker_main,
+            args=(self._config, self._request_queue, self._response_queue),
+            daemon=True,
+        )
+        self._process.start()
+        self._await_ready()
+
+    def _await_ready(self) -> None:
+        """Wait for the spawned worker to finish imports before timing jobs."""
+        assert self._response_queue is not None
+        deadline = time.monotonic() + _EXTRACT_WORKER_STARTUP_TIMEOUT_SECONDS
+        while True:
+            process = self._process
+            if process is None:
+                raise _ExtractWorkerError("extract worker disappeared during startup")
+            if not process.is_alive():
+                exit_code = process.exitcode
+                self._shutdown(force=True)
+                raise _ExtractWorkerError(
+                    f"extract worker exited during startup (exitcode={exit_code})"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                worker_pid = self.pid
+                self._shutdown(force=True)
+                detail = "extract worker failed to signal ready before startup timeout"
+                if worker_pid is not None:
+                    detail += f" (worker_pid={worker_pid})"
+                raise _ExtractWorkerError(detail)
+            try:
+                response = self._response_queue.get(
+                    timeout=min(_EXTRACT_WORKER_POLL_SECONDS, remaining)
+                )
+            except queue.Empty:
+                continue
+            if not isinstance(response, dict):
+                continue
+            kind = str(response.get("kind") or "")
+            if kind == "ready":
+                self._ready = True
+                return
+            if kind == "startup_error":
+                error_type = str(response.get("error_type") or "WorkerStartupError")
+                error_message = str(response.get("error_message") or "worker startup failed")
+                trace_text = str(response.get("traceback") or "").strip()
+                detail = f"{error_type}: {error_message}"
+                if trace_text:
+                    detail = f"{detail}\n{trace_text}"
+                self._shutdown(force=True)
+                raise _ExtractWorkerError(detail)
+
+    def run_job(
+        self,
+        *,
+        kind: str,
+        payload: dict[str, object],
+        timeout_seconds: float,
+        on_poll: Callable[[], None] | None = None,
+    ) -> dict[str, object]:
+        """Run one job or raise a structured timeout/worker error."""
+        self.ensure_started()
+        assert self._request_queue is not None
+        assert self._response_queue is not None
+        self._next_job_id += 1
+        job_id = self._next_job_id
+        self._request_queue.put(
+            {
+                "job_id": job_id,
+                "kind": kind,
+                "payload": dict(payload),
+            }
+        )
+        deadline = time.monotonic() + max(0.001, float(timeout_seconds))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                worker_pid = self.pid
+                self._shutdown(force=True)
+                raise _ExtractWorkerTimeout(
+                    kind=kind,
+                    path=str(payload.get("path") or ""),
+                    timeout_seconds=float(timeout_seconds),
+                    worker_pid=worker_pid,
+                )
+            try:
+                response = self._response_queue.get(
+                    timeout=min(_EXTRACT_WORKER_POLL_SECONDS, remaining)
+                )
+            except queue.Empty:
+                if on_poll is not None:
+                    on_poll()
+                continue
+            if not isinstance(response, dict) or int(response.get("job_id", -1)) != job_id:
+                continue
+            if bool(response.get("ok")):
+                return response
+            error_type = str(response.get("error_type") or "WorkerError")
+            error_message = str(response.get("error_message") or "worker job failed")
+            trace_text = str(response.get("traceback") or "").strip()
+            detail = f"{error_type}: {error_message}"
+            if trace_text:
+                detail = f"{detail}\n{trace_text}"
+            raise _ExtractWorkerError(detail)
+
+    def restart(self) -> None:
+        """Restart the worker after a timeout so later jobs can continue safely."""
+        self._shutdown(force=True)
+        self.ensure_started()
+
+    def close(self) -> None:
+        """Stop the worker process and release its queues."""
+        self._shutdown(force=False)
+
+    def _shutdown(self, *, force: bool) -> None:
+        """Stop the worker process and tear down queue handles."""
+        process = self._process
+        request_queue = self._request_queue
+        response_queue = self._response_queue
+        self._process = None
+        self._request_queue = None
+        self._response_queue = None
+        self._ready = False
+        if process is not None:
+            try:
+                if process.is_alive() and request_queue is not None and not force:
+                    request_queue.put(None)
+                    process.join(timeout=1)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(timeout=5)
+            except Exception:
+                pass
+        for handle in (request_queue, response_queue):
+            if handle is None:
+                continue
+            try:
+                handle.close()
+            except Exception:
+                pass
+            try:
+                handle.join_thread()
+            except Exception:
+                pass
 
 
 @dataclass
@@ -89,6 +421,7 @@ class IndexResult:
     file_timings: list[FileTimingTrace] = field(default_factory=list)
     parsed_files: list[ParsedFileSnapshot] = field(default_factory=list)
     source_files: list[str] = field(default_factory=list)
+    verbose_lines: VerboseLineMetrics | None = None
 
     @property
     def indexed_files(self) -> int:
@@ -140,6 +473,172 @@ class IndexResult:
 
 
 @dataclass(frozen=True)
+class VerboseLineKindMetrics:
+    """Line metrics for one embedded artifact kind."""
+
+    vector_count: int = 0
+    line_total: int = 0
+    line_unique: int = 0
+
+    def as_payload(self) -> dict[str, int]:
+        """Serialize one embedded-artifact metric bucket."""
+        return {
+            "vector_count": self.vector_count,
+            "line_total": self.line_total,
+            "line_unique": self.line_unique,
+        }
+
+
+@dataclass(frozen=True)
+class VerboseLineMetrics:
+    """Verbose index line metrics derived from source and embedded spans."""
+
+    source_total: int = 0
+    embedded_total: int = 0
+    embedded_unique: int = 0
+    symbol_chunks: VerboseLineKindMetrics = field(default_factory=VerboseLineKindMetrics)
+    graph_edges: VerboseLineKindMetrics = field(default_factory=VerboseLineKindMetrics)
+
+    @property
+    def embedded_duplicate(self) -> int:
+        """Return duplicate embedded line count across all embedded artifacts."""
+        return max(0, self.embedded_total - self.embedded_unique)
+
+    @property
+    def vector_count(self) -> int:
+        """Return total embedded vector count across artifact kinds."""
+        return self.symbol_chunks.vector_count + self.graph_edges.vector_count
+
+    @staticmethod
+    def _ratio_or_none(numerator: int, denominator: int) -> float | None:
+        """Return a stable floating-point ratio or None when undefined."""
+        if denominator <= 0:
+            return None
+        return round(numerator / denominator, 6)
+
+    def as_payload(self) -> dict[str, object]:
+        """Serialize verbose line metrics for CLI output."""
+        return {
+            "source_total": self.source_total,
+            "embedded_total": self.embedded_total,
+            "embedded_unique": self.embedded_unique,
+            "embedded_duplicate": self.embedded_duplicate,
+            "source_coverage_ratio": self._ratio_or_none(
+                self.embedded_unique,
+                self.source_total,
+            ),
+            "duplication_ratio": self._ratio_or_none(
+                self.embedded_duplicate,
+                self.embedded_total,
+            ),
+            "vector_count": self.vector_count,
+            "by_kind": {
+                "symbol_chunks": self.symbol_chunks.as_payload(),
+                "graph_edges": self.graph_edges.as_payload(),
+            },
+        }
+
+
+def _merged_line_count(ranges_by_path: dict[str, list[tuple[int, int]]]) -> int:
+    """Return total unique line coverage after merging ranges per file path."""
+    total = 0
+    for ranges in ranges_by_path.values():
+        if not ranges:
+            continue
+        sorted_ranges = sorted(ranges)
+        current_start, current_end = sorted_ranges[0]
+        for start_line, end_line in sorted_ranges[1:]:
+            if start_line <= current_end + 1:
+                current_end = max(current_end, end_line)
+                continue
+            total += current_end - current_start + 1
+            current_start, current_end = start_line, end_line
+        total += current_end - current_start + 1
+    return total
+
+
+@dataclass
+class _VerboseLineKindAccumulator:
+    """Mutable accumulator for one embedded artifact kind."""
+
+    vector_count: int = 0
+    line_total: int = 0
+    ranges_by_path: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+
+    def add_span(self, path: str, start_line: int, end_line: int) -> tuple[int, int]:
+        """Record one embedded line span and return the normalized range."""
+        normalized_start = max(1, int(start_line))
+        normalized_end = max(normalized_start, int(end_line))
+        self.vector_count += 1
+        self.line_total += normalized_end - normalized_start + 1
+        self.ranges_by_path.setdefault(path, []).append((normalized_start, normalized_end))
+        return normalized_start, normalized_end
+
+    def build(self) -> VerboseLineKindMetrics:
+        """Freeze one embedded-artifact bucket into a payload-ready metrics object."""
+        return VerboseLineKindMetrics(
+            vector_count=self.vector_count,
+            line_total=self.line_total,
+            line_unique=_merged_line_count(self.ranges_by_path),
+        )
+
+
+@dataclass
+class VerboseLineMetricsAccumulator:
+    """Bounded accumulator for verbose source and embedded line metrics."""
+
+    source_total: int = 0
+    symbol_chunks: _VerboseLineKindAccumulator = field(default_factory=_VerboseLineKindAccumulator)
+    graph_edges: _VerboseLineKindAccumulator = field(default_factory=_VerboseLineKindAccumulator)
+    overall_ranges_by_path: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+
+    def add_source_lines(self, line_count: int) -> None:
+        """Add physical source lines for one file in scope."""
+        self.source_total += max(0, int(line_count))
+
+    def add_symbol_chunks(self, chunks: Iterable[SymbolChunk]) -> None:
+        """Record line coverage from embedded symbol chunks only."""
+        for chunk in chunks:
+            if chunk.embedding_vector is None:
+                continue
+            start_line, end_line = self.symbol_chunks.add_span(
+                chunk.file_path,
+                chunk.start_line,
+                chunk.end_line,
+            )
+            self.overall_ranges_by_path.setdefault(chunk.file_path, []).append(
+                (start_line, end_line)
+            )
+
+    def add_graph_edges(self, edges: Iterable[EdgeRecord]) -> None:
+        """Record line coverage from embedded graph-edge vectors only."""
+        for edge in edges:
+            if edge.embedding_vector is None:
+                continue
+            line_number = max(1, int(edge.line))
+            start_line, end_line = self.graph_edges.add_span(
+                edge.file_path,
+                line_number,
+                line_number,
+            )
+            self.overall_ranges_by_path.setdefault(edge.file_path, []).append(
+                (start_line, end_line)
+            )
+
+    def build(self) -> VerboseLineMetrics:
+        """Freeze the accumulator into a payload-ready metrics object."""
+        symbol_metrics = self.symbol_chunks.build()
+        edge_metrics = self.graph_edges.build()
+        return VerboseLineMetrics(
+            source_total=self.source_total,
+            embedded_total=symbol_metrics.line_total + edge_metrics.line_total,
+            embedded_unique=_merged_line_count(self.overall_ranges_by_path),
+            symbol_chunks=symbol_metrics,
+            graph_edges=edge_metrics,
+        )
+
+
+@dataclass(frozen=True)
 class FileIndexOutcome:
     """Per-file terminal outcome used to classify index runs."""
 
@@ -148,8 +647,11 @@ class FileIndexOutcome:
     symbols_added: int = 0
     symbols_updated: int = 0
     symbols_removed: int = 0
+    source_line_count: int = 0
     reason: str | None = None
     detail: str | None = None
+    retained_chunks: tuple[SymbolChunk, ...] = field(default_factory=tuple)
+    retained_edges: tuple[EdgeRecord, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -159,6 +661,7 @@ class FileIndexExecution:
     outcome: FileIndexOutcome
     prepared: PreparedFileIndex | None = None
     timing: FileTimingTrace | None = None
+    verbose_lines: VerboseLineMetrics | None = None
 
 
 @dataclass
@@ -169,6 +672,7 @@ class PreparedFileIndex:
     language: str | None
     content_hash: str
     source: str
+    size_bytes: int
     repo_id: str
     commit: str
     snapshot: ParsedFileSnapshot
@@ -211,8 +715,10 @@ class Indexer:
         self.vector_store = vector_store
         self.embedding_ledger = embedding_ledger or EmbeddingLedger(config.cache_dir)
         self._progress_callback: Callable[[int, int], None] | None = None
+        self._extract_progress_callback: Callable[[dict[str, object] | None], None] | None = None
         self._scan_callback: Callable[[int, int, str], None] | None = None
         self._stage_callback: Callable[[str], None] | None = None
+        self._allow_partial_failures = False
         self._commit_cache: dict[str, str] = {}
 
     @staticmethod
@@ -232,7 +738,407 @@ class Indexer:
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
 
-    def index_repository(self, path: str) -> IndexResult:
+    def _extract_timeout_seconds(self) -> float:
+        """Return the configured extract-symbols watchdog timeout."""
+        try:
+            timeout_seconds = float(
+                getattr(self.config, "extract_symbols_timeout_seconds", 0.0) or 0.0
+            )
+        except (TypeError, ValueError):
+            timeout_seconds = 0.0
+        return max(0.0, timeout_seconds)
+
+    def _can_use_extract_worker(self) -> bool:
+        """Return whether the current indexer wiring is safe to reproduce in a spawned worker."""
+        if self._extract_timeout_seconds() <= 0:
+            return False
+        if type(self) is not Indexer:
+            return False
+        if type(self.parser_registry) is not ParserRegistry:
+            return False
+        if TreeSitterParser.extract_symbols is not _TREE_SITTER_EXTRACT_SYMBOLS_IMPL:
+            return False
+        prepare_impl = getattr(
+            self._prepare_file_for_index,
+            "__func__",
+            self._prepare_file_for_index,
+        )
+        if prepare_impl is not Indexer._prepare_file_for_index:
+            return False
+        build_chunks_impl = getattr(
+            self._build_symbol_chunks,
+            "__func__",
+            self._build_symbol_chunks,
+        )
+        if build_chunks_impl is not Indexer._build_symbol_chunks:
+            return False
+        build_edges_impl = getattr(self._build_graph_edges, "__func__", self._build_graph_edges)
+        if build_edges_impl is not Indexer._build_graph_edges:
+            return False
+        return True
+
+    def _build_extract_progress(
+        self,
+        *,
+        path: str,
+        subphase: str,
+        files_done: int,
+        files_total: int,
+        started_at: str | None = None,
+    ) -> dict[str, object]:
+        """Build one normalized extract-progress payload."""
+        timestamp = datetime.now(timezone.utc).isoformat()
+        return {
+            "current_file": path,
+            "subphase": subphase,
+            "files_done": max(0, int(files_done)),
+            "files_total": max(0, int(files_total)),
+            "started_at": started_at or timestamp,
+            "updated_at": timestamp,
+        }
+
+    def _publish_extract_progress(self, progress: dict[str, object] | None) -> None:
+        """Send extract-progress updates to the active CLI callback when configured."""
+        if self._extract_progress_callback is None:
+            return
+        if progress is None:
+            self._extract_progress_callback(None)
+            return
+        self._extract_progress_callback(dict(progress))
+
+    @staticmethod
+    def _stat_file_details(path: str) -> tuple[int | None, int | None]:
+        """Return one file's mtime_ns and size_bytes without failing the scan path."""
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            return None, None
+        mtime_ns = int(
+            getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+        )
+        return mtime_ns, int(getattr(stat_result, "st_size", 0))
+
+    @staticmethod
+    def _checkpoint_matches_stat(
+        checkpoint: BuildFileCheckpoint,
+        *,
+        mtime_ns: int | None,
+        size_bytes: int | None,
+    ) -> bool:
+        """Return whether one checkpoint summary still matches a live file stat fingerprint."""
+        return (
+            checkpoint.mtime_ns is not None
+            and checkpoint.size_bytes is not None
+            and mtime_ns is not None
+            and size_bytes is not None
+            and checkpoint.mtime_ns == mtime_ns
+            and checkpoint.size_bytes == size_bytes
+        )
+
+    @staticmethod
+    def _build_checkpoint_snapshot(
+        *,
+        checkpoint: BuildFileCheckpoint,
+        symbols: list[Symbol],
+    ) -> ParsedFileSnapshot:
+        """Build a minimal snapshot for resumed files loaded from canonical staged rows."""
+        return ParsedFileSnapshot(
+            path=checkpoint.path,
+            source="",
+            content_hash=checkpoint.content_hash,
+            mtime_ns=checkpoint.mtime_ns,
+            language=checkpoint.language,
+            symbols=[symbol.model_copy(deep=True) for symbol in symbols],
+            span_index=LineByteSpanIndex.from_bytes(b""),
+        )
+
+    def _build_prepared_file_from_checkpoint(
+        self,
+        checkpoint: BuildFileCheckpoint,
+        *,
+        metadata: FileMetadata,
+    ) -> PreparedFileIndex:
+        """Rehydrate one checkpoint summary from canonical staged rows for embed resume."""
+        path = checkpoint.path
+        symbols = self.cache.list_symbols_for_file(path)
+        chunks = self.cache.list_chunks_for_file(path)
+        edges = self.cache.list_edges_for_file(path)
+        repo_id = ""
+        commit = ""
+        for collection in (symbols, chunks, edges):
+            for item in collection:
+                repo_id = str(getattr(item, "repo_id", "") or repo_id)
+                commit = str(getattr(item, "commit", "") or commit)
+                if repo_id and commit:
+                    break
+            if repo_id and commit:
+                break
+        if not repo_id:
+            repo_id = self._repo_id(path)
+        if not commit:
+            commit = self._resolve_commit(path)
+        current_symbols = [symbol.model_copy(deep=True) for symbol in symbols]
+        current_chunks = [chunk.model_copy(deep=True) for chunk in chunks]
+        current_edges = [edge.model_copy(deep=True) for edge in edges]
+        previous_chunks = [chunk.model_copy(deep=True) for chunk in current_chunks]
+        previous_symbols = [symbol.model_copy(deep=True) for symbol in current_symbols]
+        previous_edges = [edge.model_copy(deep=True) for edge in current_edges]
+        return PreparedFileIndex(
+            path=path,
+            language=metadata.language or checkpoint.language,
+            content_hash=metadata.content_hash,
+            source="",
+            size_bytes=checkpoint.size_bytes or 0,
+            repo_id=repo_id,
+            commit=commit,
+            snapshot=self._build_checkpoint_snapshot(checkpoint=checkpoint, symbols=current_symbols),
+            symbols=current_symbols,
+            chunks=current_chunks,
+            edges=current_edges,
+            previous_symbol_ids=list(metadata.symbols),
+            previous_chunk_ids=[chunk.chunk_id for chunk in previous_chunks],
+            previous_metadata=metadata.model_copy(deep=True),
+            previous_symbols=previous_symbols,
+            previous_chunks=previous_chunks,
+            previous_edges=previous_edges,
+            symbols_added=checkpoint.symbols_added,
+            symbols_updated=checkpoint.symbols_updated,
+            symbols_removed=checkpoint.symbols_removed,
+            timing=FileTimingTrace(
+                path=path,
+                status="prepared",
+                symbol_count=checkpoint.symbol_count,
+                chunk_count=checkpoint.chunk_count,
+            ),
+        )
+
+    def _persist_extract_checkpoint(self, prepared: PreparedFileIndex) -> BuildFileCheckpoint:
+        """Persist one extract-complete file into canonical staged rows plus checkpoint summary."""
+        self._persist_prepared_file(prepared, update_vectors=False)
+        return self.cache.upsert_build_file_checkpoint(
+            path=prepared.path,
+            state=BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+            content_hash=prepared.content_hash,
+            mtime_ns=prepared.snapshot.mtime_ns,
+            size_bytes=prepared.size_bytes,
+            language=prepared.language,
+            symbol_count=len(prepared.symbols),
+            chunk_count=len(prepared.chunks),
+            edge_count=len(prepared.edges),
+            symbols_added=prepared.symbols_added,
+            symbols_updated=prepared.symbols_updated,
+            symbols_removed=prepared.symbols_removed,
+        )
+
+    def _load_checkpoint_prepared_files(
+        self,
+        *,
+        states: Iterable[str],
+    ) -> list[PreparedFileIndex]:
+        """Return checkpointed prepared files loaded from canonical staged rows."""
+        prepared_files: list[PreparedFileIndex] = []
+        for checkpoint in self.cache.list_build_file_checkpoints(states=states):
+            metadata = self.cache.get_file_metadata(checkpoint.path)
+            if metadata is None or metadata.content_hash != checkpoint.content_hash:
+                self.cache.delete_build_file_checkpoint(checkpoint.path)
+                continue
+            prepared_files.append(
+                self._build_prepared_file_from_checkpoint(checkpoint, metadata=metadata)
+            )
+        return prepared_files
+
+    @staticmethod
+    def _extract_timeout_detail(
+        *,
+        path: str,
+        subphase: str,
+        timeout_seconds: float,
+        worker_pid: int | None,
+    ) -> str:
+        """Build a stable timeout detail string for failed_samples and debug payloads."""
+        detail = f"{subphase} timed out after {timeout_seconds:.3f}s while processing {path}"
+        if worker_pid is not None:
+            detail += f" (worker_pid={worker_pid})"
+        return detail
+
+    @staticmethod
+    def _source_line_count(path: str) -> int:
+        """Best-effort line-count lookup for timeout payloads."""
+        try:
+            with open(path, "rb") as handle:
+                return LineByteSpanIndex.from_bytes(handle.read()).line_count
+        except OSError:
+            return 0
+
+    def _prepare_file_for_index_with_watchdog(
+        self,
+        *,
+        worker: _ExtractSymbolsWorker | None,
+        path: str,
+        existing_content_hash: str | None,
+        capture_verbose_metrics: bool,
+        files_done: int,
+        files_total: int,
+    ) -> tuple[PreparedFileIndex | None, FileIndexOutcome, FileTimingTrace, bool]:
+        """Run prepare_file inline or in the watchdog worker."""
+        progress = self._build_extract_progress(
+            path=path,
+            subphase="prepare_file",
+            files_done=files_done,
+            files_total=files_total,
+        )
+        self._publish_extract_progress(progress)
+        if worker is None:
+            prepared, outcome, timing = self._prepare_file_for_index(
+                path,
+                existing_content_hash=existing_content_hash,
+                capture_verbose_metrics=capture_verbose_metrics,
+            )
+            return prepared, outcome, timing, False
+
+        next_heartbeat = time.monotonic() + _EXTRACT_PROGRESS_HEARTBEAT_SECONDS
+        progress_started_at = str(progress["started_at"])
+        started = time.perf_counter()
+
+        def _heartbeat() -> None:
+            """Refresh persisted progress while the worker is still alive."""
+            nonlocal next_heartbeat, progress
+            if time.monotonic() < next_heartbeat:
+                return
+            progress = self._build_extract_progress(
+                path=path,
+                subphase="prepare_file",
+                files_done=files_done,
+                files_total=files_total,
+                started_at=progress_started_at,
+            )
+            self._publish_extract_progress(progress)
+            next_heartbeat = time.monotonic() + _EXTRACT_PROGRESS_HEARTBEAT_SECONDS
+
+        try:
+            response = worker.run_job(
+                kind="prepare_file",
+                payload={
+                    "path": path,
+                    "existing_content_hash": existing_content_hash,
+                    "capture_verbose_metrics": capture_verbose_metrics,
+                },
+                timeout_seconds=self._extract_timeout_seconds(),
+                on_poll=_heartbeat,
+            )
+        except _ExtractWorkerTimeout as exc:
+            detail = self._extract_timeout_detail(
+                path=path,
+                subphase="prepare_file",
+                timeout_seconds=exc.timeout_seconds,
+                worker_pid=exc.worker_pid,
+            )
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            return (
+                None,
+                FileIndexOutcome(
+                    status="failed",
+                    source_line_count=self._source_line_count(path),
+                    reason=EXTRACT_SYMBOLS_TIMEOUT_REASON,
+                    detail=detail,
+                ),
+                FileTimingTrace(
+                    path=path,
+                    status="failed",
+                    parse_ms=elapsed_ms,
+                    reason=EXTRACT_SYMBOLS_TIMEOUT_REASON,
+                    detail=detail,
+                ),
+                True,
+            )
+        prepared = response.get("prepared")
+        outcome = response.get("outcome")
+        timing = response.get("timing")
+        if not isinstance(outcome, FileIndexOutcome) or not isinstance(timing, FileTimingTrace):
+            raise _ExtractWorkerError("prepare_file worker returned an invalid payload")
+        if prepared is not None and not isinstance(prepared, PreparedFileIndex):
+            raise _ExtractWorkerError("prepare_file worker returned an invalid prepared payload")
+        return prepared, outcome, timing, False
+
+    def _build_edges_with_watchdog(
+        self,
+        *,
+        worker: _ExtractSymbolsWorker | None,
+        prepared: PreparedFileIndex,
+        candidate_symbols: list[Symbol],
+        files_done: int,
+        files_total: int,
+    ) -> tuple[list[EdgeRecord] | None, int, bool, str | None]:
+        """Run build_edges inline or in the watchdog worker."""
+        progress = self._build_extract_progress(
+            path=prepared.path,
+            subphase="build_edges",
+            files_done=files_done,
+            files_total=files_total,
+        )
+        self._publish_extract_progress(progress)
+        started = time.perf_counter()
+        if worker is None:
+            edges = self._build_graph_edges(
+                path=prepared.path,
+                source=prepared.source,
+                symbols=prepared.symbols,
+                candidate_symbols=candidate_symbols,
+                repo_id=prepared.repo_id,
+                commit=prepared.commit,
+                language=prepared.language or "unknown",
+                include_text=self.config.embed_graph_edges,
+            )
+            return edges, int((time.perf_counter() - started) * 1000), False, None
+
+        next_heartbeat = time.monotonic() + _EXTRACT_PROGRESS_HEARTBEAT_SECONDS
+        progress_started_at = str(progress["started_at"])
+
+        def _heartbeat() -> None:
+            """Refresh persisted edge-build progress while the worker is still alive."""
+            nonlocal next_heartbeat, progress
+            if time.monotonic() < next_heartbeat:
+                return
+            progress = self._build_extract_progress(
+                path=prepared.path,
+                subphase="build_edges",
+                files_done=files_done,
+                files_total=files_total,
+                started_at=progress_started_at,
+            )
+            self._publish_extract_progress(progress)
+            next_heartbeat = time.monotonic() + _EXTRACT_PROGRESS_HEARTBEAT_SECONDS
+
+        try:
+            response = worker.run_job(
+                kind="build_edges",
+                payload={
+                    "path": prepared.path,
+                    "source": prepared.source,
+                    "symbols": prepared.symbols,
+                    "candidate_symbols": candidate_symbols,
+                    "repo_id": prepared.repo_id,
+                    "commit": prepared.commit,
+                    "language": prepared.language or "unknown",
+                    "include_text": self.config.embed_graph_edges,
+                },
+                timeout_seconds=self._extract_timeout_seconds(),
+                on_poll=_heartbeat,
+            )
+        except _ExtractWorkerTimeout as exc:
+            detail = self._extract_timeout_detail(
+                path=prepared.path,
+                subphase="build_edges",
+                timeout_seconds=exc.timeout_seconds,
+                worker_pid=exc.worker_pid,
+            )
+            return None, int((time.perf_counter() - started) * 1000), True, detail
+        edges = response.get("edges")
+        if not isinstance(edges, list):
+            raise _ExtractWorkerError("build_edges worker returned an invalid payload")
+        return list(edges), int((time.perf_counter() - started) * 1000), False, None
+
+    def index_repository(self, path: str, *, capture_verbose_metrics: bool = False) -> IndexResult:
         """Index all supported files under a repository root."""
 
         start = time.perf_counter()
@@ -245,6 +1151,13 @@ class Indexer:
         scan_source_started = time.perf_counter()
         source_files = list(self._iter_source_files(path))
         scan_source_ms = int((time.perf_counter() - scan_source_started) * 1000)
+        checkpoint_by_path = {
+            checkpoint.path: checkpoint for checkpoint in self.cache.list_build_file_checkpoints()
+        }
+        deleted_checkpoint_paths = sorted(set(checkpoint_by_path) - set(source_files))
+        for deleted_checkpoint_path in deleted_checkpoint_paths:
+            self.cache.delete_build_file_checkpoint(deleted_checkpoint_path)
+            checkpoint_by_path.pop(deleted_checkpoint_path, None)
         cached_file_hashes = self.cache.list_file_hashes()
         total_files = len(source_files)
         files_considered = 0
@@ -258,73 +1171,257 @@ class Indexer:
         files_removed = 0
         failed_reasons: dict[str, int] = {}
         failed_samples: list[str] = []
+        parsed_files: list[ParsedFileSnapshot] = []
         seen_paths: set[str] = set()
-        prepared_files: list[PreparedFileIndex] = []
+        catalog_excluded_paths: set[str] = set(deleted_checkpoint_paths)
+        prepared_candidates: list[PreparedFileIndex] = []
         file_timings: list[FileTimingTrace] = []
+        file_timings_by_path: dict[str, FileTimingTrace] = {}
+        verbose_lines = VerboseLineMetricsAccumulator() if capture_verbose_metrics else None
         chunk_integrity = self._integrity_status(
             name="chunk_span",
             status="passed",
             detail="chunk/span integrity checks passed",
         )
+        terminal_extract_files = 0
+        extract_timeout_halted = False
+        timed_out_symbol_ids: set[str] = set()
+        worker = _ExtractSymbolsWorker(self.config) if self._can_use_extract_worker() else None
 
-        if self._stage_callback is not None:
-            self._stage_callback("extract_symbols")
-        parse_phase_started = time.perf_counter()
-        for file_path in source_files:
-            seen_paths.add(file_path)
-            files_considered += 1
-            prepared, outcome, timing = self._prepare_file_for_index(
-                file_path,
-                existing_content_hash=cached_file_hashes.get(file_path),
-            )
-            file_timings.append(timing)
-            if prepared is not None:
-                prepared_files.append(prepared)
+        try:
+            if self._stage_callback is not None:
+                self._stage_callback("extract_symbols")
+            parse_phase_started = time.perf_counter()
+            for file_path in source_files:
+                seen_paths.add(file_path)
+                files_considered += 1
+                checkpoint = checkpoint_by_path.get(file_path)
+                if checkpoint is not None:
+                    stat_mtime_ns, stat_size_bytes = self._stat_file_details(file_path)
+                    if self._checkpoint_matches_stat(
+                        checkpoint,
+                        mtime_ns=stat_mtime_ns,
+                        size_bytes=stat_size_bytes,
+                    ):
+                        metadata = self.cache.get_file_metadata(file_path)
+                        if metadata is not None and metadata.content_hash == checkpoint.content_hash:
+                            checkpoint_timing = FileTimingTrace(
+                                path=file_path,
+                                status=(
+                                    "unchanged"
+                                    if checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE
+                                    else "prepared"
+                                ),
+                                symbol_count=checkpoint.symbol_count,
+                                chunk_count=checkpoint.chunk_count,
+                            )
+                            file_timings.append(checkpoint_timing)
+                            file_timings_by_path[file_path] = checkpoint_timing
+                            if verbose_lines is not None:
+                                verbose_lines.add_source_lines(self._source_line_count(file_path))
+                            terminal_extract_files += 1
+                            if checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE:
+                                unchanged_files += 1
+                                if verbose_lines is not None:
+                                    verbose_lines.add_symbol_chunks(
+                                        self.cache.list_chunks_for_file(file_path)
+                                    )
+                                    verbose_lines.add_graph_edges(
+                                        self.cache.list_edges_for_file(file_path)
+                                    )
+                                if self._scan_callback is not None:
+                                    self._scan_callback(files_considered, total_files, "unchanged")
+                                continue
+                            if self._scan_callback is not None:
+                                self._scan_callback(files_considered, total_files, "prepared")
+                            continue
+                    self.cache.delete_build_file_checkpoint(file_path)
+                    checkpoint_by_path.pop(file_path, None)
+                prepared, outcome, timing, timed_out = self._prepare_file_for_index_with_watchdog(
+                    worker=worker,
+                    path=file_path,
+                    existing_content_hash=cached_file_hashes.get(file_path),
+                    capture_verbose_metrics=capture_verbose_metrics,
+                    files_done=terminal_extract_files,
+                    files_total=total_files,
+                )
+                file_timings.append(timing)
+                file_timings_by_path[file_path] = timing
+                if verbose_lines is not None:
+                    verbose_lines.add_source_lines(
+                        prepared.snapshot.span_index.line_count
+                        if prepared is not None
+                        else outcome.source_line_count
+                    )
+                if prepared is not None:
+                    prepared_candidates.append(prepared)
+                    parsed_files.append(prepared.snapshot)
+                    catalog_excluded_paths.add(file_path)
+                    if self._scan_callback is not None:
+                        self._scan_callback(files_considered, total_files, "prepared")
+                    continue
+                terminal_extract_files += 1
                 if self._scan_callback is not None:
-                    self._scan_callback(files_considered, total_files, "prepared")
-                continue
-            if self._scan_callback is not None:
-                self._scan_callback(files_considered, total_files, outcome.status)
-            if outcome.status == "unchanged":
-                unchanged_files += 1
-                continue
+                    self._scan_callback(files_considered, total_files, outcome.status)
+                if outcome.status == "unchanged":
+                    unchanged_files += 1
+                    if verbose_lines is not None:
+                        verbose_lines.add_symbol_chunks(outcome.retained_chunks)
+                        verbose_lines.add_graph_edges(outcome.retained_edges)
+                    continue
 
-            failed_files += 1
-            reason = outcome.reason or "indexing_error"
-            failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
-            if reason == "chunk_span_integrity_error":
-                chunk_integrity = self._integrity_status(
-                    name="chunk_span",
-                    status="failed",
-                    reason_codes=[reason],
-                    detail=outcome.detail,
+                catalog_excluded_paths.add(file_path)
+                failed_files += 1
+                reason = outcome.reason or "indexing_error"
+                failed_reasons[reason] = failed_reasons.get(reason, 0) + 1
+                if reason == "chunk_span_integrity_error":
+                    chunk_integrity = self._integrity_status(
+                        name="chunk_span",
+                        status="failed",
+                        reason_codes=[reason],
+                        detail=outcome.detail,
+                    )
+                if len(failed_samples) < 5:
+                    if outcome.detail:
+                        failed_samples.append(f"{file_path}: {outcome.detail}")
+                    else:
+                        failed_samples.append(file_path)
+                if timed_out:
+                    if worker is not None and self._allow_partial_failures:
+                        worker.restart()
+                        continue
+                    extract_timeout_halted = True
+                    break
+            parse_phase_ms = int((time.perf_counter() - parse_phase_started) * 1000)
+
+            prepared_files: list[PreparedFileIndex] = []
+            edge_phase_started = time.perf_counter()
+            if not extract_timeout_halted and prepared_candidates:
+                repo_symbol_catalog = self._build_repo_symbol_catalog(
+                    prepared_candidates,
+                    excluded_paths=catalog_excluded_paths,
                 )
-            if len(failed_samples) < 5:
-                if outcome.detail:
-                    failed_samples.append(f"{file_path}: {outcome.detail}")
-                else:
-                    failed_samples.append(file_path)
-        parse_phase_ms = int((time.perf_counter() - parse_phase_started) * 1000)
+                for prepared in prepared_candidates:
+                    edges, edge_ms, timed_out, timeout_detail = self._build_edges_with_watchdog(
+                        worker=worker,
+                        prepared=prepared,
+                        candidate_symbols=repo_symbol_catalog,
+                        files_done=terminal_extract_files + len(prepared_files),
+                        files_total=total_files,
+                    )
+                    prepared.timing.edge_ms = edge_ms
+                    if timed_out:
+                        prepared.timing.status = "failed"
+                        prepared.timing.reason = EXTRACT_SYMBOLS_TIMEOUT_REASON
+                        prepared.timing.detail = timeout_detail
+                        failed_files += 1
+                        failed_reasons[EXTRACT_SYMBOLS_TIMEOUT_REASON] = (
+                            failed_reasons.get(EXTRACT_SYMBOLS_TIMEOUT_REASON, 0) + 1
+                        )
+                        if len(failed_samples) < 5:
+                            failed_samples.append(
+                                f"{prepared.path}: "
+                                f"{timeout_detail or EXTRACT_SYMBOLS_TIMEOUT_REASON}"
+                            )
+                        timed_out_symbol_ids.update(
+                            symbol.id for symbol in prepared.symbols if symbol.id
+                        )
+                        terminal_extract_files += 1
+                        if worker is not None and self._allow_partial_failures:
+                            worker.restart()
+                            continue
+                        extract_timeout_halted = True
+                        break
+                    prepared.edges = edges or []
+                    try:
+                        self._persist_extract_checkpoint(prepared)
+                    except Exception as exc:
+                        prepared.timing.status = "failed"
+                        prepared.timing.reason = "storage_error"
+                        prepared.timing.detail = f"{type(exc).__name__}: {exc}"
+                        failed_files += 1
+                        failed_reasons["storage_error"] = failed_reasons.get("storage_error", 0) + 1
+                        if len(failed_samples) < 5:
+                            failed_samples.append(f"{prepared.path}: {type(exc).__name__}: {exc}")
+                        extract_timeout_halted = True
+                        break
+                    prepared_files.append(prepared)
+                    terminal_extract_files += 1
+                if timed_out_symbol_ids:
+                    for prepared in prepared_files:
+                        filtered_edges = [
+                            edge
+                            for edge in prepared.edges
+                            if edge.from_id not in timed_out_symbol_ids
+                            and edge.to_id not in timed_out_symbol_ids
+                        ]
+                        if len(filtered_edges) == len(prepared.edges):
+                            continue
+                        prepared.edges = filtered_edges
+                        try:
+                            self._persist_extract_checkpoint(prepared)
+                        except Exception as exc:
+                            prepared.timing.status = "failed"
+                            prepared.timing.reason = "storage_error"
+                            prepared.timing.detail = f"{type(exc).__name__}: {exc}"
+                            failed_files += 1
+                            failed_reasons["storage_error"] = (
+                                failed_reasons.get("storage_error", 0) + 1
+                            )
+                            if len(failed_samples) < 5:
+                                failed_samples.append(
+                                    f"{prepared.path}: {type(exc).__name__}: {exc}"
+                                )
+                            extract_timeout_halted = True
+                            break
+            edge_phase_ms = int((time.perf_counter() - edge_phase_started) * 1000)
+            extract_symbols_ms = parse_phase_ms + edge_phase_ms
 
-        edge_phase_started = time.perf_counter()
-        if prepared_files:
-            repo_symbol_catalog = self._build_repo_symbol_catalog(prepared_files)
-            for prepared in prepared_files:
-                edge_started = time.perf_counter()
-                prepared.edges = self._build_graph_edges(
-                    path=prepared.path,
-                    source=prepared.source,
-                    symbols=prepared.symbols,
-                    candidate_symbols=repo_symbol_catalog,
-                    repo_id=prepared.repo_id,
-                    commit=prepared.commit,
-                    language=prepared.language or "unknown",
-                    include_text=self.config.embed_graph_edges,
+            if extract_timeout_halted:
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                return IndexResult(
+                    files_considered=files_considered,
+                    indexed=0,
+                    unchanged=unchanged_files,
+                    failed=failed_files,
+                    indexed_symbols=0,
+                    duration_ms=duration_ms,
+                    files_changed=0,
+                    files_removed=0,
+                    symbols_added=0,
+                    symbols_updated=0,
+                    symbols_removed=0,
+                    failed_reasons=failed_reasons,
+                    failed_samples=failed_samples,
+                    phase_timings_ms={
+                        "scan_source": scan_source_ms,
+                        "extract_symbols": extract_symbols_ms,
+                        "embed_chunks": 0,
+                        "persist_cache": 0,
+                        "validate_integrity": 0,
+                        "parse": parse_phase_ms,
+                        "edge": edge_phase_ms,
+                        "embed_persist": 0,
+                        "cleanup": 0,
+                        "consistency_checks": 0,
+                    },
+                    index_stats=self.cache.get_index_stats(),
+                    file_timings=file_timings,
+                    parsed_files=parsed_files,
+                    source_files=source_files,
+                    verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
                 )
-                prepared.timing.edge_ms = int((time.perf_counter() - edge_started) * 1000)
-        edge_phase_ms = int((time.perf_counter() - edge_phase_started) * 1000)
-        extract_symbols_ms = parse_phase_ms + edge_phase_ms
+        finally:
+            if worker is not None:
+                worker.close()
 
+        prepared_files = self._load_checkpoint_prepared_files(
+            states=[BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE]
+        )
+        for prepared in prepared_files:
+            timing = file_timings_by_path.get(prepared.path)
+            if timing is not None:
+                prepared.timing = timing
         total_embedding_symbols = sum(len(prepared.chunks) for prepared in prepared_files)
         embedded_symbols_done = 0
         if self._stage_callback is not None:
@@ -359,6 +1456,7 @@ class Indexer:
                 prepared.timing.embed_ms = int((time.perf_counter() - embed_started) * 1000)
                 persist_started = time.perf_counter()
                 self._persist_prepared_file(prepared)
+                self.cache.mark_build_file_checkpoint_embedded(prepared.path)
                 prepared.timing.persist_ms = int((time.perf_counter() - persist_started) * 1000)
             except Exception as exc:
                 failed_files += 1
@@ -383,6 +1481,9 @@ class Indexer:
             symbols_added += prepared.symbols_added
             symbols_updated += prepared.symbols_updated
             symbols_removed += prepared.symbols_removed
+            if verbose_lines is not None:
+                verbose_lines.add_symbol_chunks(prepared.chunks)
+                verbose_lines.add_graph_edges(prepared.edges)
         embed_persist_ms = int((time.perf_counter() - embed_persist_started) * 1000)
         embed_chunks_ms = sum(timing.embed_ms for timing in file_timings)
 
@@ -470,8 +1571,9 @@ class Indexer:
             },
             index_stats=self.cache.get_index_stats(),
             file_timings=file_timings,
-            parsed_files=[prepared.snapshot for prepared in prepared_files],
+            parsed_files=parsed_files,
             source_files=source_files,
+            verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
         )
 
     @staticmethod
@@ -496,76 +1598,122 @@ class Indexer:
                 handle.write("1")
         time.sleep(pause_ms / 1000.0)
 
-    def index_file_with_details(self, path: str) -> FileIndexExecution:
+    def index_file_with_details(
+        self,
+        path: str,
+        *,
+        capture_verbose_metrics: bool = False,
+    ) -> FileIndexExecution:
         """Index a file and return outcome plus shared parse/timing state."""
 
         existing = self.cache.get_file_metadata(path)
-        prepared, outcome, timing = self._prepare_file_for_index(
-            path,
-            existing_content_hash=existing.content_hash if existing else None,
-        )
-        if prepared is None:
-            return FileIndexExecution(outcome=outcome, timing=timing)
-
-        candidate_symbols = [
-            symbol for symbol in self.cache.list_symbols() if symbol.file_path != prepared.path
-        ]
-        candidate_symbols.extend(prepared.symbols)
-        edge_started = time.perf_counter()
-        prepared.edges = self._build_graph_edges(
-            path=prepared.path,
-            source=prepared.source,
-            symbols=prepared.symbols,
-            candidate_symbols=candidate_symbols,
-            repo_id=prepared.repo_id,
-            commit=prepared.commit,
-            language=prepared.language or "unknown",
-            include_text=self.config.embed_graph_edges,
-        )
-        timing.edge_ms = int((time.perf_counter() - edge_started) * 1000)
-
+        worker = _ExtractSymbolsWorker(self.config) if self._can_use_extract_worker() else None
         try:
-            embed_started = time.perf_counter()
-            prepared.chunks = self._apply_embeddings(
-                prepared.chunks,
-                progress_callback=self._progress_callback,
+            prepared, outcome, timing, _timed_out = self._prepare_file_for_index_with_watchdog(
+                worker=worker,
+                path=path,
+                existing_content_hash=existing.content_hash if existing else None,
+                capture_verbose_metrics=capture_verbose_metrics,
+                files_done=0,
+                files_total=1,
             )
-            prepared.edges = self._apply_edge_embeddings(prepared.edges)
-            timing.embed_ms = int((time.perf_counter() - embed_started) * 1000)
-            persist_started = time.perf_counter()
-            self._persist_prepared_file(prepared)
-            timing.persist_ms = int((time.perf_counter() - persist_started) * 1000)
-        except Exception as exc:
-            reason = (
-                "embedding_provider_error"
-                if isinstance(exc, EmbeddingProviderError)
-                else "storage_error"
+            verbose_lines = VerboseLineMetricsAccumulator() if capture_verbose_metrics else None
+            if verbose_lines is not None:
+                verbose_lines.add_source_lines(
+                    prepared.snapshot.span_index.line_count
+                    if prepared is not None
+                    else outcome.source_line_count
+                )
+            if prepared is None:
+                if verbose_lines is not None:
+                    verbose_lines.add_symbol_chunks(outcome.retained_chunks)
+                    verbose_lines.add_graph_edges(outcome.retained_edges)
+                return FileIndexExecution(
+                    outcome=outcome,
+                    timing=timing,
+                    verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                )
+
+            candidate_symbols = [
+                symbol for symbol in self.cache.list_symbols() if symbol.file_path != prepared.path
+            ]
+            candidate_symbols.extend(prepared.symbols)
+            edges, edge_ms, timed_out, timeout_detail = self._build_edges_with_watchdog(
+                worker=worker,
+                prepared=prepared,
+                candidate_symbols=candidate_symbols,
+                files_done=0,
+                files_total=1,
             )
-            timing.status = "failed"
-            timing.reason = reason
-            timing.detail = f"{type(exc).__name__}: {exc}"
+            timing.edge_ms = edge_ms
+            if timed_out:
+                timing.status = "failed"
+                timing.reason = EXTRACT_SYMBOLS_TIMEOUT_REASON
+                timing.detail = timeout_detail
+                return FileIndexExecution(
+                    outcome=FileIndexOutcome(
+                        status="failed",
+                        source_line_count=prepared.snapshot.span_index.line_count,
+                        reason=EXTRACT_SYMBOLS_TIMEOUT_REASON,
+                        detail=timeout_detail,
+                    ),
+                    timing=timing,
+                    verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                )
+            prepared.edges = edges or []
+
+            try:
+                embed_started = time.perf_counter()
+                prepared.chunks = self._apply_embeddings(
+                    prepared.chunks,
+                    progress_callback=self._progress_callback,
+                )
+                prepared.edges = self._apply_edge_embeddings(prepared.edges)
+                timing.embed_ms = int((time.perf_counter() - embed_started) * 1000)
+                persist_started = time.perf_counter()
+                self._persist_prepared_file(prepared)
+                timing.persist_ms = int((time.perf_counter() - persist_started) * 1000)
+            except Exception as exc:
+                reason = (
+                    "embedding_provider_error"
+                    if isinstance(exc, EmbeddingProviderError)
+                    else "storage_error"
+                )
+                timing.status = "failed"
+                timing.reason = reason
+                timing.detail = f"{type(exc).__name__}: {exc}"
+                return FileIndexExecution(
+                    outcome=FileIndexOutcome(
+                        status="failed",
+                        source_line_count=prepared.snapshot.span_index.line_count,
+                        reason=reason,
+                        detail=f"{type(exc).__name__}: {exc}",
+                    ),
+                    prepared=prepared,
+                    timing=timing,
+                    verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
+                )
+
+            timing.status = "indexed"
+            if verbose_lines is not None:
+                verbose_lines.add_symbol_chunks(prepared.chunks)
+                verbose_lines.add_graph_edges(prepared.edges)
             return FileIndexExecution(
                 outcome=FileIndexOutcome(
-                    status="failed",
-                    reason=reason,
-                    detail=f"{type(exc).__name__}: {exc}",
+                    status="indexed",
+                    symbols_indexed=len(prepared.symbols),
+                    symbols_added=prepared.symbols_added,
+                    symbols_updated=prepared.symbols_updated,
+                    symbols_removed=prepared.symbols_removed,
+                    source_line_count=prepared.snapshot.span_index.line_count,
                 ),
                 prepared=prepared,
                 timing=timing,
+                verbose_lines=verbose_lines.build() if verbose_lines is not None else None,
             )
-
-        timing.status = "indexed"
-        return FileIndexExecution(
-            outcome=FileIndexOutcome(
-                status="indexed",
-                symbols_indexed=len(prepared.symbols),
-                symbols_added=prepared.symbols_added,
-                symbols_updated=prepared.symbols_updated,
-                symbols_removed=prepared.symbols_removed,
-            ),
-            prepared=prepared,
-            timing=timing,
-        )
+        finally:
+            if worker is not None:
+                worker.close()
 
     def index_file_with_outcome(self, path: str) -> FileIndexOutcome:
         """Index a file and return an explicit terminal outcome."""
@@ -576,6 +1724,7 @@ class Indexer:
         path: str,
         *,
         existing_content_hash: str | None = None,
+        capture_verbose_metrics: bool = False,
     ) -> tuple[PreparedFileIndex | None, FileIndexOutcome, FileTimingTrace]:
         """Read/parse a file and compute symbol diff metadata for later persistence."""
 
@@ -589,6 +1738,7 @@ class Indexer:
                 None,
                 FileIndexOutcome(
                     status="failed",
+                    source_line_count=0,
                     reason="read_error",
                     detail=detail,
                 ),
@@ -600,6 +1750,7 @@ class Indexer:
                     detail=detail,
                 ),
             )
+        span_index = LineByteSpanIndex.from_bytes(raw_source)
         try:
             source = raw_source.decode("utf8")
         except UnicodeDecodeError as exc:
@@ -608,6 +1759,7 @@ class Indexer:
                 None,
                 FileIndexOutcome(
                     status="failed",
+                    source_line_count=span_index.line_count,
                     reason="decode_error",
                     detail=detail,
                 ),
@@ -628,17 +1780,25 @@ class Indexer:
             else (existing.content_hash if existing else None)
         )
         if cached_hash == content_hash:
+            retained_chunks: tuple[SymbolChunk, ...] = ()
+            retained_edges: tuple[EdgeRecord, ...] = ()
+            if capture_verbose_metrics:
+                retained_chunks = tuple(self.cache.list_chunks_for_file(path))
+                retained_edges = tuple(self.cache.list_edges_for_file(path))
             return (
                 None,
-                FileIndexOutcome(status="unchanged"),
+                FileIndexOutcome(
+                    status="unchanged",
+                    source_line_count=span_index.line_count,
+                    retained_chunks=retained_chunks,
+                    retained_edges=retained_edges,
+                ),
                 FileTimingTrace(
                     path=path,
                     status="unchanged",
                     parse_ms=int((time.perf_counter() - started) * 1000),
                 ),
             )
-
-        span_index = LineByteSpanIndex.from_bytes(raw_source)
         previous_symbols: list[Symbol] = []
         previous_chunks: list[SymbolChunk] = []
         previous_edges: list[EdgeRecord] = []
@@ -651,6 +1811,7 @@ class Indexer:
                 None,
                 FileIndexOutcome(
                     status="failed",
+                    source_line_count=span_index.line_count,
                     reason="parser_unavailable",
                     detail=detail,
                 ),
@@ -671,6 +1832,7 @@ class Indexer:
                 None,
                 FileIndexOutcome(
                     status="failed",
+                    source_line_count=span_index.line_count,
                     reason="parse_error",
                     detail=detail,
                 ),
@@ -710,6 +1872,7 @@ class Indexer:
                 None,
                 FileIndexOutcome(
                     status="failed",
+                    source_line_count=span_index.line_count,
                     reason="chunk_span_integrity_error",
                     detail=chunk_integrity_error,
                 ),
@@ -761,6 +1924,7 @@ class Indexer:
             language=parser_entry.language,
             content_hash=content_hash,
             source=source,
+            size_bytes=len(raw_source),
             repo_id=repo_id,
             commit=commit,
             snapshot=snapshot,
@@ -778,7 +1942,15 @@ class Indexer:
             symbols_removed=symbols_removed,
             timing=timing,
         )
-        return prepared, FileIndexOutcome(status="prepared", symbols_indexed=len(symbols)), timing
+        return (
+            prepared,
+            FileIndexOutcome(
+                status="prepared",
+                symbols_indexed=len(symbols),
+                source_line_count=span_index.line_count,
+            ),
+            timing,
+        )
 
     @staticmethod
     def _validate_chunk_span_integrity(
@@ -831,8 +2003,13 @@ class Indexer:
                 previous_end = chunk.end_line
         return None
 
-    def _persist_prepared_file(self, prepared: PreparedFileIndex) -> None:
-        """Persist one prepared file into cache and vector store."""
+    def _persist_prepared_file(
+        self,
+        prepared: PreparedFileIndex,
+        *,
+        update_vectors: bool = True,
+    ) -> None:
+        """Persist one prepared file into cache and optionally refresh vector rows."""
         next_symbol_ids = [symbol.id for symbol in prepared.symbols]
         next_chunk_ids = [chunk.chunk_id for chunk in prepared.chunks]
         try:
@@ -850,7 +2027,7 @@ class Indexer:
                 prepared.chunks,
                 prepared.edges,
             )
-            if self.vector_store and prepared.chunks:
+            if update_vectors and self.vector_store and prepared.chunks:
                 self.vector_store.upsert_vectors(prepared.chunks)
         except Exception as persist_exc:
             try:
@@ -892,8 +2069,11 @@ class Indexer:
         rollback_ids.update(chunk.chunk_id for chunk in prepared.previous_chunks if chunk.chunk_id)
         if rollback_ids:
             self.vector_store.remove_ids(sorted(rollback_ids))
-        if prepared.previous_chunks:
-            self.vector_store.upsert_vectors(prepared.previous_chunks)
+        previous_embedded_chunks = [
+            chunk for chunk in prepared.previous_chunks if chunk.embedding_vector is not None
+        ]
+        if previous_embedded_chunks:
+            self.vector_store.upsert_vectors(previous_embedded_chunks)
 
     def index_file(self, path: str) -> int | None:
         """Index a file and return symbol count when indexed, else None."""
@@ -903,11 +2083,15 @@ class Indexer:
             return outcome.symbols_indexed
         return None
 
-    def _build_repo_symbol_catalog(self, prepared_files: list[PreparedFileIndex]) -> list[Symbol]:
+    def _build_repo_symbol_catalog(
+        self,
+        prepared_files: list[PreparedFileIndex],
+        *,
+        excluded_paths: Iterable[str] = (),
+    ) -> list[Symbol]:
         """Return one per-run symbol catalog reused for edge extraction."""
-        if not prepared_files:
-            return []
         changed_paths = {prepared.path for prepared in prepared_files}
+        changed_paths.update(path for path in excluded_paths if path)
         catalog = [
             symbol for symbol in self.cache.list_symbols() if symbol.file_path not in changed_paths
         ]
@@ -1041,7 +2225,20 @@ class Indexer:
                 ),
             }
 
-        cache_chunk_ids = {chunk.chunk_id for chunk in self.cache.list_chunks()}
+        pending_embed_paths = {
+            checkpoint.path
+            for checkpoint in self.cache.list_build_file_checkpoints(
+                states=[BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE]
+            )
+        }
+        cache_chunks = self.cache.list_chunks()
+        pending_embed_chunk_ids = {
+            chunk.chunk_id for chunk in cache_chunks if chunk.file_path in pending_embed_paths
+        }
+        cache_chunk_ids = {
+            chunk.chunk_id for chunk in cache_chunks if chunk.file_path not in pending_embed_paths
+        }
+        vector_symbol_ids.difference_update(pending_embed_chunk_ids)
         missing_vectors = sorted(cache_chunk_ids - vector_symbol_ids)
         stale_vectors = sorted(vector_symbol_ids - cache_chunk_ids)
         if not missing_vectors and not stale_vectors:

@@ -8,8 +8,13 @@ from contextlib import closing
 import pytest
 
 import gloggur.indexer.cache as cache_module
-from gloggur.indexer.cache import CACHE_SCHEMA_VERSION, CacheConfig, CacheManager
-from gloggur.models import FileMetadata, IndexMetadata, Signal, Symbol, SymbolChunk
+from gloggur.indexer.cache import (
+    BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+    CACHE_SCHEMA_VERSION,
+    CacheConfig,
+    CacheManager,
+)
+from gloggur.models import EdgeRecord, FileMetadata, IndexMetadata, Signal, Symbol, SymbolChunk
 
 
 def _sample_symbol(symbol_id: str = "sample:1:add") -> Symbol:
@@ -155,6 +160,175 @@ def test_cache_chunk_round_trip_preserves_byte_spans() -> None:
     assert stored[0].end_byte == 32
 
 
+def test_cache_build_file_checkpoints_round_trip_and_delete_individual_rows() -> None:
+    """Checkpoint summaries should round-trip without disturbing canonical staged rows."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    source = "def add(a, b):\n    return a + b\n"
+
+    with closing(sqlite3.connect(cache.config.db_path)) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert "build_file_checkpoints" in tables
+    assert "build_checkpoint_files" not in tables
+    assert "build_checkpoint_symbols" not in tables
+    assert "build_checkpoint_chunks" not in tables
+    assert "build_checkpoint_edges" not in tables
+
+    first_symbol = _sample_symbol("sample.py:1:add")
+    first_symbol.file_path = "sample.py"
+    first_chunk = SymbolChunk(
+        chunk_id="sample.py:chunk:1",
+        symbol_id=first_symbol.id,
+        chunk_part_index=1,
+        chunk_part_total=1,
+        text=source,
+        file_path="sample.py",
+        start_line=1,
+        end_line=2,
+        start_byte=0,
+        end_byte=len(source.encode("utf8")),
+        language="python",
+        embedding_vector=[0.3, 0.4],
+    )
+    first_edge = EdgeRecord(
+        edge_id="sample.py:edge:1",
+        edge_type="CALLS",
+        from_id=first_symbol.id,
+        to_id="helper",
+        from_kind="function",
+        to_kind="function",
+        file_path="sample.py",
+        line=2,
+        confidence=1.0,
+        embedding_vector=[0.5, 0.6],
+    )
+    cache.replace_file_index(
+        "sample.py",
+        FileMetadata(
+            path="sample.py",
+            language="python",
+            content_hash="hash-a",
+            symbols=[first_symbol.id],
+        ),
+        [first_symbol],
+        [first_chunk],
+        [first_edge],
+    )
+
+    cache.upsert_build_file_checkpoint(
+        path="sample.py",
+        state=BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+        content_hash="hash-a",
+        mtime_ns=11,
+        size_bytes=len(source.encode("utf8")),
+        language="python",
+        symbol_count=1,
+        chunk_count=1,
+        edge_count=1,
+        symbols_added=1,
+        symbols_updated=0,
+        symbols_removed=0,
+    )
+
+    checkpoint = cache.get_build_file_checkpoint("sample.py")
+    assert checkpoint is not None
+    assert checkpoint.path == "sample.py"
+    assert checkpoint.symbol_count == 1
+    assert checkpoint.chunk_count == 1
+    assert checkpoint.edge_count == 1
+    assert cache.get_build_checkpoint_stats() == {
+        "extract_completed_files": 1,
+        "embedded_completed_files": 0,
+        "pending_embed_files": 1,
+    }
+
+    second_symbol = _sample_symbol("other.py:1:add")
+    second_symbol.file_path = "other.py"
+    second_chunk = SymbolChunk(
+        chunk_id="other.py:chunk:1",
+        symbol_id=second_symbol.id,
+        chunk_part_index=1,
+        chunk_part_total=1,
+        text=source,
+        file_path="other.py",
+        start_line=1,
+        end_line=2,
+        start_byte=0,
+        end_byte=len(source.encode("utf8")),
+        language="python",
+    )
+    second_edge = EdgeRecord(
+        edge_id="other.py:edge:1",
+        edge_type="CALLS",
+        from_id=second_symbol.id,
+        to_id="helper",
+        from_kind="function",
+        to_kind="function",
+        file_path="other.py",
+        line=2,
+        confidence=1.0,
+    )
+    cache.replace_file_index(
+        "other.py",
+        FileMetadata(
+            path="other.py",
+            language="python",
+            content_hash="hash-b",
+            symbols=[second_symbol.id],
+        ),
+        [second_symbol],
+        [second_chunk],
+        [second_edge],
+    )
+    cache.upsert_build_file_checkpoint(
+        path="other.py",
+        state=BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+        content_hash="hash-b",
+        mtime_ns=22,
+        size_bytes=len(source.encode("utf8")),
+        language="python",
+        symbol_count=1,
+        chunk_count=1,
+        edge_count=1,
+        symbols_added=1,
+        symbols_updated=0,
+        symbols_removed=0,
+    )
+
+    cache.mark_build_file_checkpoint_embedded("sample.py")
+    assert cache.get_build_checkpoint_stats() == {
+        "extract_completed_files": 2,
+        "embedded_completed_files": 1,
+        "pending_embed_files": 1,
+    }
+
+    cache.delete_build_file_checkpoint("other.py")
+    assert cache.get_build_file_checkpoint("sample.py") is not None
+    assert cache.get_build_file_checkpoint("other.py") is None
+    assert cache.get_file_metadata("other.py") is not None
+    assert [symbol.id for symbol in cache.list_symbols_for_file("other.py")] == [second_symbol.id]
+    assert cache.get_build_checkpoint_stats() == {
+        "extract_completed_files": 1,
+        "embedded_completed_files": 1,
+        "pending_embed_files": 0,
+    }
+
+    cache.clear_build_file_checkpoints()
+    assert cache.get_build_checkpoint_stats() == {
+        "extract_completed_files": 0,
+        "embedded_completed_files": 0,
+        "pending_embed_files": 0,
+    }
+    assert cache.count_files() == 2
+    assert cache.get_file_metadata("sample.py") is not None
+    assert cache.get_file_metadata("other.py") is not None
+
+
 def test_cache_round_trip_structured_audit_reports_and_legacy_warning_reads() -> None:
     """Structured audit payloads should preserve score metadata without breaking warning reads."""
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -246,6 +420,61 @@ def test_cache_get_build_state_infers_interrupted_from_staged_build_dir() -> Non
         "stage": None,
         "cleanup_pending": True,
     }
+
+
+def test_cache_build_state_and_resume_manifest_preserve_extract_progress() -> None:
+    """Build-state and staged resume manifests should round-trip extract progress unchanged."""
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    cache = CacheManager(CacheConfig(cache_dir))
+    build_id = "build-progress"
+    stage_dir = cache.prepare_staged_build(build_id)
+    stage_cache = CacheManager(CacheConfig(stage_dir))
+    progress = {
+        "current_file": "sample.py",
+        "subphase": "prepare_file",
+        "files_done": 1,
+        "files_total": 3,
+        "started_at": "2026-03-14T10:00:00+00:00",
+        "updated_at": "2026-03-14T10:00:05+00:00",
+    }
+
+    cache.write_build_state(
+        {
+            "state": "interrupted",
+            "build_id": build_id,
+            "pid": 123,
+            "started_at": "2026-03-14T10:00:00+00:00",
+            "updated_at": "2026-03-14T10:00:05+00:00",
+            "stage": "extract_symbols",
+            "cleanup_pending": True,
+            "progress": progress,
+        }
+    )
+    manifest = cache.write_staged_build_resume_manifest(
+        build_id,
+        {
+            "build_id": build_id,
+            "source": "manifest",
+            "workspace_path_hash": "workspace-hash",
+            "index_target_path": "/tmp/repo",
+            "embedding_profile": "test:test|embed_graph_edges=0",
+            "schema_version": stage_cache.get_schema_version(),
+            "tool_version": "test-version",
+            "stage_cache_dir": stage_dir,
+            "state": "interrupted",
+            "started_at": "2026-03-14T10:00:00+00:00",
+            "updated_at": "2026-03-14T10:00:05+00:00",
+            "stage": "extract_symbols",
+            "counts": {"files": 1, "symbols": 2, "chunks": 2, "embedded_chunks": 0},
+            "progress": progress,
+        },
+    )
+
+    build_state = cache.get_build_state()
+    assert isinstance(build_state, dict)
+    assert build_state["progress"] == progress
+    assert manifest["progress"] == progress
+    assert cache.get_staged_build_resume_manifest(build_id)["progress"] == progress
 
 
 def test_cache_prepare_and_publish_staged_build_replaces_active_metadata() -> None:
@@ -368,7 +597,10 @@ def test_cache_auto_resets_when_chunks_table_missing_byte_columns() -> None:
     cache = CacheManager(CacheConfig(cache_dir))
 
     assert cache.last_reset_reason is not None
-    assert "missing columns" in cache.last_reset_reason
+    assert (
+        "missing columns" in cache.last_reset_reason
+        or "required tables missing" in cache.last_reset_reason
+    )
     assert cache.get_schema_version() == CACHE_SCHEMA_VERSION
 
 

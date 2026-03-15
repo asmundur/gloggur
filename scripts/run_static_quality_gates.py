@@ -37,6 +37,21 @@ MYPY_TARGETS = [
 ]
 
 
+def _resolve_tool_python() -> str:
+    """Prefer the repo virtualenv interpreter for tool modules when it exists."""
+    candidates = (
+        REPO_ROOT / ".venv" / "bin" / "python",
+        REPO_ROOT / ".venv" / "Scripts" / "python.exe",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+TOOL_PYTHON = _resolve_tool_python()
+
+
 @dataclass(frozen=True)
 class StageSpec:
     """Definition for one static-quality verification stage."""
@@ -83,7 +98,7 @@ STAGE_SPECS = [
         remediation=(
             "Run the emitted Ruff command locally and fix lint violations in the gated files."
         ),
-        command=[sys.executable, "-m", "ruff", "check", *GATE_TARGETS],
+        command=[TOOL_PYTHON, "-m", "ruff", "check", *GATE_TARGETS],
     ),
     StageSpec(
         name="mypy",
@@ -91,7 +106,7 @@ STAGE_SPECS = [
         remediation=(
             "Run the emitted mypy command locally and fix typing issues in the gated files."
         ),
-        command=[sys.executable, "-m", "mypy", *MYPY_TARGETS],
+        command=[TOOL_PYTHON, "-m", "mypy", *MYPY_TARGETS],
     ),
     StageSpec(
         name="black",
@@ -99,7 +114,7 @@ STAGE_SPECS = [
         remediation=(
             "Run the emitted Black command locally and format the gated files before retrying."
         ),
-        command=[sys.executable, "-m", "black", "--check", *GATE_TARGETS],
+        command=[TOOL_PYTHON, "-m", "black", "--check", *GATE_TARGETS],
     ),
 ]
 

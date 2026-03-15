@@ -23,9 +23,11 @@ with `scripts/gloggur index . --json --embed-graph-edges` or
 `status --json` now separates raw on-disk rows from reusable search state:
 
 - `build_state`: active/incomplete build metadata when a writer is building or was interrupted
+  - during `extract_symbols`, `build_state.progress` reports the active file, subphase, and file counts for support/debugging
 - `raw_total_symbols`: raw symbol rows observed on disk
 - `total_symbols`: searchable symbol count, forced to `0` whenever `resume_decision != "resume_ok"`
 - `index_stats`: persisted symbol/chunk/graph totals plus embedded vector totals
+- `index --json --verbose`: additive `verbose.lines.index` source-line and embedded-line coverage metrics for the current index run only
 
 Workspace note:
 - cache/state defaults to `.gloggur-cache` in the current workspace
@@ -95,6 +97,7 @@ Run commands from repo root:
 scripts/gloggur index . --json
 # opt in if you explicitly want semantic edge vectors too
 scripts/gloggur index . --json --embed-graph-edges
+scripts/gloggur index . --json --verbose
 scripts/gloggur watch init . --json
 scripts/gloggur watch start --daemon --json
 scripts/gloggur watch status --json
@@ -172,6 +175,7 @@ testers should use `support collect`.
 | Failure code | Meaning | Action |
 | --- | --- | --- |
 | `embedding_provider_error` | Provider client could not initialize or authenticate. | Set `OPENROUTER_API_KEY` or `OPENAI_API_KEY` plus model/env settings, then retry. |
+| `extract_symbols_timeout` | A single file stalled in `prepare_file` or `build_edges` long enough for the watchdog to abort the run. | Inspect `status --json` or `support collect --json` for `build_state.progress`, fix the stuck parser/edge path, or temporarily raise `GLOGGUR_EXTRACT_SYMBOLS_TIMEOUT_SECONDS`. |
 | `search_cache_not_ready` | Search was attempted against a cache that is still building, interrupted, or otherwise not reusable. | Run `scripts/gloggur index . --json`, then inspect `status --json` for `build_state` and resume details. |
 | `watch_mode_conflict` | Both `--foreground` and `--daemon` were passed. | Use exactly one watch mode flag. |
 | `watch_path_missing` | Configured watch path does not exist. | Run `scripts/gloggur watch init <existing-path> --json`. |

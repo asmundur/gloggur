@@ -352,6 +352,11 @@ Fields:
   - Meaning: parser failed on file contents.
   - Retryability: retry after fixing source syntax or parser compatibility.
   - Operator action: inspect source syntax and parser support.
+- `extract_symbols_timeout`
+  - Command(s): `index`.
+  - Meaning: per-file symbol extraction or graph-edge construction exceeded the watchdog timeout.
+  - Retryability: retry after investigating the stuck file/subphase or raise the timeout deliberately.
+  - Operator action: inspect `status --json` / `support collect --json` for `build_state.progress`, then rerun after fixing the parser or edge extractor for that file.
 - `storage_error`
   - Command(s): `index`, watch incremental batches.
   - Meaning: cache/vector persistence failed.

@@ -2,17 +2,84 @@ from __future__ import annotations
 
 import os
 import tempfile
+import textwrap
+from pathlib import Path
 
 import pytest
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
 from gloggur.embeddings.errors import EmbeddingProviderError
-from gloggur.indexer.cache import CacheConfig, CacheManager
-from gloggur.indexer.indexer import Indexer
-from gloggur.models import SymbolChunk
+from gloggur.indexer.cache import (
+    BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
+    BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
+    CacheConfig,
+    CacheManager,
+)
+from gloggur.indexer.indexer import (
+    EXTRACT_SYMBOLS_TIMEOUT_REASON,
+    Indexer,
+    VerboseLineMetricsAccumulator,
+)
+from gloggur.models import EdgeRecord, SymbolChunk
 from gloggur.parsers.registry import ParserRegistry
 from scripts.verification.fixtures import TestFixtures
+
+
+def _write_timeout_parser_module(tmp_path: Path, *, sleep_seconds: float = 0.2) -> str:
+    module_name = f"gloggur_test_timeout_parser_{next(tempfile._get_candidate_names())}"
+    module_path = tmp_path / f"{module_name}.py"
+    module_path.write_text(
+        textwrap.dedent(
+            f"""
+            from __future__ import annotations
+
+            import hashlib
+            import os
+            import time
+
+            from gloggur.models import Symbol
+            from gloggur.parsers.base import ParsedFile, Parser
+
+
+            class TimeoutParser(Parser):
+                def parse_file(self, path: str, source: str) -> ParsedFile:
+                    return ParsedFile(
+                        path=path,
+                        language="python",
+                        source=source,
+                        symbols=self.extract_symbols(path, source),
+                    )
+
+                def extract_symbols(self, path: str, source: str) -> list[Symbol]:
+                    if os.path.basename(path) == "b_hang.py":
+                        time.sleep({sleep_seconds})
+                    body_hash = hashlib.sha256(source.encode("utf8")).hexdigest()
+                    return [
+                        Symbol(
+                            id=f"{{path}}::sample",
+                            name="sample",
+                            kind="function",
+                            fqname="sample",
+                            file_path=path,
+                            start_line=1,
+                            end_line=2,
+                            body_hash=body_hash,
+                            language="python",
+                        )
+                    ]
+
+                def get_supported_languages(self):
+                    return ["python"]
+
+
+            def create_parser() -> TimeoutParser:
+                return TimeoutParser()
+            """
+        ),
+        encoding="utf8",
+    )
+    return module_name
 
 
 def test_indexer_indexes_repo_and_sets_metadata() -> None:
@@ -58,6 +125,303 @@ def test_indexer_indexes_repo_and_sets_metadata() -> None:
         assert isinstance(search_integrity, dict)
         assert search_integrity["vector_cache"]["status"] == "missing"
         assert search_integrity["chunk_span"]["status"] == "passed"
+
+
+def test_verbose_line_metrics_accumulator_tracks_duplicates_and_edge_additions() -> None:
+    """Verbose line accounting should distinguish duplicated and unique coverage."""
+    accumulator = VerboseLineMetricsAccumulator()
+    accumulator.add_source_lines(6)
+    accumulator.add_symbol_chunks(
+        [
+            SymbolChunk(
+                chunk_id="chunk-1",
+                symbol_id="sym-1",
+                chunk_part_index=1,
+                chunk_part_total=1,
+                text="alpha",
+                file_path="sample.py",
+                start_line=1,
+                end_line=3,
+                embedding_vector=[0.1, 0.2],
+            ),
+            SymbolChunk(
+                chunk_id="chunk-2",
+                symbol_id="sym-2",
+                chunk_part_index=1,
+                chunk_part_total=1,
+                text="beta",
+                file_path="sample.py",
+                start_line=3,
+                end_line=4,
+                embedding_vector=[0.3, 0.4],
+            ),
+            SymbolChunk(
+                chunk_id="chunk-ignored",
+                symbol_id="sym-3",
+                chunk_part_index=1,
+                chunk_part_total=1,
+                text="ignored",
+                file_path="sample.py",
+                start_line=5,
+                end_line=5,
+                embedding_vector=None,
+            ),
+        ]
+    )
+    accumulator.add_graph_edges(
+        [
+            EdgeRecord(
+                edge_id="edge-1",
+                edge_type="CALLS",
+                from_id="sym-1",
+                to_id="sym-2",
+                from_kind="function",
+                to_kind="function",
+                file_path="sample.py",
+                line=3,
+                confidence=1.0,
+                embedding_vector=[0.5, 0.6],
+            ),
+            EdgeRecord(
+                edge_id="edge-2",
+                edge_type="CALLS",
+                from_id="sym-1",
+                to_id="sym-4",
+                from_kind="function",
+                to_kind="function",
+                file_path="sample.py",
+                line=6,
+                confidence=1.0,
+                embedding_vector=[0.7, 0.8],
+            ),
+            EdgeRecord(
+                edge_id="edge-ignored",
+                edge_type="CALLS",
+                from_id="sym-1",
+                to_id="sym-5",
+                from_kind="function",
+                to_kind="function",
+                file_path="sample.py",
+                line=2,
+                confidence=1.0,
+                embedding_vector=None,
+            ),
+        ]
+    )
+
+    metrics = accumulator.build()
+
+    assert metrics.source_total == 6
+    assert metrics.embedded_total == 7
+    assert metrics.embedded_unique == 5
+    assert metrics.embedded_duplicate == 2
+    assert metrics.vector_count == 4
+    assert metrics.symbol_chunks.line_total == 5
+    assert metrics.symbol_chunks.line_unique == 4
+    assert metrics.graph_edges.line_total == 2
+    assert metrics.graph_edges.line_unique == 2
+
+
+def test_indexer_verbose_line_metrics_count_physical_lines_across_line_endings() -> None:
+    """Verbose source totals should follow the shared byte-span line model."""
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({})
+        (repo / "lf.py").write_text("def alpha():\n    return 1\n", encoding="utf8")
+        (repo / "nonewline.py").write_text("def beta():\n    return 2", encoding="utf8")
+        (repo / "empty.py").write_text("", encoding="utf8")
+        (repo / "crlf.py").write_bytes(b"def gamma():\r\n    return 3\r\n")
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+        )
+
+        result = indexer.index_repository(str(repo), capture_verbose_metrics=True)
+
+        assert result.failed == 0
+        assert result.verbose_lines is not None
+        assert result.verbose_lines.source_total == 6
+
+
+def test_indexer_verbose_line_metrics_track_duplicates_and_cache_reuse() -> None:
+    """Verbose metrics should be stable across unchanged reruns."""
+
+    class FakeEmbeddingProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            size = float(len(text))
+            return [size, size + 1.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_text(text) for text in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    source = (
+        "class Example:\n"
+        "    def first(self) -> int:\n"
+        "        return 1\n"
+        "    def second(self) -> int:\n"
+        "        return self.first()\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+
+        first = indexer.index_repository(str(repo), capture_verbose_metrics=True)
+        second = indexer.index_repository(str(repo), capture_verbose_metrics=True)
+
+        assert first.failed == 0
+        assert first.verbose_lines is not None
+        assert first.verbose_lines.source_total == 5
+        assert first.verbose_lines.embedded_total == 9
+        assert first.verbose_lines.embedded_unique == 5
+        assert first.verbose_lines.embedded_duplicate == 4
+        assert first.verbose_lines.vector_count == 3
+        assert first.verbose_lines.graph_edges.vector_count == 0
+        assert second.failed == 0
+        assert second.unchanged == 1
+        assert second.verbose_lines == first.verbose_lines
+
+
+def test_indexer_verbose_line_metrics_include_edge_vectors_when_enabled() -> None:
+    """Verbose metrics should count optional embedded graph edges separately."""
+
+    class RecordingProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            size = float(len(text))
+            return [size, size + 1.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_text(text) for text in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    source = (
+        "def helper(value: int) -> int:\n"
+        "    return value + 1\n\n"
+        "def caller(value: int) -> int:\n"
+        "    return helper(value)\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir, embed_graph_edges=True),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=RecordingProvider(),
+        )
+
+        result = indexer.index_repository(str(repo), capture_verbose_metrics=True)
+
+        assert result.failed == 0
+        assert result.verbose_lines is not None
+        assert result.verbose_lines.symbol_chunks.vector_count > 0
+        assert result.verbose_lines.graph_edges.vector_count > 0
+        assert result.verbose_lines.graph_edges.line_total >= result.verbose_lines.graph_edges.line_unique
+        assert (
+            result.verbose_lines.embedded_total
+            == result.verbose_lines.symbol_chunks.line_total
+            + result.verbose_lines.graph_edges.line_total
+        )
+
+
+def test_indexer_verbose_line_metrics_count_source_lines_for_failed_files() -> None:
+    """Failed files should still contribute source lines but no embedded coverage."""
+
+    class ExplodingParser:
+        def extract_symbols(self, _path: str, _source: str) -> list[object]:
+            raise RuntimeError("parse exploded")
+
+    class FakeParserEntry:
+        language = "python"
+        parser = ExplodingParser()
+
+    class FakeParserRegistry:
+        def get_parser_for_path(self, _path: str) -> FakeParserEntry:
+            return FakeParserEntry()
+
+    source = "def broken():\n    return 1\n"
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+        indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=cache,
+            parser_registry=FakeParserRegistry(),
+        )
+
+        result = indexer.index_repository(str(repo), capture_verbose_metrics=True)
+
+        assert result.failed == 1
+        assert result.verbose_lines is not None
+        assert result.verbose_lines.source_total == 2
+        assert result.verbose_lines.embedded_total == 0
+        assert result.verbose_lines.embedded_unique == 0
+        assert result.verbose_lines.vector_count == 0
+
+
+def test_indexer_verbose_line_metrics_single_file_matches_repo_scope() -> None:
+    """Single-file detailed indexing should emit the same verbose metrics as repo indexing."""
+
+    class FakeEmbeddingProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            size = float(len(text))
+            return [size, size + 1.0]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [self.embed_text(text) for text in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    source = (
+        "class Example:\n"
+        "    def first(self) -> int:\n"
+        "        return 1\n"
+        "    def second(self) -> int:\n"
+        "        return self.first()\n"
+    )
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        repo_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        single_cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        repo_indexer = Indexer(
+            config=GloggurConfig(cache_dir=repo_cache_dir),
+            cache=CacheManager(CacheConfig(repo_cache_dir)),
+            parser_registry=ParserRegistry(),
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+        single_indexer = Indexer(
+            config=GloggurConfig(cache_dir=single_cache_dir),
+            cache=CacheManager(CacheConfig(single_cache_dir)),
+            parser_registry=ParserRegistry(),
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+
+        repo_result = repo_indexer.index_repository(str(repo), capture_verbose_metrics=True)
+        execution = single_indexer.index_file_with_details(
+            str(repo / "sample.py"),
+            capture_verbose_metrics=True,
+        )
+
+        assert repo_result.failed == 0
+        assert execution.outcome.status == "indexed"
+        assert repo_result.verbose_lines is not None
+        assert execution.verbose_lines == repo_result.verbose_lines
 
 
 def test_indexer_indexes_mixed_c_cpp_files_without_parser_unavailable_failures() -> None:
@@ -558,9 +922,12 @@ def test_indexer_rolls_back_file_state_after_transient_vector_upsert_failure() -
         assert first.failed_reasons == {"storage_error": 1}
         assert first.indexed_symbols == 0
         sample_path = str(repo / "sample.py")
-        assert cache.get_file_metadata(sample_path) is None
-        assert cache.list_symbols_for_file(sample_path) == []
-        assert cache.count_symbols() == 0
+        checkpoint = cache.get_build_file_checkpoint(sample_path)
+        assert checkpoint is not None
+        assert checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE
+        assert cache.get_file_metadata(sample_path) is not None
+        assert cache.count_symbols() == 1
+        assert all(chunk.embedding_vector is None for chunk in cache.list_chunks_for_file(sample_path))
         assert vector_store.list_symbol_ids() == []
 
         second = indexer.index_repository(str(repo))
@@ -1093,6 +1460,270 @@ def test_index_file_with_outcome_classifies_embedding_provider_failures() -> Non
     assert outcome.reason == "embedding_provider_error"
     assert outcome.detail is not None
     assert "Embedding provider failure [openai]" in outcome.detail
+
+
+def test_indexer_extract_timeout_fails_fast_and_reports_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repository indexing should fail fast on extract timeouts when partial failures are disabled."""
+    module_name = _write_timeout_parser_module(tmp_path, sleep_seconds=0.6)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    a_path = repo / "a_ok.py"
+    b_path = repo / "b_hang.py"
+    c_path = repo / "c_ok.py"
+    for path in (a_path, b_path, c_path):
+        path.write_text("def sample() -> int:\n    return 1\n", encoding="utf8")
+
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(
+        cache_dir=cache_dir,
+        extract_symbols_timeout_seconds=0.2,
+        adapters={"parsers": {"python": f"{module_name}:create_parser"}},
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+    indexer._iter_source_files = lambda _root: [str(a_path), str(b_path), str(c_path)]  # type: ignore[method-assign]
+    progress_updates: list[dict[str, object] | None] = []
+    indexer._extract_progress_callback = lambda progress: progress_updates.append(progress)
+
+    result = indexer.index_repository(str(repo))
+
+    assert result.failed == 1
+    assert result.failed_reasons == {EXTRACT_SYMBOLS_TIMEOUT_REASON: 1}
+    assert result.indexed == 0
+    assert result.files_considered == 2
+    assert cache.count_files() == 0
+    assert any(
+        timing.path == str(b_path) and timing.reason == EXTRACT_SYMBOLS_TIMEOUT_REASON
+        for timing in result.file_timings
+    )
+    assert any(
+        isinstance(progress, dict)
+        and progress["current_file"] == str(b_path)
+        and progress["subphase"] == "prepare_file"
+        for progress in progress_updates
+    )
+
+
+def test_indexer_extract_timeout_restarts_worker_when_partial_allowed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial indexing should restart the extract worker and continue after a timed-out file."""
+    module_name = _write_timeout_parser_module(tmp_path, sleep_seconds=0.6)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    a_path = repo / "a_ok.py"
+    b_path = repo / "b_hang.py"
+    c_path = repo / "c_ok.py"
+    for path in (a_path, b_path, c_path):
+        path.write_text("def sample() -> int:\n    return 1\n", encoding="utf8")
+
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(
+        cache_dir=cache_dir,
+        extract_symbols_timeout_seconds=0.2,
+        adapters={"parsers": {"python": f"{module_name}:create_parser"}},
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+    indexer._iter_source_files = lambda _root: [str(a_path), str(b_path), str(c_path)]  # type: ignore[method-assign]
+    indexer._allow_partial_failures = True
+
+    result = indexer.index_repository(str(repo))
+
+    assert result.failed == 1
+    assert result.failed_reasons == {EXTRACT_SYMBOLS_TIMEOUT_REASON: 1}
+    assert result.indexed == 2
+    assert cache.count_files() == 2
+    assert cache.get_file_metadata(str(a_path)) is not None
+    assert cache.get_file_metadata(str(c_path)) is not None
+    assert cache.get_file_metadata(str(b_path)) is None
+
+
+def test_index_file_with_details_reports_extract_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single-file execution should classify extract timeouts with a stable reason code."""
+    module_name = _write_timeout_parser_module(tmp_path, sleep_seconds=0.6)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    file_path = tmp_path / "b_hang.py"
+    file_path.write_text("def sample() -> int:\n    return 1\n", encoding="utf8")
+
+    cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+    config = GloggurConfig(
+        cache_dir=cache_dir,
+        extract_symbols_timeout_seconds=0.2,
+        adapters={"parsers": {"python": f"{module_name}:create_parser"}},
+    )
+    cache = CacheManager(CacheConfig(cache_dir))
+    indexer = Indexer(config=config, cache=cache, parser_registry=ParserRegistry())
+
+    execution = indexer.index_file_with_details(str(file_path))
+
+    assert execution.outcome.status == "failed"
+    assert execution.outcome.reason == EXTRACT_SYMBOLS_TIMEOUT_REASON
+    assert execution.timing is not None
+    assert execution.timing.reason == EXTRACT_SYMBOLS_TIMEOUT_REASON
+
+
+def test_indexer_resume_skips_prepare_for_stat_matched_extract_checkpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume should skip prepare_file for files already checkpointed during extract."""
+
+    class FakeEmbeddingProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1, 0.2] for _ in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    source = "def sample(value: int) -> int:\n    return value + 1\n"
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"a.py": source, "b.py": source})
+        ordered_paths = [str(repo / "a.py"), str(repo / "b.py")]
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+
+        first_indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+        first_indexer._iter_source_files = lambda _root: ordered_paths  # type: ignore[method-assign]
+        original_build_edges = first_indexer._build_edges_with_watchdog
+        edge_calls = 0
+
+        def _halt_on_second_edge(**kwargs: object) -> tuple[list[EdgeRecord] | None, int, bool, str | None]:
+            nonlocal edge_calls
+            edge_calls += 1
+            if edge_calls == 2:
+                return None, 0, True, "simulated timeout"
+            return original_build_edges(**kwargs)
+
+        monkeypatch.setattr(first_indexer, "_build_edges_with_watchdog", _halt_on_second_edge)
+
+        first_result = first_indexer.index_repository(str(repo))
+
+        assert first_result.failed == 1
+        assert cache.get_build_file_checkpoint(ordered_paths[0]) is not None
+        assert cache.get_build_file_checkpoint(ordered_paths[1]) is None
+        assert cache.get_build_checkpoint_stats()["pending_embed_files"] == 1
+
+        second_indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=FakeEmbeddingProvider(),
+        )
+        second_indexer._iter_source_files = lambda _root: ordered_paths  # type: ignore[method-assign]
+        original_prepare = second_indexer._prepare_file_for_index_with_watchdog
+        prepare_calls: list[str] = []
+
+        def _record_prepare(**kwargs: object):
+            prepare_calls.append(str(kwargs["path"]))
+            return original_prepare(**kwargs)
+
+        monkeypatch.setattr(second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare)
+
+        second_result = second_indexer.index_repository(str(repo))
+
+        assert second_result.failed == 0
+        assert prepare_calls == [ordered_paths[1]]
+        assert cache.count_files() == 2
+        assert cache.get_build_checkpoint_stats() == {
+            "extract_completed_files": 2,
+            "embedded_completed_files": 2,
+            "pending_embed_files": 0,
+        }
+
+
+def test_indexer_resume_embeds_extract_checkpoint_without_reextracting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embed resume should consume extract checkpoints without rerunning prepare_file."""
+
+    class FailingProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.1, 0.2]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            _ = texts
+            raise RuntimeError("embed failed")
+
+        def get_dimension(self) -> int:
+            return 2
+
+    class RecordingProvider(EmbeddingProvider):
+        def embed_text(self, text: str) -> list[float]:
+            _ = text
+            return [0.3, 0.4]
+
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[0.3, 0.4] for _ in texts]
+
+        def get_dimension(self) -> int:
+            return 2
+
+    source = "def sample(value: int) -> int:\n    return value + 1\n"
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo({"sample.py": source})
+        file_path = str(repo / "sample.py")
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        cache = CacheManager(CacheConfig(cache_dir))
+
+        first_indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=FailingProvider(),
+        )
+        first_result = first_indexer.index_repository(str(repo))
+
+        assert first_result.failed == 1
+        checkpoint = cache.get_build_file_checkpoint(file_path)
+        assert checkpoint is not None
+        assert checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE
+        assert cache.get_file_metadata(file_path) is not None
+        assert all(
+            chunk.embedding_vector is None for chunk in cache.list_chunks_for_file(file_path)
+        )
+
+        second_indexer = Indexer(
+            config=GloggurConfig(cache_dir=cache_dir),
+            cache=cache,
+            parser_registry=ParserRegistry(),
+            embedding_provider=RecordingProvider(),
+        )
+        original_prepare = second_indexer._prepare_file_for_index_with_watchdog
+        prepare_calls: list[str] = []
+
+        def _record_prepare(**kwargs: object):
+            prepare_calls.append(str(kwargs["path"]))
+            return original_prepare(**kwargs)
+
+        monkeypatch.setattr(second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare)
+
+        second_result = second_indexer.index_repository(str(repo))
+
+        assert second_result.failed == 0
+        assert prepare_calls == []
+        resumed_checkpoint = cache.get_build_file_checkpoint(file_path)
+        assert resumed_checkpoint is not None
+        assert resumed_checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE
+        assert cache.get_file_metadata(file_path) is not None
 
 
 def test_indexer_builds_repo_symbol_catalog_once_per_run(

@@ -62,6 +62,7 @@ Index your repository from the project root:
 gloggur index . --json
 # opt in if you explicitly want semantic edge vectors too
 gloggur index . --json --embed-graph-edges
+gloggur index . --json --verbose
 ```
 
 Run searches in different modes:
@@ -182,6 +183,8 @@ gloggur extract sample.py 0 42 --json
 `extract` requires repo-relative paths under the active workspace root and reads exact raw bytes before decoding with UTF-8 replacement.
 
 `index --json` and `status --json` also include `index_stats`, which separates structural graph counts from embedded vector counts (`graph_edge_count`, `embedded_symbol_vectors`, `embedded_edge_vectors`, `embedded_vector_count`).
+
+`index --json --verbose` adds `verbose.lines.index`, which reports physical source-line totals plus duplicated and unique embedded-line coverage for symbol chunks and optional graph-edge vectors. Inspect-command embeddings remain out of scope for that section.
 
 Graph commands return `edge_id`, `edge_type`, `from_id`, `to_id`, `file_path`, `line` and `confidence`.  Inspect commands return audit findings per symbol with categories such as missing docstring, parameter mismatch and summary quality.
 
