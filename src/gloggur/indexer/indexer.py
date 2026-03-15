@@ -200,7 +200,10 @@ def _extract_symbols_worker_main(
                 continue
 
             if kind == "build_edges":
-                if bool(payload.get("use_primed_catalog")) and primed_candidate_symbol_index is None:
+                if (
+                    bool(payload.get("use_primed_catalog"))
+                    and primed_candidate_symbol_index is None
+                ):
                     raise ValueError("build_edges worker catalog was not primed")
                 edges = Indexer._build_graph_edges(
                     path=str(payload["path"]),

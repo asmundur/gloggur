@@ -127,7 +127,7 @@ class CandidateSymbolIndex:
         )
 
     def with_local_symbols(self, local_symbols: Sequence[Symbol]) -> CandidateSymbolIndex:
-        """Overlay local symbols only when the prebuilt candidate index does not already contain them."""
+        """Overlay local symbols when they are not already present in the index."""
         if not local_symbols:
             return self
         if all(self.by_id.get(symbol.id) is symbol for symbol in local_symbols):
@@ -157,7 +157,6 @@ class GraphEdgeExtractor:
         if candidate_symbol_index is None:
             candidate_symbol_index = CandidateSymbolIndex.from_symbols(candidate_symbols or [])
         combined_index = candidate_symbol_index.with_local_symbols(symbols)
-        combined = combined_index.symbols
         by_id = combined_index.by_id
         by_fqname = combined_index.by_fqname
         by_name = combined_index.by_name
