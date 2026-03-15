@@ -109,13 +109,22 @@ scripts/gloggur watch stop --json
 Optional repo-local setup for betatester support bundles:
 
 ```bash
-scripts/gloggur init . --betatester-support --json
+scripts/gloggur init . --betatester-support --yes --json
 ```
 
 `gloggur init .` writes a minimal repo-local Glöggur config scaffold. Add
 `--betatester-support` when you want later `support collect` runs to include
-recent and active command traces. `gloggur watch init . --json` stays
+recent and active command traces. With `--yes`, init also applies only the
+Glöggur-local access fixes it can make safely and reports any remaining repo or
+macOS privacy blockers. `gloggur watch init . --json` stays
 watch-specific and only configures watch mode.
+
+If you want to inspect or rerun that access step separately:
+
+```bash
+scripts/gloggur access plan . --json
+scripts/grant_gloggur_access.sh . --yes --json
+```
 
 `search --json` emits ContextPack v2 fields (`schema_version`, `query`, `summary`, `hits[]`) only when the cache is ready.
 When the cache is not reusable, `search --json` exits non-zero with:
@@ -129,7 +138,7 @@ When the cache is not reusable, `search --json` exits non-zero with:
 
 - `scripts/gloggur inspect . --json` focuses on source paths by default; add `--include-tests` and `--include-scripts` when you want a broader repo audit.
 - Parser support is baseline rather than uniform. Run `scripts/gloggur parsers check --json` before depending on symbol fidelity for JavaScript computed identifier subscripts or helper-driven runtime mutation, TypeScript type aliases or enums, strict C++ macro recovery outside supported placeholder patterns, named Go types, Rust impl methods, or Java records/enums.
-- After `scripts/gloggur init . --json` or `scripts/gloggur watch init . --json`, later commands may include `security_warning_codes: ["untrusted_repo_config"]` because the repo-local config is auto-discovered and treated as untrusted by default.
+- After `scripts/gloggur init . --yes --json` or `scripts/gloggur watch init . --json`, later commands may include `security_warning_codes: ["untrusted_repo_config"]` because the repo-local config is auto-discovered and treated as untrusted by default.
 - In betatester-support repos, tracing is best-effort: command JSON may include `warning_codes: ["support_runtime_degraded"]` if support-runtime telemetry writes fail, while command execution itself continues.
 - This repo's `scripts/run_quickstart_smoke.py` harness and most deterministic CI checks use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.
 
@@ -141,7 +150,7 @@ wrong results, or unusually slow commands.
 1. One time per repo, enable betatester support tracing:
 
 ```bash
-scripts/gloggur init . --betatester-support --json
+scripts/gloggur init . --betatester-support --yes --json
 ```
 
 This is optional. Normal `index`, `search`, `status`, and `watch` commands still
@@ -175,6 +184,7 @@ testers should use `support collect`.
 | Failure code | Meaning | Action |
 | --- | --- | --- |
 | `embedding_provider_error` | Provider client could not initialize or authenticate. | Set `OPENROUTER_API_KEY` or `OPENAI_API_KEY` plus model/env settings, then retry. |
+| `access_grant_incomplete` | Repo access still needs Glöggur-local fixes or manual repo/OS permission work. | Review `access_plan` / `access_result`, fix any blocked paths or macOS privacy prompts, then rerun `scripts/grant_gloggur_access.sh . --yes --json`. |
 | `extract_symbols_timeout` | A single file stalled in `prepare_file` or `build_edges` long enough for the watchdog to abort the run. | Inspect `status --json` or `support collect --json` for `build_state.progress`, fix the stuck parser/edge path, or temporarily raise `GLOGGUR_EXTRACT_SYMBOLS_TIMEOUT_SECONDS`. |
 | `search_cache_not_ready` | Search was attempted against a cache that is still building, interrupted, or otherwise not reusable. | Run `scripts/gloggur index . --json`, then inspect `status --json` for `build_state` and resume details. |
 | `watch_mode_conflict` | Both `--foreground` and `--daemon` were passed. | Use exactly one watch mode flag. |

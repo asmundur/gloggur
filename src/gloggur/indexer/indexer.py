@@ -891,7 +891,10 @@ class Indexer:
             size_bytes=checkpoint.size_bytes or 0,
             repo_id=repo_id,
             commit=commit,
-            snapshot=self._build_checkpoint_snapshot(checkpoint=checkpoint, symbols=current_symbols),
+            snapshot=self._build_checkpoint_snapshot(
+                checkpoint=checkpoint,
+                symbols=current_symbols,
+            ),
             symbols=current_symbols,
             chunks=current_chunks,
             edges=current_edges,
@@ -1204,14 +1207,18 @@ class Indexer:
                         size_bytes=stat_size_bytes,
                     ):
                         metadata = self.cache.get_file_metadata(file_path)
-                        if metadata is not None and metadata.content_hash == checkpoint.content_hash:
+                        if (
+                            metadata is not None
+                            and metadata.content_hash == checkpoint.content_hash
+                        ):
+                            checkpoint_status = (
+                                "unchanged"
+                                if checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE
+                                else "prepared"
+                            )
                             checkpoint_timing = FileTimingTrace(
                                 path=file_path,
-                                status=(
-                                    "unchanged"
-                                    if checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE
-                                    else "prepared"
-                                ),
+                                status=checkpoint_status,
                                 symbol_count=checkpoint.symbol_count,
                                 chunk_count=checkpoint.chunk_count,
                             )

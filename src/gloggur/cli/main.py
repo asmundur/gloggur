@@ -30,6 +30,12 @@ import yaml
 from click.core import ParameterSource
 
 from gloggur import __version__ as GLOGGUR_VERSION
+from gloggur.access import (
+    AccessGrantResult,
+    AccessPlan,
+    apply_access_grant,
+    build_access_plan,
+)
 from gloggur.adapters.registry import AdapterResolutionError
 from gloggur.archive_utils import (
     ArchiveFileSource,
@@ -142,32 +148,153 @@ WATCH_DAEMON_READY_POLL_INTERVAL_SECONDS = 0.05
 @cli.command("init")
 @click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.option("--betatester-support", is_flag=True, default=False)
+@click.option("--yes", "approve_access", is_flag=True, default=False)
+@click.option("--no-grant-access", is_flag=True, default=False)
 @click.option("--json", "as_json", is_flag=True, default=False)
-def init(path: str, betatester_support: bool, as_json: bool) -> None:
+def init(
+    path: str,
+    betatester_support: bool,
+    approve_access: bool,
+    no_grant_access: bool,
+    as_json: bool,
+) -> None:
     """Initialize repo-local Glöggur config for optional repo features."""
     _with_io_failure_handling(_init_impl)(
         path=path,
         betatester_support=betatester_support,
+        approve_access=approve_access,
+        no_grant_access=no_grant_access,
         as_json=as_json,
     )
 
 
-def _init_impl(path: str, betatester_support: bool, as_json: bool) -> None:
+def _init_impl(
+    path: str,
+    betatester_support: bool,
+    approve_access: bool,
+    no_grant_access: bool,
+    as_json: bool,
+) -> None:
     """Write minimal repo-local Glöggur initialization state."""
+    if approve_access and no_grant_access:
+        raise CLIContractError(
+            "Use only one of --yes or --no-grant-access.",
+            error_code="cli_usage_error",
+        )
     repo_root = _resolve_init_repo_root(path)
     config_file = write_support_runtime_config(repo_root, enabled=betatester_support)
+    access_plan = build_access_plan(repo_root)
+    access_result: AccessGrantResult | None = None
+    access_ready = access_plan.access_ready
+    if not no_grant_access:
+        access_result = _run_access_grant_flow(
+            access_plan,
+            repo_root=repo_root,
+            command_name="init",
+            approve_access=approve_access,
+            as_json=as_json,
+        )
+        if access_result is not None:
+            access_ready = access_result.access_ready
     response = {
         "initialized": True,
         "repo_root": str(repo_root),
         "config_file": str(config_file),
         "betatester_support": betatester_support,
-        "next_steps": (
-            ["gloggur support collect"]
-            if betatester_support
-            else ["gloggur index . --json", "gloggur watch init . --json"]
+        "access_plan": access_plan.to_payload(),
+        "access_result": access_result.to_payload() if access_result is not None else None,
+        "access_ready": access_ready,
+        "next_steps": _init_next_steps(
+            repo_root=repo_root,
+            betatester_support=betatester_support,
+            access_ready=access_ready,
+            access_plan=access_plan,
+            access_result=access_result,
         ),
     }
-    _emit(response, as_json)
+    if no_grant_access:
+        _emit(response, as_json)
+        return
+    if access_ready:
+        _emit(response, as_json)
+        return
+    _emit_access_incomplete(
+        response,
+        as_json=as_json,
+        repo_root=repo_root,
+        access_plan=access_plan,
+        access_result=access_result,
+        detail="Repo init did not complete the required access grant flow.",
+    )
+
+
+@cli.group()
+def access() -> None:
+    """Plan or apply conservative repo-local access setup for Glöggur."""
+
+
+@access.command("plan")
+@click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
+@click.option("--json", "as_json", is_flag=True, default=False)
+def access_plan_command(path: str, as_json: bool) -> None:
+    """Show the access plan Glöggur would require for a repository."""
+    _with_io_failure_handling(_access_plan_command_impl)(path=path, as_json=as_json)
+
+
+def _access_plan_command_impl(path: str, as_json: bool) -> None:
+    """Show the access plan Glöggur would require for a repository."""
+    repo_root = _resolve_init_repo_root(path)
+    plan = build_access_plan(repo_root)
+    payload = {
+        "access_plan": plan.to_payload(),
+        "access_ready": plan.access_ready,
+    }
+    if as_json:
+        _emit(payload, as_json=True)
+        return
+    click.echo(_render_access_plan(plan))
+
+
+@access.command("grant")
+@click.argument("path", type=click.Path(exists=True, dir_okay=True, file_okay=True))
+@click.option("--yes", "approve_access", is_flag=True, default=False)
+@click.option("--json", "as_json", is_flag=True, default=False)
+def access_grant_command(path: str, approve_access: bool, as_json: bool) -> None:
+    """Apply the conservative Glöggur-local access setup for a repository."""
+    _with_io_failure_handling(_access_grant_command_impl)(
+        path=path,
+        approve_access=approve_access,
+        as_json=as_json,
+    )
+
+
+def _access_grant_command_impl(path: str, approve_access: bool, as_json: bool) -> None:
+    """Apply the conservative Glöggur-local access setup for a repository."""
+    repo_root = _resolve_init_repo_root(path)
+    plan = build_access_plan(repo_root)
+    result = _run_access_grant_flow(
+        plan,
+        repo_root=repo_root,
+        command_name="access grant",
+        approve_access=approve_access,
+        as_json=as_json,
+    )
+    payload = {
+        "access_plan": plan.to_payload(),
+        "access_result": result.to_payload() if result is not None else None,
+        "access_ready": result.access_ready if result is not None else plan.access_ready,
+    }
+    if payload["access_ready"]:
+        _emit(payload, as_json)
+        return
+    _emit_access_incomplete(
+        payload,
+        as_json=as_json,
+        repo_root=repo_root,
+        access_plan=plan,
+        access_result=result,
+        detail="Repo access grant did not complete successfully.",
+    )
 
 
 @cli.group()
@@ -308,6 +435,11 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
         "Pass a Gloggur subcommand after `--`, for example `gloggur support run -- status --json`.",
         "Do not pass executable paths or recursive `support` child commands.",
         "For betatester bundle capture, prefer `gloggur support collect` over `support run`.",
+    ],
+    "access_grant_incomplete": [
+        "Review the reported access plan/result for blocked repo paths "
+        "or pending Glöggur-local fixes.",
+        "Re-run `gloggur access grant <path> --yes` after granting the required repo or OS access.",
     ],
     "support_session_missing": [
         "List or inspect the existing session ids under `.gloggur/support/sessions`.",
@@ -2132,9 +2264,7 @@ def _stage_resume_counts(stage_cache: CacheManager) -> dict[str, int]:
         stats = {}
     count_files = getattr(stage_cache, "count_files", None)
     get_build_checkpoint_stats = getattr(stage_cache, "get_build_checkpoint_stats", None)
-    checkpoint_stats = (
-        get_build_checkpoint_stats() if callable(get_build_checkpoint_stats) else {}
-    )
+    checkpoint_stats = get_build_checkpoint_stats() if callable(get_build_checkpoint_stats) else {}
     if not isinstance(checkpoint_stats, dict):
         checkpoint_stats = {}
     return {
@@ -2144,9 +2274,7 @@ def _stage_resume_counts(stage_cache: CacheManager) -> dict[str, int]:
         "embedded_chunks": int(stats.get("embedded_symbol_vectors", 0) or 0),
         "embedded_edges": int(stats.get("embedded_edge_vectors", 0) or 0),
         "extract_completed_files": int(checkpoint_stats.get("extract_completed_files", 0) or 0),
-        "embedded_completed_files": int(
-            checkpoint_stats.get("embedded_completed_files", 0) or 0
-        ),
+        "embedded_completed_files": int(checkpoint_stats.get("embedded_completed_files", 0) or 0),
         "pending_embed_files": int(checkpoint_stats.get("pending_embed_files", 0) or 0),
     }
 
@@ -2857,6 +2985,172 @@ def _resolve_init_repo_root(path: str) -> Path:
     if (discovered / ".git").exists() or discovered == candidate:
         return discovered
     return candidate
+
+
+def _render_access_plan(plan: AccessPlan) -> str:
+    """Render a human-readable access plan."""
+    lines = [
+        f"Access plan for {plan.repo_root}",
+        f"Grantee: {plan.grantee}",
+        "Required access:",
+    ]
+    for requirement in plan.required_access:
+        permission_text = ", ".join(str(item) for item in requirement["permissions"])
+        lines.append(f"- {requirement['path']}: {permission_text}")
+    lines.append("Automatic actions:")
+    for action in plan.automatic_actions:
+        status = "needed" if bool(action.get("needed")) else "not needed"
+        action_parts = [str(action["action"]), f"path={action['path']}", f"status={status}"]
+        if "mode" in action:
+            action_parts.append(f"mode={action['mode']}")
+        lines.append(f"- {' '.join(action_parts)}")
+    lines.append("Blocked paths:")
+    if plan.blocked_paths:
+        for blocked in plan.blocked_paths:
+            access_text = ",".join(blocked.required_access)
+            privacy_text = " privacy_blocker=true" if blocked.privacy_blocker else ""
+            lines.append(
+                f"- {blocked.path}: required={access_text} reason={blocked.reason}{privacy_text}"
+            )
+    else:
+        lines.append("- none")
+    if plan.manual_actions:
+        lines.append("Manual actions:")
+        for action in plan.manual_actions:
+            lines.append(f"- {action}")
+    lines.append(f"Access ready: {plan.access_ready}")
+    return "\n".join(lines)
+
+
+def _render_access_result(result: AccessGrantResult) -> str:
+    """Render a human-readable access grant result."""
+    lines = [
+        f"Access grant result for {result.repo_root}",
+        f"Applied at: {result.applied_at}",
+        "Applied actions:",
+    ]
+    if result.applied_actions:
+        for action in result.applied_actions:
+            rendered = [str(action["action"]), f"path={action['path']}"]
+            if "mode" in action:
+                rendered.append(f"mode={action['mode']}")
+            if "updated_path_count" in action:
+                rendered.append(f"updated_path_count={action['updated_path_count']}")
+            lines.append(f"- {' '.join(rendered)}")
+    else:
+        lines.append("- none")
+    lines.append("Blocked paths:")
+    if result.blocked_paths:
+        for blocked in result.blocked_paths:
+            access_text = ",".join(blocked.required_access)
+            privacy_text = " privacy_blocker=true" if blocked.privacy_blocker else ""
+            lines.append(
+                f"- {blocked.path}: required={access_text} reason={blocked.reason}{privacy_text}"
+            )
+    else:
+        lines.append("- none")
+    if result.manual_actions:
+        lines.append("Manual actions:")
+        for action in result.manual_actions:
+            lines.append(f"- {action}")
+    lines.append(f"Access ready: {result.access_ready}")
+    lines.append(f"State file: {result.state_file}")
+    return "\n".join(lines)
+
+
+def _access_incomplete_guidance(
+    *,
+    repo_root: Path,
+    access_plan: AccessPlan,
+    access_result: AccessGrantResult | None,
+) -> list[str]:
+    """Return deterministic remediation for incomplete access setup."""
+    if access_result is not None and access_result.manual_actions:
+        return list(access_result.manual_actions)
+    if access_plan.manual_actions:
+        return list(access_plan.manual_actions)
+    return [
+        CLI_FAILURE_REMEDIATION["access_grant_incomplete"][0],
+        f"Run `gloggur access grant {repo_root} --yes` to apply the Glöggur-local access changes.",
+    ]
+
+
+def _emit_access_incomplete(
+    payload: dict[str, object],
+    *,
+    as_json: bool,
+    repo_root: Path,
+    access_plan: AccessPlan,
+    access_result: AccessGrantResult | None,
+    detail: str,
+) -> None:
+    """Emit a structured incomplete-access payload and exit non-zero."""
+    guidance = _access_incomplete_guidance(
+        repo_root=repo_root,
+        access_plan=access_plan,
+        access_result=access_result,
+    )
+    payload["failure_codes"] = ["access_grant_incomplete"]
+    payload["failure_guidance"] = {"access_grant_incomplete": guidance}
+    _attach_primary_error_from_failure_contract(
+        payload,
+        error_type="access_grant",
+        detail=detail,
+        probable_cause=(
+            "Repo access is still incomplete because Glöggur-local fixes were not applied "
+            "or manual repo/OS permissions are still missing."
+        ),
+        default_remediation=DEFAULT_CLI_FAILURE_REMEDIATION,
+    )
+    _emit(payload, as_json)
+    raise click.exceptions.Exit(1)
+
+
+def _run_access_grant_flow(
+    access_plan: AccessPlan,
+    *,
+    repo_root: Path,
+    command_name: str,
+    approve_access: bool,
+    as_json: bool,
+) -> AccessGrantResult | None:
+    """Run the access grant flow with prompt and JSON semantics."""
+    if access_plan.access_ready:
+        return None
+    if as_json and not approve_access:
+        return None
+    if not as_json and not approve_access:
+        click.echo(_render_access_plan(access_plan))
+        confirmed = click.confirm(
+            f"Apply these Glöggur-local access changes for `{command_name}`?",
+            default=False,
+            show_default=True,
+        )
+        if not confirmed:
+            return None
+    return apply_access_grant(access_plan)
+
+
+def _init_next_steps(
+    *,
+    repo_root: Path,
+    betatester_support: bool,
+    access_ready: bool,
+    access_plan: AccessPlan,
+    access_result: AccessGrantResult | None,
+) -> list[str]:
+    """Return repo-init next steps that respect the access workflow outcome."""
+    if not access_ready:
+        return _access_incomplete_guidance(
+            repo_root=repo_root,
+            access_plan=access_plan,
+            access_result=access_result,
+        )
+    return (
+        ["gloggur support collect"]
+        if betatester_support
+        else ["gloggur index . --json", "gloggur watch init . --json"]
+    )
 
 
 def _read_config_payload(path: str) -> dict[str, object]:

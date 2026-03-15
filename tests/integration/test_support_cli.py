@@ -39,7 +39,11 @@ def _test_env(cache_dir: Path) -> dict[str, str]:
 
 
 def _init_betatester_support(runner: CliRunner, repo: Path, env: dict[str, str]) -> None:
-    result = runner.invoke(cli, ["init", str(repo), "--betatester-support", "--json"], env=env)
+    result = runner.invoke(
+        cli,
+        ["init", str(repo), "--betatester-support", "--yes", "--json"],
+        env=env,
+    )
     assert result.exit_code == 0, result.output
 
 

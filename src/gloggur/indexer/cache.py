@@ -573,8 +573,7 @@ class CacheManager:
                     SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS embedded_completed_files,
                     SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS pending_embed_files
                 FROM build_file_checkpoints
-                """
-                ,
+                """,
                 (
                     BUILD_FILE_CHECKPOINT_STATE_EMBEDDED_COMPLETE,
                     BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE,
@@ -1415,9 +1414,7 @@ class CacheManager:
             "chunks": int(stats.get("chunk_count", 0) or 0),
             "embedded_chunks": int(stats.get("embedded_symbol_vectors", 0) or 0),
             "embedded_edges": int(stats.get("embedded_edge_vectors", 0) or 0),
-            "extract_completed_files": int(
-                checkpoint_stats.get("extract_completed_files", 0) or 0
-            ),
+            "extract_completed_files": int(checkpoint_stats.get("extract_completed_files", 0) or 0),
             "embedded_completed_files": int(
                 checkpoint_stats.get("embedded_completed_files", 0) or 0
             ),

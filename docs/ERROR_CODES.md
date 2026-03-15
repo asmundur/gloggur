@@ -66,6 +66,11 @@ Fields:
   - Meaning: the wrapped command was empty, recursive (`support ...`), or not a Glöggur subcommand.
   - Retryability: retry after passing a normal Glöggur command after `--`.
   - Operator action: if you meant field diagnostics, use `gloggur support collect`; otherwise run `gloggur support run -- <gloggur-subcommand...>`, for example `gloggur support run -- status --json`.
+- `access_grant_incomplete`
+  - Command(s): `init`, `access grant`.
+  - Meaning: the repo still needs Glöggur-local access fixes or manual repo/OS permission work.
+  - Retryability: retry after applying the Glöggur-local fixes or resolving the blocked paths/privacy prompt.
+  - Operator action: review `access_plan` / `access_result`, fix any listed blocked paths or macOS privacy blockers, then rerun `gloggur access grant <path> --yes`.
 - `support_session_missing`
   - Command(s): `support collect`.
   - Meaning: the requested support session id does not exist on disk.

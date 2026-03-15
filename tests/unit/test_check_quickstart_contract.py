@@ -23,7 +23,7 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
                 "scripts/bootstrap_gloggur_env.sh",
                 "scripts/gloggur status --json",
                 "scripts/gloggur index . --json",
-                "scripts/gloggur init . --betatester-support --json",
+                "scripts/gloggur init . --betatester-support --yes --json",
                 "## Provider Setup",
                 "### OpenAI",
                 "GLOGGUR_EMBEDDING_PROVIDER=openai",
@@ -58,6 +58,7 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
         cli_path,
         "\n".join(
             [
+                "access_grant_incomplete",
                 "watch_mode_conflict",
                 "watch_path_missing",
                 "search_contract_v1_removed",

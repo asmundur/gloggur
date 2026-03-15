@@ -1022,17 +1022,20 @@ def test_init_writes_minimal_repo_support_config(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
 
-    result = runner.invoke(cli_main.cli, ["init", str(repo), "--json"])
+    result = runner.invoke(cli_main.cli, ["init", str(repo), "--yes", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = _payload(result.output)
     assert payload["initialized"] is True
     assert payload["betatester_support"] is False
+    assert payload["access_ready"] is True
     config_path = repo / ".gloggur" / "config.toml"
     assert config_path.exists()
     text = config_path.read_text(encoding="utf8")
     assert "[support]" in text
     assert "enabled = false" in text
+    assert (repo / ".gloggur-cache").exists()
+    assert (repo / ".gloggur" / "access_grants.json").exists()
 
 
 def test_init_with_betatester_support_enables_runtime_capture(tmp_path: Path) -> None:
@@ -1042,14 +1045,118 @@ def test_init_with_betatester_support_enables_runtime_capture(tmp_path: Path) ->
 
     result = runner.invoke(
         cli_main.cli,
-        ["init", str(repo), "--betatester-support", "--json"],
+        ["init", str(repo), "--betatester-support", "--yes", "--json"],
     )
 
     assert result.exit_code == 0, result.output
     payload = _payload(result.output)
     assert payload["betatester_support"] is True
+    assert payload["access_ready"] is True
     text = (repo / ".gloggur" / "config.toml").read_text(encoding="utf8")
     assert "enabled = true" in text
+
+
+def test_init_json_without_yes_returns_access_plan_only_and_fails(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["init", str(repo), "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = _payload(result.output)
+    assert payload["initialized"] is True
+    assert payload["access_ready"] is False
+    assert payload["access_result"] is None
+    assert payload["failure_codes"] == ["access_grant_incomplete"]
+    assert payload["error"]["code"] == "access_grant_incomplete"
+    assert (repo / ".gloggur" / "config.toml").exists()
+    assert not (repo / ".gloggur-cache").exists()
+
+
+def test_init_json_no_grant_access_preserves_success(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["init", str(repo), "--no-grant-access", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["initialized"] is True
+    assert payload["access_ready"] is False
+    assert payload["access_result"] is None
+    assert payload["access_plan"]["automatic_actions"]
+
+
+def test_init_text_accepts_access_prompt_and_applies_grant(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["init", str(repo)], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Apply these Gl" in result.output
+    assert (repo / ".gloggur-cache").exists()
+    assert (repo / ".gloggur" / "access_grants.json").exists()
+
+
+def test_init_text_decline_returns_incomplete_access_failure(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["init", str(repo)], input="n\n")
+
+    assert result.exit_code == 1, result.output
+    assert "Apply these Gl" in result.output
+    assert "access_grant_incomplete" in result.output
+    assert not (repo / ".gloggur-cache").exists()
+
+
+def test_access_plan_json_returns_deterministic_plan(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["access", "plan", str(repo), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    plan = payload["access_plan"]
+    assert plan["repo_root"] == str(repo.resolve())
+    assert plan["grantee"] == "current_user"
+    assert payload["access_ready"] is False
+
+
+def test_access_grant_json_without_yes_returns_incomplete_payload(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["access", "grant", str(repo), "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = _payload(result.output)
+    assert payload["access_result"] is None
+    assert payload["failure_codes"] == ["access_grant_incomplete"]
+    assert payload["error"]["code"] == "access_grant_incomplete"
+
+
+def test_access_grant_json_yes_applies_and_persists_result(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(cli_main.cli, ["access", "grant", str(repo), "--yes", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _payload(result.output)
+    assert payload["access_ready"] is True
+    assert payload["access_result"]["access_ready"] is True
+    assert (repo / ".gloggur-cache").exists()
+    assert (repo / ".gloggur" / "access_grants.json").exists()
 
 
 def test_status_json_rethrows_second_non_transient_retry_failure(

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
 
 REQUIRED_HEADINGS = [
     "## Install and Bootstrap",
@@ -18,7 +18,7 @@ REQUIRED_COMMAND_SNIPPETS = [
     "scripts/bootstrap_gloggur_env.sh",
     "scripts/gloggur status --json",
     "scripts/gloggur index . --json",
-    "scripts/gloggur init . --betatester-support --json",
+    "scripts/gloggur init . --betatester-support --yes --json",
     "scripts/gloggur watch init . --json",
     "scripts/gloggur watch start --daemon --json",
     "scripts/gloggur watch status --json",
@@ -54,15 +54,15 @@ DEFAULT_SOURCE_FILES = [
 ]
 
 
-def _missing_snippets(text: str, snippets: Iterable[str]) -> List[str]:
+def _missing_snippets(text: str, snippets: Iterable[str]) -> list[str]:
     return [snippet for snippet in snippets if snippet not in text]
 
 
 def check_quickstart_contract(
     docs_path: Path,
     *,
-    source_paths: Optional[List[Path]] = None,
-) -> Dict[str, object]:
+    source_paths: list[Path] | None = None,
+) -> dict[str, object]:
     if not docs_path.exists():
         return {
             "ok": False,
@@ -81,8 +81,8 @@ def check_quickstart_contract(
     missing_provider_snippets = _missing_snippets(docs_text, REQUIRED_PROVIDER_SNIPPETS)
     missing_doc_codes = _missing_snippets(docs_text, REQUIRED_FAILURE_CODES)
 
-    source_text_fragments: List[str] = []
-    missing_source_files: List[str] = []
+    source_text_fragments: list[str] = []
+    missing_source_files: list[str] = []
     for source_path in source_files:
         if not source_path.exists():
             missing_source_files.append(str(source_path))
@@ -100,7 +100,7 @@ def check_quickstart_contract(
         and not missing_cli_codes
     )
 
-    payload: Dict[str, object] = {
+    payload: dict[str, object] = {
         "ok": ok,
         "summary": {
             "docs_path": str(docs_path),
@@ -121,14 +121,20 @@ def check_quickstart_contract(
     if not ok:
         payload["failure"] = {
             "code": "quickstart_contract_violation",
-            "detail": "Quickstart docs/source contract is missing required headings, commands, provider snippets, or failure codes.",
-            "remediation": "Update docs/QUICKSTART.md and source failure-code references, then rerun the contract check.",
+            "detail": (
+                "Quickstart docs/source contract is missing required headings, "
+                "commands, provider snippets, or failure codes."
+            ),
+            "remediation": (
+                "Update docs/QUICKSTART.md and source failure-code references, "
+                "then rerun the contract check."
+            ),
         }
     return payload
 
 
-def _render_markdown(payload: Dict[str, object]) -> str:
-    lines: List[str] = ["# Quickstart Contract", ""]
+def _render_markdown(payload: dict[str, object]) -> str:
+    lines: list[str] = ["# Quickstart Contract", ""]
     lines.append(f"- ok: `{payload.get('ok')}`")
     summary = payload.get("summary")
     if isinstance(summary, dict):
@@ -151,7 +157,7 @@ def _render_markdown(payload: Dict[str, object]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate quickstart docs contract.")
     parser.add_argument("--docs-path", type=Path, default=Path("docs/QUICKSTART.md"))
     parser.add_argument(
@@ -165,7 +171,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     source_paths = None
     if args.source_paths:

@@ -28,6 +28,7 @@ def test_error_catalog_contract_passes_when_required_headings_and_codes_exist(
                 "`repo_config_trust_env_invalid`",
                 "`local_fallback_env_unsupported`",
                 "`support_command_invalid`",
+                "`access_grant_incomplete`",
                 "`support_session_missing`",
                 "`support_session_invalid`",
                 "`support_destination_exists`",

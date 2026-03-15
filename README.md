@@ -217,7 +217,7 @@ gloggur inspect . --json --warn-on-skipped-extensions
 
 - Language support is baseline, not uniform. Current known construct gaps include JavaScript computed identifier subscripts and helper-driven runtime mutation, TypeScript type aliases and enums, strict C++ macro recovery limits outside supported placeholder patterns, Go named struct/interface declarations, Rust impl/trait method forms, and Java record/enum declarations. Use `gloggur status --json` or `gloggur parsers check --json` when symbol fidelity matters for a workflow.
 - `gloggur inspect . --json` audits source paths by default. Add `--include-tests` and `--include-scripts` when you need a wider repo audit.
-- `gloggur init . --betatester-support --json` enables repo-local support tracing. `gloggur watch init . --json` stays watch-specific. Either command writes repo-local config, so later commands in that workspace may report `security_warning_codes=["untrusted_repo_config"]` because auto-discovered repo config is treated as untrusted by default.
+- `gloggur init . --betatester-support --yes --json` enables repo-local support tracing and applies Glöggur-local access fixes. Use `gloggur access plan <path>` or `scripts/grant_gloggur_access.sh <path>` when you want to inspect or re-run the access flow separately. `gloggur watch init . --json` stays watch-specific. Either init command writes repo-local config, so later commands in that workspace may report `security_warning_codes=["untrusted_repo_config"]` because auto-discovered repo config is treated as untrusted by default.
 - This repo's quickstart smoke and most deterministic CI verification use `GLOGGUR_EMBEDDING_PROVIDER=test`; they do not validate first-run local model bootstrap.
 
 ## Current status

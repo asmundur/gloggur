@@ -113,9 +113,11 @@ For the single-path onboarding flow with provider setup and troubleshooting code
    ```
    Optional one-time repo setup for betatester support bundles:
    ```bash
-   scripts/gloggur init . --betatester-support --json
+   scripts/gloggur init . --betatester-support --yes --json
    ```
    `gloggur init .` is optional and repo-local. It does not enable watch mode.
+   It now plans repo access and, with `--yes`, applies only Glöggur-local permission
+   fixes while surfacing any remaining repo or macOS privacy blockers honestly.
    Optional one-time setup for background save-triggered indexing:
    ```bash
    scripts/gloggur watch init . --json
@@ -178,11 +180,18 @@ after anything odd, including hangs or commands that are still running.
 One time per repo, enable richer support tracing:
 
 ```bash
-scripts/gloggur init . --betatester-support --json
+scripts/gloggur init . --betatester-support --yes --json
 ```
 
 Normal Glöggur commands still work without repo init. This only enables richer
 support capture for later `support collect` runs.
+
+If you need to inspect or re-run the access flow separately:
+
+```bash
+scripts/gloggur access plan . --json
+scripts/grant_gloggur_access.sh . --yes --json
+```
 
 Create a bundle after the problem happens:
 
