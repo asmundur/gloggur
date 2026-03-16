@@ -38,6 +38,21 @@ def test_extract_query_hints_strips_declaration_prefixes() -> None:
 
 
 @pytest.mark.parametrize(
+    "query",
+    [
+        "///example.com",
+        "http:///example.com",
+        "//example.com/path",
+        r"\\example.com\\path",
+    ],
+)
+def test_extract_query_hints_detects_verbatim_literals(query: str) -> None:
+    hints = extract_query_hints(query)
+
+    assert hints.verbatim_literal == query
+
+
+@pytest.mark.parametrize(
     ("query", "expected_kind"),
     [
         ("Session.mount", "identifier"),
@@ -269,6 +284,163 @@ def test_search_router_mixed_query_suggests_path_narrowing(
     assert pack.summary["decisive"] is False
     assert pack.summary["next_action"] == "narrow_by_path"
     assert pack.summary["suggested_path_prefix"] == "src/flask/app.py"
+
+
+def test_search_router_grep_fixed_string_query_preserves_verbatim_literal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _exact_backend(**kwargs):
+        captured.update(kwargs)
+        return BackendResult(name="exact", hits=(), timing_ms=4)
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        config=SearchRouterConfig(enabled_backends=("exact",)),
+    )
+    router.search(query='rg -F "http:///example.com"', mode="auto")
+
+    assert captured["query"] == "http:///example.com"
+    hints = captured["hints"]
+    assert hints.verbatim_literal == "http:///example.com"
+    assert "http:///example.com" not in hints.symbols
+
+
+def test_search_router_locator_verbatim_queries_skip_symbol_and_semantic_without_about(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    call_order: list[str] = []
+
+    def _exact_backend(**kwargs):
+        call_order.append("exact")
+        hints = kwargs["hints"]
+        assert hints.verbatim_literal == "http:///example.com"
+        return BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="tests/test_http.py",
+                    start_line=14,
+                    end_line=14,
+                    snippet="assert normalize('http:///example.com') == 'http:///example.com'",
+                    raw_score=1.0,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        )
+
+    def _symbol_backend(**_kwargs):
+        raise AssertionError("symbol backend should be skipped for locator verbatim literals")
+
+    def _semantic_backend(**_kwargs):
+        raise AssertionError("semantic backend should not run without --about")
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
+    monkeypatch.setattr("gloggur.search.router.engine.run_symbol_backend", _symbol_backend)
+    monkeypatch.setattr("gloggur.search.router.engine.run_semantic_backend", _semantic_backend)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.96 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="http:///example.com",
+        intent=SearchIntent(
+            ranking_mode="source-first",
+            result_profile="locator",
+            max_snippets=5,
+        ),
+        mode="auto",
+    )
+
+    assert call_order == ["exact"]
+    assert pack.summary["strategy"] == "exact"
+    assert pack.summary["reason"] == "verbatim_literal_locator"
+    assert pack.summary["next_action"] == "open_hit_1"
+
+
+def test_search_router_locator_verbatim_queries_allow_semantic_rescue_after_exact_miss(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    call_order: list[str] = []
+
+    def _exact_backend(**kwargs):
+        call_order.append("exact")
+        hints = kwargs["hints"]
+        assert hints.verbatim_literal == "//example.com/path"
+        return BackendResult(name="exact", hits=(), timing_ms=3)
+
+    def _symbol_backend(**_kwargs):
+        raise AssertionError("symbol backend should be skipped for locator verbatim literals")
+
+    def _semantic_backend(**_kwargs):
+        call_order.append("semantic")
+        return BackendResult(
+            name="semantic",
+            hits=(
+                BackendHit(
+                    backend="semantic",
+                    path="src/django/utils/http.py",
+                    start_line=245,
+                    end_line=245,
+                    snippet="def normalize_malformed_url_path(value):",
+                    raw_score=0.89,
+                    tags=("semantic_match", "semantic_high_conf"),
+                ),
+            ),
+            timing_ms=5,
+        )
+
+    monkeypatch.setattr("gloggur.search.router.engine.run_exact_backend", _exact_backend)
+    monkeypatch.setattr("gloggur.search.router.engine.run_symbol_backend", _symbol_backend)
+    monkeypatch.setattr("gloggur.search.router.engine.run_semantic_backend", _semantic_backend)
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.82 if result.name == "semantic" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="//example.com/path",
+        intent=SearchIntent(
+            semantic_query="normalize malformed slashed url host",
+            ranking_mode="source-first",
+            result_profile="locator",
+            semantic_assist_mode="bounded_about",
+            max_snippets=5,
+        ),
+        mode="auto",
+        include_debug=True,
+    )
+
+    assert call_order == ["exact", "semantic"]
+    assert pack.summary["assist"] == "semantic_rescue"
+    assert pack.summary["strategy"] == "semantic"
+    assert pack.summary["reason"] == "semantic_rescue"
+    assert pack.summary["next_action"] == "open_hit_1"
 
 
 def test_search_router_skips_semantic_factory_for_decisive_identifier_queries(

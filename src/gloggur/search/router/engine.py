@@ -1096,6 +1096,13 @@ class SearchRouter:
                 path_filters=tuple(merged_path_filters),
             )
         hints = extract_query_hints(effective_query)
+        explicit_regex_requested = (
+            parsed_query.source == "grep_compat"
+            and not parsed_query.fallback_used
+            and not parsed_query.fixed_string
+        )
+        if explicit_regex_requested and hints.verbatim_literal is not None:
+            hints = replace(hints, verbatim_literal=None)
         if (
             parsed_query.source == "grep_compat"
             and not parsed_query.fallback_used
@@ -1104,23 +1111,19 @@ class SearchRouter:
             and parsed_query.pattern.strip()
         ):
             quoted_pattern = parsed_query.pattern.strip()
-            symbols = list(hints.symbols)
-            if quoted_pattern not in symbols:
-                symbols.append(quoted_pattern)
-            identifier_tokens = list(hints.identifier_tokens)
-            lowered = quoted_pattern.lower()
-            if lowered not in identifier_tokens:
-                identifier_tokens.append(lowered)
-            hints = replace(
-                hints,
-                symbols=tuple(symbols),
-                identifier_tokens=tuple(identifier_tokens),
-            )
-        explicit_regex_requested = (
-            parsed_query.source == "grep_compat"
-            and not parsed_query.fallback_used
-            and not parsed_query.fixed_string
-        )
+            if hints.verbatim_literal != quoted_pattern:
+                symbols = list(hints.symbols)
+                if quoted_pattern not in symbols:
+                    symbols.append(quoted_pattern)
+                identifier_tokens = list(hints.identifier_tokens)
+                lowered = quoted_pattern.lower()
+                if lowered not in identifier_tokens:
+                    identifier_tokens.append(lowered)
+                hints = replace(
+                    hints,
+                    symbols=tuple(symbols),
+                    identifier_tokens=tuple(identifier_tokens),
+                )
         backend_execution_hints = resolved_execution_hints
         if hints.query_kind in {"identifier", "declaration"} and not explicit_regex_requested:
             backend_execution_hints = replace(resolved_execution_hints, fixed_string=True)
@@ -1134,11 +1137,21 @@ class SearchRouter:
             and normalized_mode in {"auto", "hybrid"}
             and not bounded_about
         )
+        locator_verbatim_query = bool(
+            resolved_intent.result_profile == "locator" and hints.verbatim_literal is not None
+        )
+        locator_verbatim_exact_only = bool(
+            locator_verbatim_query and not bounded_about and normalized_mode in {"auto", "hybrid"}
+        )
         backend_names = (
             self._resolve_backends("auto")
             if force_semantic_fusion or bounded_about
             else self._resolve_backends(normalized_mode)
         )
+        if locator_verbatim_query:
+            backend_names = tuple(name for name in backend_names if name != "symbol")
+        if locator_verbatim_exact_only:
+            backend_names = tuple(name for name in backend_names if name == "exact") or ("exact",)
 
         def _run_backend(name: str) -> BackendResult:
             if name == "exact":
@@ -1207,7 +1220,7 @@ class SearchRouter:
                 for result in lexical_results
             ]
             lexical_results_by_name = {result.name: result for result in lexical_enriched}
-            if normalized_mode == "hybrid":
+            if normalized_mode == "hybrid" and not locator_verbatim_query:
                 lexical_outcome = RouterOutcome(
                     strategy="hybrid",
                     reason="forced_mode",
@@ -1353,7 +1366,9 @@ class SearchRouter:
                 fusion_proportional_shares = lexical_fusion_proportional_shares
         else:
             backend_results: list[BackendResult] = []
-            if force_semantic_fusion:
+            if locator_verbatim_exact_only:
+                backend_results.append(_run_backend("exact"))
+            elif force_semantic_fusion:
                 non_semantic_results: list[BackendResult] = []
                 for backend_name in ("exact", "symbol"):
                     if backend_name in backend_names:
@@ -1416,7 +1431,23 @@ class SearchRouter:
                 enriched_results.append(replace(result, quality_score=quality))
 
             results_by_name = {result.name: result for result in enriched_results}
-            if force_semantic_fusion:
+            if locator_verbatim_exact_only:
+                forced = results_by_name.get("exact")
+                if forced is None:
+                    forced = BackendResult(
+                        name="exact", hits=(), timing_ms=0, error="backend_not_available"
+                    )
+                outcome = RouterOutcome(
+                    strategy="exact",
+                    reason="verbatim_literal_locator",
+                    winner="exact",
+                    considered=tuple(result.name for result in enriched_results),
+                    backend_scores={
+                        result.name: result.quality_score for result in enriched_results
+                    },
+                )
+                selected_hits = list(forced.hits)
+            elif force_semantic_fusion:
                 outcome = RouterOutcome(
                     strategy="hybrid",
                     reason="semantic_query_requested",

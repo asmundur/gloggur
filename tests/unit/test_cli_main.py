@@ -4939,6 +4939,26 @@ def test_find_generic_dotted_trailing_token_remains_query_text(
     assert "warning_codes" not in payload
 
 
+@pytest.mark.parametrize("query", ["http:///example.com", "//example.com/path", r"\\example.com\\path"])
+def test_find_url_like_single_token_remains_query_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    query: str,
+) -> None:
+    """Malformed URL-like literals should not be reinterpreted as missing scope paths."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(
+        monkeypatch, tmp_path, pack=_make_context_pack(query=query), captures=captures
+    )
+
+    result = runner.invoke(cli_main.cli, ["find", query, "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert captures["query"] == query
+
+
 @pytest.mark.parametrize(
     "args",
     [

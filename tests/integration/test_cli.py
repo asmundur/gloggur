@@ -1107,6 +1107,127 @@ def test_cli_find_about_combines_grep_query_with_semantic_ranking(
         assert parsed["path_filters"] == ["src/"]
 
 
+def test_cli_find_verbatim_literals_prioritize_exact_hits_over_fragment_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "django/utils/http.py": (
+                    "def escape_leading_slashes(url):\n"
+                    '    """Keep malformed absolute URLs stable for callers."""\n'
+                    '    # Handles http:///example.com and ///example.com without fragment fallback.\n'
+                    "    return url\n"
+                ),
+                "tests/test_http.py": (
+                    "def test_http_triple_slash_literal():\n"
+                    '    assert escape_leading_slashes("http:///example.com") == "http:///example.com"\n'
+                    '    assert escape_leading_slashes("///example.com") == "///example.com"\n'
+                ),
+                "tests/test_views.py": (
+                    "def test_view_preserves_bad_redirect_urls():\n"
+                    '    assert redirect_to("http:///example.com") == "http:///example.com"\n'
+                    '    assert redirect_to("///example.com") == "///example.com"\n'
+                ),
+                "django/conf/global_settings.py": "MIDDLEWARE = []\n",
+                "tests/test_security.py": (
+                    "def test_security_http_header_path_checks():\n"
+                    "    header = 'http'\n"
+                    "    path = '/tmp/security/path'\n"
+                ),
+                "tests/gis/test_geos.py": (
+                    "def test_gis_path_value():\n"
+                    "    path = 'layers/path'\n"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        monkeypatch.chdir(repo)
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        for query in ("http:///example.com", "///example.com"):
+            result = runner.invoke(cli, ["find", query, "--json", "--top-k", "5"], env=env)
+            assert result.exit_code == 0, result.output
+            payload = _parse_json_output(result.output)
+            hits = payload["hits"]
+            assert isinstance(hits, list)
+            paths = {item["path"] for item in hits}
+            assert paths == {
+                "django/utils/http.py",
+                "tests/test_http.py",
+                "tests/test_views.py",
+            }
+
+
+def test_cli_find_verbatim_literal_miss_returns_no_match_and_about_can_rescue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "django/utils/http.py": (
+                    "def normalize_malformed_slashed_url_host(value):\n"
+                    '    """Normalize malformed slashed url host values before redirect handling."""\n'
+                    "    return value\n"
+                ),
+                "django/conf/global_settings.py": "MIDDLEWARE = []\n",
+                "tests/gis/test_geos.py": (
+                    "def test_gis_path_value():\n"
+                    "    path = 'layers/path'\n"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        monkeypatch.chdir(repo)
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        for query in ("//example.com/path", r"\\example.com\\path"):
+            result = runner.invoke(cli, ["find", query, "--json", "--top-k", "5"], env=env)
+            assert result.exit_code == 0, result.output
+            payload = _parse_json_output(result.output)
+            assert payload["decision"]["status"] == "no_match"
+            assert payload["decision"]["strategy"] == "exact"
+            assert payload["hits"] == []
+
+        rescue = runner.invoke(
+            cli,
+            [
+                "find",
+                "//example.com/path",
+                "--json",
+                "--top-k",
+                "5",
+                "--about",
+                "normalize malformed slashed url host",
+            ],
+            env=env,
+        )
+        assert rescue.exit_code == 0, rescue.output
+        payload = _parse_json_output(rescue.output)
+        assert payload["decision"]["assist"] in {"none", "semantic_rescue"}
+        hits = payload["hits"]
+        assert isinstance(hits, list)
+        if hits:
+            assert payload["decision"]["assist"] == "semantic_rescue"
+            assert hits[0]["path"] == "django/utils/http.py"
+
+
 def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
     """Low-signal search should return empty bounded evidence with deterministic metadata."""
     runner = CliRunner()

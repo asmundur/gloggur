@@ -6323,6 +6323,18 @@ def _looks_find_pathlike(token: str) -> bool:
     return Path(candidate).suffix.lower() in _FIND_IMPLICIT_PATHLIKE_EXTENSIONS
 
 
+def _looks_find_verbatim_literal_token(token: str) -> bool:
+    """Return True for URL-like malformed literals that should stay in the query."""
+    candidate = token.strip()
+    if not candidate or any(char.isspace() for char in candidate):
+        return False
+    if "." not in candidate:
+        return False
+    if "://" in candidate:
+        return True
+    return candidate.startswith("//") or candidate.startswith("\\\\")
+
+
 def _resolve_find_scope_path(raw_path: str) -> tuple[str, str] | None:
     """Resolve an inferred trailing find path into file/path-prefix scope."""
     candidate = raw_path.strip()
@@ -6374,27 +6386,28 @@ def _resolve_find_query_parts(
     trailing_path_recovery: FindTrailingPathRecovery | None = None
     if resolved_file_path is None and resolved_path_prefix is None:
         trailing = parts[-1]
-        scope = _resolve_find_scope_path(trailing)
-        if scope is not None:
-            parts = parts[:-1]
-            scope_kind, scope_value = scope
-            if scope_kind == "file":
-                resolved_file_path = scope_value
-            else:
-                resolved_path_prefix = scope_value
-        elif _looks_find_pathlike(trailing):
-            remaining_parts = parts[:-1]
-            if remaining_parts:
-                parts = remaining_parts
-                trailing_path_recovery = FindTrailingPathRecovery(ignored_token=trailing)
-            else:
-                raise CLIContractError(
-                    (
-                        f"Trailing argument {trailing!r} looks like a file or directory "
-                        "path, but it does not exist in the current workspace."
-                    ),
-                    error_code="find_trailing_path_missing",
-                )
+        if not _looks_find_verbatim_literal_token(trailing):
+            scope = _resolve_find_scope_path(trailing)
+            if scope is not None:
+                parts = parts[:-1]
+                scope_kind, scope_value = scope
+                if scope_kind == "file":
+                    resolved_file_path = scope_value
+                else:
+                    resolved_path_prefix = scope_value
+            elif _looks_find_pathlike(trailing):
+                remaining_parts = parts[:-1]
+                if remaining_parts:
+                    parts = remaining_parts
+                    trailing_path_recovery = FindTrailingPathRecovery(ignored_token=trailing)
+                else:
+                    raise CLIContractError(
+                        (
+                            f"Trailing argument {trailing!r} looks like a file or directory "
+                            "path, but it does not exist in the current workspace."
+                        ),
+                        error_code="find_trailing_path_missing",
+                    )
 
     query = " ".join(parts).strip()
     if not query:

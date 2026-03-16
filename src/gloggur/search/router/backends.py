@@ -6,6 +6,7 @@ import re
 import shlex
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from gloggur.byte_spans import LineByteSpanIndex
@@ -472,6 +473,20 @@ def _run_exact_backend_fallback_scan(
     return _sorted_exact_hits(hit_map, top_k)
 
 
+def _dedupe_exact_patterns(
+    patterns: list[tuple[str, tuple[str, ...], float]],
+) -> list[tuple[str, tuple[str, ...], float]]:
+    seen_patterns: set[str] = set()
+    deduped_patterns: list[tuple[str, tuple[str, ...], float]] = []
+    for pattern, tags, base_score in patterns:
+        normalized = pattern.strip()
+        if not normalized or normalized in seen_patterns:
+            continue
+        seen_patterns.add(normalized)
+        deduped_patterns.append((normalized, tags, base_score))
+    return deduped_patterns
+
+
 def run_exact_backend(
     *,
     query: str,
@@ -483,23 +498,34 @@ def run_exact_backend(
 ) -> BackendResult:
     """Run deterministic literal/symbol exact backend using ripgrep."""
     started = time.perf_counter()
-    patterns: list[tuple[str, tuple[str, ...], float]] = []
+    stripped_query = query.strip()
+    locator_verbatim_mode = bool(intent.result_profile == "locator" and hints.verbatim_literal)
 
-    for literal in hints.literals:
-        patterns.append((literal, ("literal_match",), 1.0))
-    for symbol in hints.symbols:
-        patterns.append((symbol, ("symbol_match", "literal_match"), 0.9))
-    if not patterns:
-        patterns.append((query.strip(), ("literal_match",), 0.7))
+    primary_patterns: list[tuple[str, tuple[str, ...], float]] = []
+    if hints.verbatim_literal is not None:
+        primary_patterns.append((hints.verbatim_literal, ("literal_match",), 1.0))
 
-    seen_patterns: set[str] = set()
-    deduped_patterns: list[tuple[str, tuple[str, ...], float]] = []
-    for pattern, tags, base_score in patterns:
-        normalized = pattern.strip()
-        if not normalized or normalized in seen_patterns:
-            continue
-        seen_patterns.add(normalized)
-        deduped_patterns.append((normalized, tags, base_score))
+    fallback_patterns: list[tuple[str, tuple[str, ...], float]] = []
+    if not locator_verbatim_mode:
+        for literal in hints.literals:
+            if literal == hints.verbatim_literal:
+                continue
+            fallback_patterns.append((literal, ("literal_match",), 1.0))
+        for symbol in hints.symbols:
+            fallback_patterns.append((symbol, ("symbol_match", "literal_match"), 0.9))
+        if not fallback_patterns and stripped_query and stripped_query != hints.verbatim_literal:
+            fallback_patterns.append((stripped_query, ("literal_match",), 0.7))
+
+    if not primary_patterns and not fallback_patterns and stripped_query:
+        fallback_patterns.append((stripped_query, ("literal_match",), 0.7))
+
+    deduped_primary_patterns = _dedupe_exact_patterns(primary_patterns)
+    deduped_fallback_patterns = _dedupe_exact_patterns(fallback_patterns)
+    primary_execution_hints = (
+        replace(execution_hints, fixed_string=True)
+        if hints.verbatim_literal is not None
+        else execution_hints
+    )
 
     top_k = max(1, intent.max_snippets or config.exact_top_k)
     cmd_fragments: list[str] = []
@@ -520,140 +546,167 @@ def run_exact_backend(
                 search_target = str(Path(intent.path_prefix))
 
     ripgrep_unavailable = False
-    for pattern, tags, base_score in deduped_patterns:
-        if len(hit_map) >= top_k * 3:
-            break
-        remaining_time = deadline - time.perf_counter()
-        if remaining_time < 0.05:
-            break
-        cmd = [
-            "rg",
-            "--line-number",
-            "--no-heading",
-            "--color",
-            "never",
-            "--max-count",
-            str(top_k * 3),
-            "-e",
-            pattern,
-            search_target,
-        ]
-        if execution_hints.case_mode == "ignore":
-            cmd.append("-i")
-        elif execution_hints.case_mode == "smart":
-            cmd.append("-S")
-        if execution_hints.word_match:
-            cmd.append("-w")
-        if execution_hints.fixed_string:
-            cmd.append("-F")
-        for include_glob in execution_hints.include_globs:
-            cmd.extend(["--glob", include_glob])
-        for exclude_glob in execution_hints.exclude_globs:
-            cmd.extend(["--glob", f"!{exclude_glob}"])
-        for ignore_glob in config.ignore_globs:
-            cmd.extend(["--glob", f"!{ignore_glob}"])
-        cmd_fragments.append(" ".join(shlex.quote(part) for part in cmd))
 
-        try:
-            completed = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                cwd=str(repo_root),
-                timeout=remaining_time,
-                env=_ripgrep_env(),
-            )
-        except subprocess.TimeoutExpired:
-            continue
-        except OSError:
-            ripgrep_unavailable = True
-            break
+    def _execute_pattern_batch(
+        patterns: tuple[tuple[str, tuple[str, ...], float], ...],
+        *,
+        batch_hints: ExecutionHints,
+    ) -> None:
+        nonlocal ripgrep_unavailable
+        for pattern, tags, base_score in patterns:
+            if len(hit_map) >= top_k * 3:
+                break
+            remaining_time = deadline - time.perf_counter()
+            if remaining_time < 0.05:
+                break
+            cmd = [
+                "rg",
+                "--line-number",
+                "--no-heading",
+                "--color",
+                "never",
+                "--max-count",
+                str(top_k * 3),
+                "-e",
+                pattern,
+                search_target,
+            ]
+            if batch_hints.case_mode == "ignore":
+                cmd.append("-i")
+            elif batch_hints.case_mode == "smart":
+                cmd.append("-S")
+            if batch_hints.word_match:
+                cmd.append("-w")
+            if batch_hints.fixed_string:
+                cmd.append("-F")
+            for include_glob in batch_hints.include_globs:
+                cmd.extend(["--glob", include_glob])
+            for exclude_glob in batch_hints.exclude_globs:
+                cmd.extend(["--glob", f"!{exclude_glob}"])
+            for ignore_glob in config.ignore_globs:
+                cmd.extend(["--glob", f"!{ignore_glob}"])
+            cmd_fragments.append(" ".join(shlex.quote(part) for part in cmd))
 
-        if completed.returncode not in (0, 1):
-            continue
-
-        for line in completed.stdout.splitlines():
-            parts = line.split(":", 2)
-            if len(parts) < 3:
-                continue
-            relative_path = parts[0].strip()
-            if os.path.isabs(relative_path):
-                try:
-                    relative_path = os.path.relpath(relative_path, str(repo_root))
-                except ValueError:
-                    relative_path = relative_path
             try:
-                line_number = int(parts[1])
-            except ValueError:
+                completed = subprocess.run(
+                    cmd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(repo_root),
+                    timeout=remaining_time,
+                    env=_ripgrep_env(),
+                )
+            except subprocess.TimeoutExpired:
                 continue
-            if line_number < 1:
-                continue
-            absolute_path = relative_path
-            if os.path.isabs(absolute_path):
-                absolute_path = os.path.abspath(absolute_path)
-            else:
-                absolute_path = os.path.abspath(str(repo_root / relative_path))
-            if not _path_allowed(
-                absolute_path,
-                intent=intent,
-                execution_hints=execution_hints,
-                config=config,
-                repo_root=repo_root,
-            ):
+            except OSError:
+                ripgrep_unavailable = True
+                break
+
+            if completed.returncode not in (0, 1):
                 continue
 
-            key = (absolute_path, line_number, line_number)
-            snippet = _load_snippet(
-                repo_root,
-                absolute_path,
-                start_line=line_number,
-                end_line=line_number,
-                radius=2,
-                max_chars=config.max_snippet_chars,
-            )
-            bonus = 0.05 if pattern in hints.literals else 0.0
-            score = max(
-                0.0,
-                min(
-                    1.0,
-                    base_score + bonus + _exact_ranking_adjustment(absolute_path, parts[2].strip()),
-                ),
-            )
-            existing = hit_map.get(key)
-            byte_span = _line_byte_span(
-                byte_span_cache,
-                absolute_path,
-                start_line=line_number,
-                end_line=line_number,
-            )
-            candidate = BackendHit(
-                backend="exact",
-                path=absolute_path,
-                start_line=line_number,
-                end_line=line_number,
-                snippet=snippet,
-                raw_score=score,
-                start_byte=byte_span[0] if byte_span is not None else None,
-                end_byte=byte_span[1] if byte_span is not None else None,
-                tags=tags,
-            )
-            if existing is None or candidate.raw_score > existing.raw_score:
-                hit_map[key] = candidate
+            for line in completed.stdout.splitlines():
+                parts = line.split(":", 2)
+                if len(parts) < 3:
+                    continue
+                relative_path = parts[0].strip()
+                if os.path.isabs(relative_path):
+                    try:
+                        relative_path = os.path.relpath(relative_path, str(repo_root))
+                    except ValueError:
+                        relative_path = relative_path
+                try:
+                    line_number = int(parts[1])
+                except ValueError:
+                    continue
+                if line_number < 1:
+                    continue
+                absolute_path = relative_path
+                if os.path.isabs(absolute_path):
+                    absolute_path = os.path.abspath(absolute_path)
+                else:
+                    absolute_path = os.path.abspath(str(repo_root / relative_path))
+                if not _path_allowed(
+                    absolute_path,
+                    intent=intent,
+                    execution_hints=batch_hints,
+                    config=config,
+                    repo_root=repo_root,
+                ):
+                    continue
+
+                key = (absolute_path, line_number, line_number)
+                snippet = _load_snippet(
+                    repo_root,
+                    absolute_path,
+                    start_line=line_number,
+                    end_line=line_number,
+                    radius=2,
+                    max_chars=config.max_snippet_chars,
+                )
+                bonus = (
+                    0.05 if pattern in hints.literals or pattern == hints.verbatim_literal else 0.0
+                )
+                score = max(
+                    0.0,
+                    min(
+                        1.0,
+                        base_score
+                        + bonus
+                        + _exact_ranking_adjustment(absolute_path, parts[2].strip()),
+                    ),
+                )
+                existing = hit_map.get(key)
+                byte_span = _line_byte_span(
+                    byte_span_cache,
+                    absolute_path,
+                    start_line=line_number,
+                    end_line=line_number,
+                )
+                candidate = BackendHit(
+                    backend="exact",
+                    path=absolute_path,
+                    start_line=line_number,
+                    end_line=line_number,
+                    snippet=snippet,
+                    raw_score=score,
+                    start_byte=byte_span[0] if byte_span is not None else None,
+                    end_byte=byte_span[1] if byte_span is not None else None,
+                    tags=tags,
+                )
+                if existing is None or candidate.raw_score > existing.raw_score:
+                    hit_map[key] = candidate
+
+    if deduped_primary_patterns:
+        _execute_pattern_batch(tuple(deduped_primary_patterns), batch_hints=primary_execution_hints)
+    if not hit_map and not ripgrep_unavailable and deduped_fallback_patterns:
+        _execute_pattern_batch(tuple(deduped_fallback_patterns), batch_hints=execution_hints)
 
     if ripgrep_unavailable and not hit_map:
         cmd_fragments.append("python_fallback_exact_scan")
-        fallback_hits = _run_exact_backend_fallback_scan(
-            deduped_patterns=tuple(deduped_patterns),
-            hints=hints,
-            repo_root=repo_root,
-            intent=intent,
-            execution_hints=execution_hints,
-            config=config,
-            search_target=search_target,
-            top_k=top_k,
-            deadline=deadline,
-        )
+        fallback_hits: tuple[BackendHit, ...] = ()
+        pattern_batches: list[
+            tuple[tuple[tuple[str, tuple[str, ...], float], ...], ExecutionHints]
+        ] = []
+        if deduped_primary_patterns:
+            pattern_batches.append((tuple(deduped_primary_patterns), primary_execution_hints))
+        if deduped_fallback_patterns:
+            pattern_batches.append((tuple(deduped_fallback_patterns), execution_hints))
+        for pattern_batch, batch_hints in pattern_batches:
+            fallback_hits = _run_exact_backend_fallback_scan(
+                deduped_patterns=pattern_batch,
+                hints=hints,
+                repo_root=repo_root,
+                intent=intent,
+                execution_hints=batch_hints,
+                config=config,
+                search_target=search_target,
+                top_k=top_k,
+                deadline=deadline,
+            )
+            if fallback_hits:
+                break
         if fallback_hits:
             return BackendResult(
                 name="exact",

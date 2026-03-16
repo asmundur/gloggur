@@ -171,3 +171,107 @@ def test_run_exact_backend_keeps_repo_relative_path_filters_when_repo_root_colla
 
     assert result.hits
     assert result.hits[0].path.replace("\\", "/") == str(sample).replace("\\", "/")
+
+
+def test_run_exact_backend_locator_verbatim_query_uses_full_literal_fixed_string(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sample = tmp_path / "tests" / "test_http.py"
+    sample.parent.mkdir(parents=True, exist_ok=True)
+    sample.write_text(
+        "assert normalize_url('http:///example.com') == 'http:///example.com'\n",
+        encoding="utf8",
+    )
+
+    observed_patterns: list[str] = []
+
+    def _run(cmd, **_kwargs):
+        observed_patterns.append(cmd[cmd.index("-e") + 1])
+        assert "-F" in cmd
+        return SimpleNamespace(
+            returncode=0,
+            stdout="tests/test_http.py:1:assert normalize_url('http:///example.com') == 'http:///example.com'\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="http:///example.com",
+        hints=extract_query_hints("http:///example.com"),
+        repo_root=tmp_path,
+        intent=SearchIntent(result_profile="locator", max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert observed_patterns == ["http:///example.com"]
+    assert result.hits
+    assert result.hits[0].path.replace("\\", "/").endswith("tests/test_http.py")
+
+
+def test_run_exact_backend_locator_verbatim_query_does_not_fallback_to_fragments_after_miss(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    observed_patterns: list[str] = []
+
+    def _run(cmd, **_kwargs):
+        observed_patterns.append(cmd[cmd.index("-e") + 1])
+        assert "-F" in cmd
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="//example.com/path",
+        hints=extract_query_hints("//example.com/path"),
+        repo_root=tmp_path,
+        intent=SearchIntent(result_profile="locator", max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert observed_patterns == ["//example.com/path"]
+    assert result.hits == ()
+
+
+def test_run_exact_backend_non_locator_verbatim_query_falls_back_after_literal_miss(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sample = tmp_path / "tests" / "test_http.py"
+    sample.parent.mkdir(parents=True, exist_ok=True)
+    sample.write_text("assert scheme == 'http'\n", encoding="utf8")
+
+    observed_patterns: list[str] = []
+
+    def _run(cmd, **_kwargs):
+        pattern = cmd[cmd.index("-e") + 1]
+        observed_patterns.append(pattern)
+        if pattern == "http:///example.com":
+            assert "-F" in cmd
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+        if pattern == "http":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="tests/test_http.py:1:assert scheme == 'http'\n",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="http:///example.com",
+        hints=extract_query_hints("http:///example.com"),
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert observed_patterns[:2] == ["http:///example.com", "http"]
+    assert "example.com" in observed_patterns
+    assert result.hits

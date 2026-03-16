@@ -44,6 +44,17 @@ _NATURAL_LANGUAGE_HINTS = {
 _IDENTIFIERISH_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:[.:#][A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?$")
 
 
+def _detect_verbatim_literal(query: str) -> str | None:
+    candidate = query.strip()
+    if not candidate or any(char.isspace() for char in candidate):
+        return None
+    if "/" not in candidate and "\\" not in candidate:
+        return None
+    if not any(char.isalnum() for char in candidate):
+        return None
+    return candidate
+
+
 def _ordered_unique(values: list[str]) -> tuple[str, ...]:
     """Return stable-order unique tuple, dropping blanks."""
     ordered: list[str] = []
@@ -131,6 +142,7 @@ def _classify_query_kind(
 def extract_query_hints(query: str) -> QueryHints:
     """Extract deterministic hints used by routing and scoring."""
     symbol_query, declaration_terms = _strip_declaration_prefix(query)
+    verbatim_literal = _detect_verbatim_literal(query)
     raw_literals = _ordered_unique(_QUOTED_RE.findall(query))
     literal_symbol_candidates: list[str] = []
     for literal in raw_literals:
@@ -191,6 +203,7 @@ def extract_query_hints(query: str) -> QueryHints:
     return QueryHints(
         symbols=symbols,
         literals=raw_literals,
+        verbatim_literal=verbatim_literal,
         path_hints=raw_paths,
         stack_locations=tuple(stack_locations),
         identifier_tokens=identifier_tokens,

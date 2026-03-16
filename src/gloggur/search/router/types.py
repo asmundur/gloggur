@@ -117,6 +117,7 @@ class QueryHints:
 
     symbols: tuple[str, ...] = ()
     literals: tuple[str, ...] = ()
+    verbatim_literal: str | None = None
     path_hints: tuple[str, ...] = ()
     stack_locations: tuple[tuple[str, int], ...] = ()
     identifier_tokens: tuple[str, ...] = ()
