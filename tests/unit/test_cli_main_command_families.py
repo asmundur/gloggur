@@ -236,6 +236,93 @@ def test_search_json_needs_reindex_debug_router_emits_debug_contract(
     assert debug["bounded_retry_enabled"] is True
 
 
+def test_build_search_not_ready_payload_uses_resume_available_guidance() -> None:
+    payload = cli_main._build_search_not_ready_payload(
+        query="needle",
+        health=_ready_health(
+            interrupted_resume_available=True,
+            resume_candidate={"source": "legacy_adopted", "stage_dir": "/tmp/stage"},
+        ),
+    )
+
+    error = payload["error"]
+    assert isinstance(error, dict)
+    remediation = error["remediation"]
+    assert isinstance(remediation, list)
+    assert remediation[0].startswith("A compatible adopted interrupted build is available")
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["interrupted_resume_available"] is True
+    assert metadata["resume_candidate"] == {"source": "legacy_adopted", "stage_dir": "/tmp/stage"}
+
+
+def test_build_search_not_ready_payload_uses_resume_blocked_guidance() -> None:
+    payload = cli_main._build_search_not_ready_payload(
+        query="needle",
+        health=_ready_health(
+            resume_blocked=True,
+            resume_block_reason_codes=["staged_cache_incompatible"],
+            resume_block_candidates=[{"stage_dir": "/tmp/stage"}],
+        ),
+    )
+
+    error = payload["error"]
+    assert isinstance(error, dict)
+    remediation = error["remediation"]
+    assert isinstance(remediation, list)
+    assert remediation[0].startswith("Interrupted staged builds were found")
+    metadata = payload["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["resume_blocked"] is True
+    assert metadata["resume_block_reason_codes"] == ["staged_cache_incompatible"]
+    assert metadata["resume_block_candidates"] == [{"stage_dir": "/tmp/stage"}]
+
+
+def test_resolve_config_file_path_prefers_existing_repo_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".gloggur.yml").write_text("search: {}\n", encoding="utf8")
+
+    assert cli_main._resolve_config_file_path(None) == ".gloggur.yml"
+
+
+def test_resolve_config_file_path_defaults_when_no_repo_config_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert cli_main._resolve_config_file_path(None) == ".gloggur.yaml"
+
+
+def test_resolve_init_repo_root_uses_parent_for_file_input(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "config.toml"
+    target.write_text("enabled = true\n", encoding="utf8")
+    monkeypatch.setattr(cli_main, "discover_repo_root", lambda path: path)
+
+    assert cli_main._resolve_init_repo_root(str(target)) == repo.resolve()
+
+
+def test_resolve_init_repo_root_falls_back_to_candidate_when_discovery_drifts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "repo"
+    candidate.mkdir()
+    discovered = tmp_path / "outside"
+    discovered.mkdir()
+    monkeypatch.setattr(cli_main, "discover_repo_root", lambda _path: discovered)
+
+    assert cli_main._resolve_init_repo_root(str(candidate)) == candidate.resolve()
+
+
 def test_search_json_debug_router_normalizes_debug_payload_without_eager_semantic_init(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1056,6 +1143,23 @@ def test_init_with_betatester_support_enables_runtime_capture(tmp_path: Path) ->
     assert "enabled = true" in text
 
 
+def test_init_json_rejects_conflicting_access_flags(tmp_path: Path) -> None:
+    runner = CliRunner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["init", str(repo), "--yes", "--no-grant-access", "--json"],
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = _payload(result.output)
+    assert payload["error"]["code"] == "cli_usage_error"
+    assert payload["failure_codes"] == ["cli_usage_error"]
+    assert payload["error"]["detail"] == "Use only one of --yes or --no-grant-access."
+
+
 def test_init_json_without_yes_returns_access_plan_only_and_fails(tmp_path: Path) -> None:
     runner = CliRunner()
     repo = tmp_path / "repo"
@@ -1229,6 +1333,112 @@ def test_access_grant_json_without_yes_repairs_missing_access_marker_for_ready_r
     assert payload["access_ready"] is True
     assert payload["access_result"] is None
     assert (repo / ".gloggur" / "access_grants.json").exists()
+
+
+def test_access_incomplete_guidance_prefers_result_manual_actions() -> None:
+    guidance = cli_main._access_incomplete_guidance(
+        repo_root=Path("/repo"),
+        access_plan=SimpleNamespace(manual_actions=["plan action"]),
+        access_result=SimpleNamespace(manual_actions=["result action"]),
+    )
+
+    assert guidance == ["result action"]
+
+
+def test_access_incomplete_guidance_falls_back_to_plan_manual_actions() -> None:
+    guidance = cli_main._access_incomplete_guidance(
+        repo_root=Path("/repo"),
+        access_plan=SimpleNamespace(manual_actions=["plan action"]),
+        access_result=None,
+    )
+
+    assert guidance == ["plan action"]
+
+
+def test_render_access_plan_includes_blocked_paths_and_manual_actions() -> None:
+    plan = SimpleNamespace(
+        repo_root=Path("/repo"),
+        grantee="current_user",
+        required_access=[{"path": "/repo", "permissions": ["read", "write"]}],
+        automatic_actions=[
+            {"action": "mkdir", "path": "/repo/.gloggur", "needed": True, "mode": "0700"},
+            {"action": "touch", "path": "/repo/.gloggur/access_grants.json", "needed": False},
+        ],
+        blocked_paths=[
+            SimpleNamespace(
+                path="/repo/private",
+                required_access=["files", "system"],
+                reason="privacy gated",
+                privacy_blocker=True,
+            )
+        ],
+        manual_actions=["Grant Files and Folders access"],
+        access_ready=False,
+    )
+
+    rendered = cli_main._render_access_plan(plan)
+
+    assert "Access plan for /repo" in rendered
+    assert "- /repo: read, write" in rendered
+    assert "status=needed mode=0700" in rendered
+    assert "status=not needed" in rendered
+    assert "required=files,system reason=privacy gated privacy_blocker=true" in rendered
+    assert "Manual actions:" in rendered
+    assert "- Grant Files and Folders access" in rendered
+    assert "Access ready: False" in rendered
+
+
+def test_render_access_result_handles_empty_sections() -> None:
+    result = SimpleNamespace(
+        repo_root=Path("/repo"),
+        applied_at="2026-03-16T18:00:00Z",
+        applied_actions=[],
+        blocked_paths=[],
+        manual_actions=[],
+        access_ready=True,
+        state_file="/repo/.gloggur/access_grants.json",
+    )
+
+    rendered = cli_main._render_access_result(result)
+
+    assert "Access grant result for /repo" in rendered
+    assert "Applied actions:" in rendered
+    assert rendered.count("- none") == 2
+    assert "State file: /repo/.gloggur/access_grants.json" in rendered
+    assert "Access ready: True" in rendered
+
+
+def test_render_access_result_includes_actions_blockers_and_manual_actions() -> None:
+    result = SimpleNamespace(
+        repo_root=Path("/repo"),
+        applied_at="2026-03-16T18:00:00Z",
+        applied_actions=[
+            {
+                "action": "chmod",
+                "path": "/repo/.gloggur",
+                "mode": "0700",
+                "updated_path_count": 2,
+            }
+        ],
+        blocked_paths=[
+            SimpleNamespace(
+                path="/repo/protected",
+                required_access=["read"],
+                reason="permission denied",
+                privacy_blocker=False,
+            )
+        ],
+        manual_actions=["Approve repo-local access"],
+        access_ready=False,
+        state_file="/repo/.gloggur/access_grants.json",
+    )
+
+    rendered = cli_main._render_access_result(result)
+
+    assert "path=/repo/.gloggur mode=0700 updated_path_count=2" in rendered
+    assert "required=read reason=permission denied" in rendered
+    assert "Manual actions:" in rendered
+    assert "- Approve repo-local access" in rendered
 
 
 def test_status_json_rethrows_second_non_transient_retry_failure(

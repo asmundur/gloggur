@@ -403,6 +403,64 @@ def test_index_directory_surfaces_extract_worker_payload(
     }
 
 
+def test_extract_worker_payload_passthrough_dict() -> None:
+    extract_worker = {
+        "prepare_file_mode": "worker",
+        "build_edges_mode": "inline",
+        "catalog_symbol_count": 3,
+    }
+
+    assert cli_main._extract_worker_payload(extract_worker) == extract_worker
+
+
+def test_extract_worker_payload_uses_as_payload_dict() -> None:
+    extract_worker = SimpleNamespace(
+        as_payload=lambda: {
+            "prepare_file_mode": "worker",
+            "build_edges_mode": "worker",
+            "catalog_symbol_count": 5,
+        }
+    )
+
+    assert cli_main._extract_worker_payload(extract_worker) == {
+        "prepare_file_mode": "worker",
+        "build_edges_mode": "worker",
+        "catalog_symbol_count": 5,
+    }
+
+
+def test_extract_worker_payload_rejects_non_dict_as_payload() -> None:
+    extract_worker = SimpleNamespace(as_payload=lambda: ["not", "a", "dict"])
+
+    assert cli_main._extract_worker_payload(extract_worker) is None
+
+
+@pytest.mark.parametrize(
+    "extract_worker",
+    [
+        SimpleNamespace(prepare_file_mode=None, build_edges_mode="inline"),
+        SimpleNamespace(prepare_file_mode="worker", build_edges_mode=None),
+    ],
+)
+def test_extract_worker_payload_requires_string_modes(extract_worker: object) -> None:
+    assert cli_main._extract_worker_payload(extract_worker) is None
+
+
+def test_extract_worker_payload_omits_empty_reason_code() -> None:
+    extract_worker = SimpleNamespace(
+        prepare_file_mode="worker",
+        build_edges_mode="inline",
+        catalog_symbol_count=None,
+        reason_code="",
+    )
+
+    assert cli_main._extract_worker_payload(extract_worker) == {
+        "prepare_file_mode": "worker",
+        "build_edges_mode": "inline",
+        "catalog_symbol_count": 0,
+    }
+
+
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
