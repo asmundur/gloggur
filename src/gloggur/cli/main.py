@@ -129,6 +129,7 @@ from gloggur.symbol_index.store import SymbolIndexStore, SymbolIndexStoreConfig
 from gloggur.watch.service import (
     DEFAULT_WATCH_FAILURE_REMEDIATION,
     WatchService,
+    _atomic_write_json_file,
     is_process_running,
     load_watch_state,
     utc_now_iso,
@@ -3286,14 +3287,10 @@ def _remove_file(path: str) -> None:
 
 def _write_watch_state(path: str, updates: dict[str, object]) -> None:
     """Merge watcher state updates and persist JSON."""
-    directory = os.path.dirname(path)
     try:
-        if directory:
-            os.makedirs(directory, exist_ok=True)
         payload = load_watch_state(path)
         payload.update(updates)
-        with open(path, "w", encoding="utf8") as handle:
-            json.dump(payload, handle, indent=2)
+        _atomic_write_json_file(path, payload)
     except (OSError, TypeError, ValueError) as exc:
         raise wrap_io_error(
             exc,

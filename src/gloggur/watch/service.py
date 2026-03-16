@@ -8,7 +8,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Event
+from threading import Event, get_ident
+from uuid import uuid4
 
 from gloggur.config import GloggurConfig
 from gloggur.embeddings.base import EmbeddingProvider
@@ -78,6 +79,24 @@ def load_watch_state(path: str) -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         pass
     return {}
+
+
+def _atomic_write_json_file(path: str, payload: dict[str, object]) -> None:
+    """Write JSON to a temp file in-place and replace the target atomically."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_name(f"{target.name}.tmp.{os.getpid()}.{get_ident()}.{uuid4().hex}")
+    try:
+        temp_path.write_text(json.dumps(payload, indent=2), encoding="utf8")
+        temp_path.replace(target)
+    except OSError:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 @dataclass
@@ -674,10 +693,6 @@ class WatchService:
         """Merge and persist watch state payload."""
 
         path = self.config.watch_state_file
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
         payload = load_watch_state(path)
         payload.update(fields)
-        with open(path, "w", encoding="utf8") as handle:
-            json.dump(payload, handle, indent=2)
+        _atomic_write_json_file(path, payload)

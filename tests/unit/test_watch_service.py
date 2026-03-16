@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
 import signal
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -11,7 +14,12 @@ from gloggur.config import GloggurConfig
 from gloggur.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from gloggur.indexer.cache import CacheConfig, CacheManager
 from gloggur.storage.vector_store import VectorStore, VectorStoreConfig
-from gloggur.watch.service import BatchResult, WatchService, load_watch_state
+from gloggur.watch.service import (
+    BatchResult,
+    WatchService,
+    _atomic_write_json_file,
+    load_watch_state,
+)
 from scripts.verification.fixtures import TestFixtures
 
 
@@ -44,6 +52,57 @@ def _build_watch_service(
         vector_store=vector_store,
     )
     return service, cache
+
+
+def test_atomic_write_json_file_uses_unique_temp_paths_under_concurrent_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "watch_state.json"
+    original_replace = Path.replace
+    inflight_temp_paths: set[str] = set()
+    replace_lock = threading.Lock()
+
+    def _replace_with_collision_guard(self: Path, destination: Path) -> Path:
+        key = str(self)
+        with replace_lock:
+            if key in inflight_temp_paths:
+                raise FileNotFoundError(
+                    errno.ENOENT,
+                    "No such file or directory",
+                    str(self),
+                    str(destination),
+                )
+            inflight_temp_paths.add(key)
+        try:
+            time.sleep(0.02)
+            return original_replace(self, destination)
+        finally:
+            with replace_lock:
+                inflight_temp_paths.discard(key)
+
+    monkeypatch.setattr(Path, "replace", _replace_with_collision_guard)
+
+    barrier = threading.Barrier(2)
+    failures: list[Exception] = []
+
+    def _writer(value: int) -> None:
+        barrier.wait(timeout=2.0)
+        try:
+            _atomic_write_json_file(str(target), {"value": value})
+        except Exception as exc:  # pragma: no cover - collected for assertion
+            failures.append(exc)
+
+    left = threading.Thread(target=_writer, args=(1,))
+    right = threading.Thread(target=_writer, args=(2,))
+    left.start()
+    right.start()
+    left.join(timeout=2.0)
+    right.join(timeout=2.0)
+
+    assert failures == []
+    payload = json.loads(target.read_text(encoding="utf8"))
+    assert payload["value"] in {1, 2}
 
 
 def test_watch_service_process_batch_changed_unchanged_and_deleted(
