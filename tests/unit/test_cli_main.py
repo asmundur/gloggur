@@ -4370,12 +4370,13 @@ def test_search_json_wraps_metadata_store_connect_failure(
 def _make_context_hit(
     rank: int,
     *,
+    path: str | None = None,
     snippet: str | None = None,
     tags: tuple[str, ...] = ("literal_match", "symbol_match"),
 ) -> ContextHit:
     """Build a deterministic ContextPack hit for CLI tests."""
     return ContextHit(
-        path=f"src/sample_{rank}.py",
+        path=path or f"src/sample_{rank}.py",
         span=ContextSpan(start_line=rank, end_line=rank + 1),
         snippet=snippet or f"def sample_{rank}():\n    return {rank}",
         score=max(0.1, 1.0 - (rank * 0.01)),
@@ -4805,8 +4806,10 @@ def test_find_explicit_scope_disables_implicit_trailing_path_inference(
     )
 
     assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
     assert captures["query"] == "AuthToken docs"
     assert captures["intent"]["path_prefix"] == str(explicit_target.resolve())
+    assert "warning_codes" not in payload
 
 
 def test_find_after_double_dash_preserves_query_tokens_named_like_cli_options(
@@ -4830,17 +4833,80 @@ def test_find_after_double_dash_preserves_query_tokens_named_like_cli_options(
     assert captures["query"] == "rg --about token"
 
 
-def test_find_pathlike_trailing_token_missing_returns_structured_error(
+def test_find_pathlike_trailing_token_missing_recovers_when_query_remains(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Missing trailing path-like tokens should fail with a corrective find error."""
+    """Recoverable missing trailing path-like tokens should not block find."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(
+        query="make_response",
+        hits=(
+            _make_context_hit(1, path="src/flask/app.py"),
+            _make_context_hit(2, path="src/flask/app.py"),
+        ),
+        summary_overrides={
+            "decisive": False,
+            "query_kind": "identifier",
+            "next_action": "narrow_by_path",
+            "suggested_path_prefix": "src/flask/app.py",
+        },
+    )
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "make_response", "src/flask/app.py", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    warning_codes = payload.get("warning_codes")
+    assert isinstance(warning_codes, list)
+    assert cli_main.FIND_TRAILING_PATH_MISSING_RECOVERED_WARNING in warning_codes
+    assert captures["query"] == "make_response"
+    decision = payload["decision"]
+    assert (
+        decision["suggested_next_command"]
+        == "gloggur find make_response --file src/flask/app.py"
+    )
+
+
+def test_find_pathlike_trailing_token_missing_text_output_adds_recovery_note(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Recovered find text output should call out the ignored missing path token."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(query="make_response")
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "make_response", "src/flask/app.py"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "ignored missing trailing path-like token 'src/flask/app.py'" in result.output
+    assert "use --file or --path-prefix" in result.output
+    assert captures["query"] == "make_response"
+
+
+def test_find_pathlike_single_token_missing_returns_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A path-like token with no remaining query should keep failing closed."""
     runner = CliRunner()
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(
         cli_main.cli,
-        ["find", "make_response", "src/flask/app.py", "--json"],
+        ["find", "src/flask/app.py", "--json"],
     )
 
     assert result.exit_code == 1
@@ -4848,6 +4914,29 @@ def test_find_pathlike_trailing_token_missing_returns_structured_error(
     error = payload["error"]
     assert isinstance(error, dict)
     assert error["code"] == "find_trailing_path_missing"
+
+
+def test_find_generic_dotted_trailing_token_remains_query_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Generic dotted tokens should stay in the query unless they are clearly path-like."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(
+        monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures
+    )
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "AuthToken", "flask.app", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert captures["query"] == "AuthToken flask.app"
+    assert "warning_codes" not in payload
 
 
 @pytest.mark.parametrize(

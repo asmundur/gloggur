@@ -6240,10 +6240,79 @@ def _normalize_find_about(value: str | None) -> str | None:
     return normalized or None
 
 
+_FIND_IMPLICIT_PATHLIKE_EXTENSIONS = frozenset(
+    {
+        ".bash",
+        ".c",
+        ".cc",
+        ".cfg",
+        ".conf",
+        ".cpp",
+        ".cs",
+        ".css",
+        ".go",
+        ".h",
+        ".hpp",
+        ".html",
+        ".ini",
+        ".java",
+        ".js",
+        ".json",
+        ".jsx",
+        ".kt",
+        ".kts",
+        ".md",
+        ".php",
+        ".py",
+        ".pyi",
+        ".rb",
+        ".rs",
+        ".rst",
+        ".scala",
+        ".scss",
+        ".sh",
+        ".sql",
+        ".swift",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".zsh",
+    }
+)
+FIND_TRAILING_PATH_MISSING_RECOVERED_WARNING = "find_trailing_path_missing_recovered"
+
+
+@dataclass(frozen=True)
+class FindTrailingPathRecovery:
+    """Recovery metadata for an ignored implicit trailing path guess."""
+
+    ignored_token: str
+
+    @property
+    def warning_code(self) -> str:
+        """Return the additive warning code emitted for recovered path guesses."""
+        return FIND_TRAILING_PATH_MISSING_RECOVERED_WARNING
+
+
+@dataclass(frozen=True)
+class FindQueryResolution:
+    """Normalized find query text with optional inferred scope/recovery."""
+
+    query: str
+    file_path: str | None
+    path_prefix: str | None
+    trailing_path_recovery: FindTrailingPathRecovery | None = None
+
+
 def _looks_find_pathlike(token: str) -> bool:
     """Return True when a trailing token plausibly refers to a repo path."""
     candidate = token.strip()
     if not candidate:
+        return False
+    if any(char.isspace() for char in candidate):
         return False
     if is_path_absolute(candidate):
         return True
@@ -6251,13 +6320,15 @@ def _looks_find_pathlike(token: str) -> bool:
         return True
     if "/" in candidate or "\\" in candidate:
         return True
-    return bool(Path(candidate).suffix)
+    return Path(candidate).suffix.lower() in _FIND_IMPLICIT_PATHLIKE_EXTENSIONS
 
 
 def _resolve_find_scope_path(raw_path: str) -> tuple[str, str] | None:
     """Resolve an inferred trailing find path into file/path-prefix scope."""
     candidate = raw_path.strip()
     if not candidate:
+        return None
+    if any(char.isspace() for char in candidate):
         return None
 
     repo_root = discover_repo_root()
@@ -6292,7 +6363,7 @@ def _resolve_find_query_parts(
     query_parts: Sequence[str],
     file_path: str | None,
     path_prefix: str | None,
-) -> tuple[str, str | None, str | None]:
+) -> FindQueryResolution:
     """Normalize variadic find tokens into query text plus optional implicit scope."""
     parts = [str(part).strip() for part in query_parts if str(part).strip()]
     if not parts:
@@ -6300,7 +6371,8 @@ def _resolve_find_query_parts(
 
     resolved_file_path = file_path
     resolved_path_prefix = path_prefix
-    if resolved_file_path is None and resolved_path_prefix is None and len(parts) > 1:
+    trailing_path_recovery: FindTrailingPathRecovery | None = None
+    if resolved_file_path is None and resolved_path_prefix is None:
         trailing = parts[-1]
         scope = _resolve_find_scope_path(trailing)
         if scope is not None:
@@ -6311,18 +6383,28 @@ def _resolve_find_query_parts(
             else:
                 resolved_path_prefix = scope_value
         elif _looks_find_pathlike(trailing):
-            raise CLIContractError(
-                (
-                    f"Trailing argument {trailing!r} looks like a file or directory path, "
-                    "but it does not exist in the current workspace."
-                ),
-                error_code="find_trailing_path_missing",
-            )
+            remaining_parts = parts[:-1]
+            if remaining_parts:
+                parts = remaining_parts
+                trailing_path_recovery = FindTrailingPathRecovery(ignored_token=trailing)
+            else:
+                raise CLIContractError(
+                    (
+                        f"Trailing argument {trailing!r} looks like a file or directory "
+                        "path, but it does not exist in the current workspace."
+                    ),
+                    error_code="find_trailing_path_missing",
+                )
 
     query = " ".join(parts).strip()
     if not query:
         raise click.UsageError("Missing argument 'QUERY'.")
-    return query, resolved_file_path, resolved_path_prefix
+    return FindQueryResolution(
+        query=query,
+        file_path=resolved_file_path,
+        path_prefix=resolved_path_prefix,
+        trailing_path_recovery=trailing_path_recovery,
+    )
 
 
 def _validate_find_about_options(
@@ -7203,10 +7285,19 @@ def _build_find_suggested_next_command(
     return " ".join(shlex.quote(part) for part in argv)
 
 
+def _render_find_trailing_path_recovery_note(recovery: FindTrailingPathRecovery) -> str:
+    """Render a plain-text note for recovered implicit trailing path guesses."""
+    return (
+        f"note: ignored missing trailing path-like token {recovery.ignored_token!r}; "
+        "use --file or --path-prefix if you intended explicit scope."
+    )
+
+
 def _build_find_success_payload(
     outcome: SearchExecutionOutcome,
     *,
     debug_router: bool,
+    trailing_path_recovery: FindTrailingPathRecovery | None = None,
 ) -> dict[str, object]:
     """Serialize shared search execution artifacts into the slim find contract."""
     assert outcome.pack is not None
@@ -7251,6 +7342,11 @@ def _build_find_success_payload(
         summary.get("warning_codes"),
         outcome.health["warning_codes"],
     )
+    if (
+        trailing_path_recovery is not None
+        and trailing_path_recovery.warning_code not in warning_codes
+    ):
+        warning_codes = [trailing_path_recovery.warning_code, *warning_codes]
     if warning_codes:
         payload["warning_codes"] = warning_codes
     security_warning_codes = _merge_string_codes(outcome.config.security_warning_codes)
@@ -7275,6 +7371,7 @@ def _emit_find_success(
     as_json: bool,
     stream: bool,
     debug_router: bool,
+    trailing_path_recovery: FindTrailingPathRecovery | None = None,
 ) -> None:
     """Emit find success output in text, JSON, or NDJSON form."""
     if stream:
@@ -7327,6 +7424,8 @@ def _emit_find_success(
     suggested_next_command = decision.get("suggested_next_command")
     if isinstance(suggested_next_command, str) and suggested_next_command:
         lines.append(f"suggested_next_command: {suggested_next_command}")
+    if trailing_path_recovery is not None:
+        lines.append(_render_find_trailing_path_recovery_note(trailing_path_recovery))
     click.echo("\n".join(lines))
 
 
@@ -7702,7 +7801,7 @@ def find(
     allow_tool_version_drift: bool,
 ) -> None:
     """Find agent-friendly code context with minimal output overhead."""
-    query, resolved_file_path, resolved_path_prefix = _resolve_find_query_parts(
+    resolution = _resolve_find_query_parts(
         query_parts=query_parts,
         file_path=file_path,
         path_prefix=path_prefix,
@@ -7714,18 +7813,18 @@ def find(
         search_mode=search_mode,
     )
     outcome = _execute_search_command(
-        query=query,
+        query=resolution.query,
         semantic_query=normalized_about,
         config_path=config_path,
         mode=mode,
         language=language,
-        path_prefix=resolved_path_prefix,
+        path_prefix=resolution.path_prefix,
         max_files=max_files,
         max_snippets=max_snippets,
         time_budget_ms=time_budget_ms,
         debug_router=debug_router and as_json and not stream,
         kind=kind,
-        file_path=resolved_file_path,
+        file_path=resolution.file_path,
         search_mode=search_mode,
         top_k=top_k,
         context_radius=context_radius,
@@ -7761,12 +7860,14 @@ def find(
     payload = _build_find_success_payload(
         outcome,
         debug_router=debug_router and as_json and not stream,
+        trailing_path_recovery=resolution.trailing_path_recovery,
     )
     _emit_find_success(
         payload,
         as_json=as_json,
         stream=stream,
         debug_router=debug_router,
+        trailing_path_recovery=resolution.trailing_path_recovery,
     )
 
 
