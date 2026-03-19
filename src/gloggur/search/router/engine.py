@@ -883,10 +883,13 @@ def _preserve_selected_hit_order(
     return (
         strategy == "hybrid"
         or semantic_assist == "rerank"
-        or (strategy in {"exact", "symbol"} and _definition_ordering_query(
-            query_kind=query_kind,
-            query_domain=query_domain,
-        ))
+        or (
+            strategy in {"exact", "symbol"}
+            and _definition_ordering_query(
+                query_kind=query_kind,
+                query_domain=query_domain,
+            )
+        )
     )
 
 
@@ -898,7 +901,12 @@ def _top_hit_is_definition_like(selected_hits: list[BackendHit]) -> bool:
         return True
     if "symbol_def" in top_hit.tags:
         return True
-    return bool(re.match(r"^\s*(?:async\s+def|def|class|function|func|interface|struct|trait|enum)\b", top_hit.snippet))
+    return bool(
+        re.match(
+            r"^\s*(?:async\s+def|def|class|function|func|interface|struct|trait|enum)\b",
+            top_hit.snippet,
+        )
+    )
 
 
 def _decisive_non_semantic_result(
@@ -912,7 +920,10 @@ def _decisive_non_semantic_result(
 ) -> bool:
     if outcome.strategy not in {"exact", "symbol"} or not hits:
         return False
-    if _definition_ordering_query(query_kind=query_kind, query_domain=query_domain) and not _top_hit_is_definition_like(selected_hits):
+    if _definition_ordering_query(
+        query_kind=query_kind,
+        query_domain=query_domain,
+    ) and not _top_hit_is_definition_like(selected_hits):
         return False
     winner_status = backend_thresholds.get(outcome.strategy, {})
     if not bool(winner_status.get("threshold_met")):

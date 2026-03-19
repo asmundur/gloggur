@@ -305,9 +305,7 @@ def _finalize_exact_hit_roles(
 ) -> dict[tuple[str, int, int], BackendHit]:
     if not hit_map or not _definition_ordering_enabled(hints):
         return hit_map
-    definition_paths = {
-        hit.path for hit in hit_map.values() if hit.match_role == "definition"
-    }
+    definition_paths = {hit.path for hit in hit_map.values() if hit.match_role == "definition"}
     if not definition_paths:
         return hit_map
     finalized: dict[tuple[str, int, int], BackendHit] = {}
@@ -1100,12 +1098,12 @@ def _symbol_role_priority(
     hints: QueryHints,
     usage_intent: bool,
 ) -> int:
+    if usage_intent:
+        return 0 if occurrence_kind == "ref" else 1
     if hints.query_domain != "code" or hints.query_kind not in {"identifier", "declaration"}:
         return 0 if occurrence_kind == "def" else 1
     if hints.query_kind == "declaration":
         return 0 if occurrence_kind == "def" else 2
-    if usage_intent:
-        return 0 if occurrence_kind == "ref" else 1
     return 0 if occurrence_kind == "def" else 2
 
 
