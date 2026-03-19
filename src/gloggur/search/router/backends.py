@@ -34,6 +34,9 @@ from gloggur.symbol_index.store import SymbolIndexStore
 _DEFINITION_LINE_RE = re.compile(
     r"^\s*(?:async\s+def|def|class|function|func|interface|struct|trait|enum)\b"
 )
+_IMPORT_LINE_RE = re.compile(
+    r"^\s*(?:from\s+\S+\s+import\b|import\b|use\b|#include\b|require(?:\(|\s))"
+)
 
 
 def _normalize_path(path: str) -> str:
@@ -221,6 +224,132 @@ def _exact_ranking_adjustment(path: str, matched_line: str, *, query_domain: str
         if is_test_path(path):
             adjustment -= 0.05
     return adjustment
+
+
+def _definition_ordering_enabled(hints: QueryHints) -> bool:
+    return hints.query_domain == "code" and hints.query_kind in {"identifier", "declaration"}
+
+
+def _definition_only_exact_query(hints: QueryHints) -> bool:
+    return hints.query_domain == "code" and hints.query_kind == "declaration"
+
+
+def _symbol_name_tails(symbols: tuple[str, ...]) -> tuple[str, ...]:
+    tails: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        tail = symbol.split(".")[-1].split(":")[-1].split("#")[-1].strip()
+        if len(tail) < 3 or tail in seen:
+            continue
+        seen.add(tail)
+        tails.append(tail)
+    return tuple(tails)
+
+
+def _identifier_candidates(hints: QueryHints) -> tuple[str, ...]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for candidate in (*_symbol_name_tails(hints.symbols), *hints.identifier_tokens):
+        normalized = candidate.strip()
+        if len(normalized) < 3 or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return tuple(ordered)
+
+
+def _line_mentions_identifier(line: str, identifier: str) -> bool:
+    return bool(
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(identifier)}(?![A-Za-z0-9_])",
+            line,
+        )
+    )
+
+
+def _line_mentions_query_identifier(line: str, hints: QueryHints) -> bool:
+    candidates = _identifier_candidates(hints)
+    if not candidates:
+        return False
+    return any(_line_mentions_identifier(line, candidate) for candidate in candidates)
+
+
+def _classify_exact_match_role(*, path: str, matched_line: str, hints: QueryHints) -> str:
+    stripped = matched_line.strip()
+    if hints.query_domain == "code" and (
+        is_docs_path(path) or is_test_path(path) or is_workflow_config_path(path)
+    ):
+        return "auxiliary"
+    if _DEFINITION_LINE_RE.search(stripped) and _line_mentions_query_identifier(stripped, hints):
+        return "definition"
+    if _IMPORT_LINE_RE.search(stripped) and _line_mentions_query_identifier(stripped, hints):
+        return "import"
+    return "reference"
+
+
+def _exact_role_priority(role: str | None) -> int:
+    order = {
+        "definition": 0,
+        "same_file_context": 1,
+        "reference": 2,
+        "import": 3,
+        "auxiliary": 4,
+    }
+    return order.get(role or "reference", 5)
+
+
+def _finalize_exact_hit_roles(
+    hit_map: dict[tuple[str, int, int], BackendHit],
+    *,
+    hints: QueryHints,
+) -> dict[tuple[str, int, int], BackendHit]:
+    if not hit_map or not _definition_ordering_enabled(hints):
+        return hit_map
+    definition_paths = {
+        hit.path for hit in hit_map.values() if hit.match_role == "definition"
+    }
+    if not definition_paths:
+        return hit_map
+    finalized: dict[tuple[str, int, int], BackendHit] = {}
+    for key, hit in hit_map.items():
+        role = hit.match_role or "reference"
+        if role == "reference" and hit.path in definition_paths:
+            role = "same_file_context"
+        finalized[key] = replace(hit, match_role=role)
+    return finalized
+
+
+def _final_exact_hits(
+    hit_map: dict[tuple[str, int, int], BackendHit],
+    *,
+    hints: QueryHints,
+    top_k: int,
+) -> tuple[BackendHit, ...]:
+    if not hit_map:
+        return ()
+    ordered_hits = list(_finalize_exact_hit_roles(hit_map, hints=hints).values())
+    if _definition_only_exact_query(hints):
+        definition_hits = [hit for hit in ordered_hits if hit.match_role == "definition"]
+        if definition_hits:
+            ordered_hits = definition_hits
+    if _definition_ordering_enabled(hints):
+        return tuple(
+            sorted(
+                ordered_hits,
+                key=lambda item: (
+                    _exact_role_priority(item.match_role),
+                    -item.raw_score,
+                    item.path,
+                    item.start_line,
+                ),
+            )[:top_k]
+        )
+    return tuple(
+        sorted(
+            ordered_hits,
+            key=lambda item: (-item.raw_score, item.path, item.start_line),
+        )[:top_k]
+    )
 
 
 def _sorted_exact_hits(
@@ -460,11 +589,16 @@ def _run_exact_backend_fallback_scan(
                     start_byte=byte_span[0] if byte_span is not None else None,
                     end_byte=byte_span[1] if byte_span is not None else None,
                     tags=tags,
+                    match_role=_classify_exact_match_role(
+                        path=absolute_path,
+                        matched_line=source_line,
+                        hints=hints,
+                    ),
                 )
                 if existing is None or candidate.raw_score > existing.raw_score:
                     hit_map[key] = candidate
                 break
-    return _sorted_exact_hits(hit_map, top_k)
+    return _final_exact_hits(hit_map, hints=hints, top_k=top_k)
 
 
 def _dedupe_exact_patterns(
@@ -684,6 +818,11 @@ def run_exact_backend(
                     start_byte=byte_span[0] if byte_span is not None else None,
                     end_byte=byte_span[1] if byte_span is not None else None,
                     tags=tags,
+                    match_role=_classify_exact_match_role(
+                        path=absolute_path,
+                        matched_line=parts[2].strip(),
+                        hints=hints,
+                    ),
                 )
                 file_pattern_map.setdefault(absolute_path, set()).add(pattern)
                 hit_pattern_map.setdefault(key, set()).add(pattern)
@@ -748,16 +887,19 @@ def run_exact_backend(
             if hit_pattern_count > 1:
                 score += min(0.08, 0.03 * (hit_pattern_count - 1))
             if (
-                hints.query_domain == "code"
+                not _definition_ordering_enabled(hints)
+                and hints.query_domain == "code"
                 and anchor_parent not in {"", "."}
                 and str(Path(hit.path).parent) == anchor_parent
             ):
                 score += 0.05
-            if is_authority_path(hit.path, query_domain=hints.query_domain):
+            if not _definition_ordering_enabled(hints) and is_authority_path(
+                hit.path, query_domain=hints.query_domain
+            ):
                 score += 0.03
             hit_map[key] = replace(hit, raw_score=max(0.0, min(1.0, score)))
 
-    hits = _sorted_exact_hits(hit_map, top_k)
+    hits = _final_exact_hits(hit_map, hints=hints, top_k=top_k)
     return BackendResult(
         name="exact",
         hits=hits,
@@ -952,10 +1094,19 @@ def _symbol_match_score(
     return best
 
 
-def _kind_bonus(*, occurrence_kind: str, usage_intent: bool) -> float:
+def _symbol_role_priority(
+    *,
+    occurrence_kind: str,
+    hints: QueryHints,
+    usage_intent: bool,
+) -> int:
+    if hints.query_domain != "code" or hints.query_kind not in {"identifier", "declaration"}:
+        return 0 if occurrence_kind == "def" else 1
+    if hints.query_kind == "declaration":
+        return 0 if occurrence_kind == "def" else 2
     if usage_intent:
-        return 0.08 if occurrence_kind == "ref" else -0.12
-    return 0.08 if occurrence_kind == "def" else 0.0
+        return 0 if occurrence_kind == "ref" else 1
+    return 0 if occurrence_kind == "def" else 2
 
 
 def run_symbol_backend(
@@ -1057,7 +1208,6 @@ def run_symbol_backend(
             min(
                 1.0,
                 score
-                + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent)
                 + max(
                     0.0,
                     path_domain_score(path, query_domain=hints.query_domain) - 0.5,
@@ -1092,13 +1242,29 @@ def run_symbol_backend(
                 start_byte=occurrence.start_byte,
                 end_byte=occurrence.end_byte,
                 tags=tags,
+                match_role="definition" if occurrence.kind == "def" else "reference",
             )
         )
+
+    if _definition_only_exact_query(hints):
+        definition_hits = [hit for hit in hits if hit.match_role == "definition"]
+        if definition_hits:
+            hits = definition_hits
 
     ordered = tuple(
         sorted(
             hits,
-            key=lambda item: (-item.raw_score, item.path, item.start_line, item.end_line),
+            key=lambda item: (
+                _symbol_role_priority(
+                    occurrence_kind="def" if item.match_role == "definition" else "ref",
+                    hints=hints,
+                    usage_intent=usage_intent,
+                ),
+                -item.raw_score,
+                item.path,
+                item.start_line,
+                item.end_line,
+            ),
         )[:top_k]
     )
     return BackendResult(

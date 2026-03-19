@@ -140,6 +140,7 @@ class BackendHit:
     start_byte: int | None = None
     end_byte: int | None = None
     tags: tuple[str, ...] = ()
+    match_role: str | None = None
 
 
 @dataclass(frozen=True)

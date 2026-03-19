@@ -3,10 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from gloggur.search.router.backends import run_exact_backend
+import pytest
+
+from gloggur.search.router.backends import run_exact_backend, run_symbol_backend
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
 from gloggur.search.router.types import ExecutionHints, SearchIntent
+from gloggur.symbol_index.models import SymbolOccurrence
 
 
 def test_run_exact_backend_uses_remaining_budget_for_single_pattern(
@@ -137,6 +140,282 @@ def test_run_exact_backend_ranks_source_definitions_above_docs_and_tests(
         str(test_file).replace("\\", "/"),
         str(docs_file).replace("\\", "/"),
     ]
+
+
+def _write_django_search_fixture(
+    tmp_path: Path,
+    *,
+    definition_path: str,
+    definition_line: str,
+    importer_path: str,
+    importer_line: str,
+    reference_path: str | None = None,
+    reference_line: str | None = None,
+) -> tuple[Path, Path, Path | None]:
+    definition_file = tmp_path / definition_path
+    definition_file.parent.mkdir(parents=True, exist_ok=True)
+    definition_file.write_text(f"{definition_line}\n    return value\n", encoding="utf8")
+
+    importer_file = tmp_path / importer_path
+    importer_file.parent.mkdir(parents=True, exist_ok=True)
+    importer_file.write_text(f"{importer_line}\n", encoding="utf8")
+
+    reference_file: Path | None = None
+    if reference_path is not None and reference_line is not None:
+        reference_file = tmp_path / reference_path
+        reference_file.parent.mkdir(parents=True, exist_ok=True)
+        reference_file.write_text(f"{reference_line}\n", encoding="utf8")
+
+    return definition_file, importer_file, reference_file
+
+
+@pytest.mark.parametrize(
+    ("query", "definition_path", "definition_line", "importer_path", "importer_line"),
+    [
+        (
+            "url_has_allowed_host_and_scheme",
+            "django/utils/http.py",
+            "def url_has_allowed_host_and_scheme(url, allowed_hosts, require_https=False):",
+            "django/contrib/auth/views.py",
+            "from django.utils.http import url_has_allowed_host_and_scheme",
+        ),
+        (
+            "escape_leading_slashes",
+            "django/utils/http.py",
+            "def escape_leading_slashes(url):",
+            "django/middleware/common.py",
+            "from django.utils.http import escape_leading_slashes",
+        ),
+        (
+            "escapejs",
+            "django/utils/html.py",
+            "def escapejs(value):",
+            "django/template/defaultfilters.py",
+            "from django.utils.html import avoid_wrapping, conditional_escape, escape, escapejs",
+        ),
+    ],
+)
+def test_run_exact_backend_code_identifier_queries_rank_definitions_before_importers(
+    monkeypatch,
+    tmp_path,
+    query: str,
+    definition_path: str,
+    definition_line: str,
+    importer_path: str,
+    importer_line: str,
+) -> None:
+    definition_file, importer_file, _reference_file = _write_django_search_fixture(
+        tmp_path,
+        definition_path=definition_path,
+        definition_line=definition_line,
+        importer_path=importer_path,
+        importer_line=importer_line,
+        reference_path=definition_path,
+        reference_line=f"result = {query}(value)",
+    )
+
+    def _run(_cmd, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"{importer_path}:1:{importer_line}\n"
+                f"{definition_path}:1:{definition_line}\n"
+                f"{definition_path}:2:result = {query}(value)\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query=query,
+        hints=extract_query_hints(query),
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(fixed_string=True),
+        config=SearchRouterConfig(),
+    )
+
+    assert result.hits
+    assert result.hits[0].path == str(definition_file)
+    assert result.hits[0].match_role == "definition"
+    assert result.hits[1].path == str(definition_file)
+    assert result.hits[1].match_role == "same_file_context"
+    assert result.hits[2].path == str(importer_file)
+    assert result.hits[2].match_role == "import"
+
+
+@pytest.mark.parametrize(
+    ("query", "definition_path", "definition_line", "importer_path", "importer_line"),
+    [
+        (
+            "def url_has_allowed_host_and_scheme",
+            "django/utils/http.py",
+            "def url_has_allowed_host_and_scheme(url, allowed_hosts, require_https=False):",
+            "django/contrib/auth/views.py",
+            "from django.utils.http import url_has_allowed_host_and_scheme",
+        ),
+        (
+            "def escape_leading_slashes",
+            "django/utils/http.py",
+            "def escape_leading_slashes(url):",
+            "django/middleware/common.py",
+            "from django.utils.http import escape_leading_slashes",
+        ),
+    ],
+)
+def test_run_exact_backend_code_declaration_queries_return_only_declarations_when_present(
+    monkeypatch,
+    tmp_path,
+    query: str,
+    definition_path: str,
+    definition_line: str,
+    importer_path: str,
+    importer_line: str,
+) -> None:
+    definition_file, _importer_file, _reference_file = _write_django_search_fixture(
+        tmp_path,
+        definition_path=definition_path,
+        definition_line=definition_line,
+        importer_path=importer_path,
+        importer_line=importer_line,
+        reference_path=definition_path,
+        reference_line=f"value = {query.split()[-1]}(request.path)",
+    )
+
+    def _run(_cmd, **_kwargs):
+        symbol = query.split()[-1]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"{importer_path}:1:{importer_line}\n"
+                f"{definition_path}:1:{definition_line}\n"
+                f"{definition_path}:2:value = {symbol}(request.path)\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query=query,
+        hints=extract_query_hints(query),
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(fixed_string=True),
+        config=SearchRouterConfig(),
+    )
+
+    assert [hit.path for hit in result.hits] == [str(definition_file)]
+    assert result.hits[0].match_role == "definition"
+
+
+def test_run_symbol_backend_ranks_definitions_before_references_for_code_identifier_queries(
+    tmp_path,
+) -> None:
+    definition_file = tmp_path / "django" / "utils" / "http.py"
+    definition_file.parent.mkdir(parents=True, exist_ok=True)
+    definition_file.write_text(
+        "def url_has_allowed_host_and_scheme(url, allowed_hosts, require_https=False):\n"
+        "    return True\n",
+        encoding="utf8",
+    )
+    reference_file = tmp_path / "django" / "contrib" / "auth" / "views.py"
+    reference_file.parent.mkdir(parents=True, exist_ok=True)
+    reference_file.write_text(
+        "from django.utils.http import url_has_allowed_host_and_scheme\n"
+        "url_has_allowed_host_and_scheme(next_page, allowed_hosts)\n",
+        encoding="utf8",
+    )
+
+    class FakeStore:
+        available = True
+        unavailability_reason = None
+
+        def list_occurrences(self, **_kwargs):
+            return [
+                SymbolOccurrence(
+                    symbol="url_has_allowed_host_and_scheme",
+                    kind="ref",
+                    path="django/contrib/auth/views.py",
+                    start_line=2,
+                    end_line=2,
+                ),
+                SymbolOccurrence(
+                    symbol="url_has_allowed_host_and_scheme",
+                    kind="def",
+                    path="django/utils/http.py",
+                    start_line=1,
+                    end_line=1,
+                ),
+            ]
+
+    result = run_symbol_backend(
+        symbol_store=FakeStore(),
+        hints=extract_query_hints("url_has_allowed_host_and_scheme"),
+        query="url_has_allowed_host_and_scheme",
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=2, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert [hit.path for hit in result.hits] == [str(definition_file), str(reference_file)]
+    assert [hit.match_role for hit in result.hits] == ["definition", "reference"]
+
+
+def test_run_symbol_backend_code_declaration_queries_filter_to_definitions_when_present(
+    tmp_path,
+) -> None:
+    definition_file = tmp_path / "django" / "utils" / "http.py"
+    definition_file.parent.mkdir(parents=True, exist_ok=True)
+    definition_file.write_text(
+        "def escape_leading_slashes(url):\n"
+        "    return url\n",
+        encoding="utf8",
+    )
+    reference_file = tmp_path / "django" / "middleware" / "common.py"
+    reference_file.parent.mkdir(parents=True, exist_ok=True)
+    reference_file.write_text(
+        "from django.utils.http import escape_leading_slashes\n"
+        "path = escape_leading_slashes(request.path)\n",
+        encoding="utf8",
+    )
+
+    class FakeStore:
+        available = True
+        unavailability_reason = None
+
+        def list_occurrences(self, **_kwargs):
+            return [
+                SymbolOccurrence(
+                    symbol="escape_leading_slashes",
+                    kind="ref",
+                    path="django/middleware/common.py",
+                    start_line=2,
+                    end_line=2,
+                ),
+                SymbolOccurrence(
+                    symbol="escape_leading_slashes",
+                    kind="def",
+                    path="django/utils/http.py",
+                    start_line=1,
+                    end_line=1,
+                ),
+            ]
+
+    result = run_symbol_backend(
+        symbol_store=FakeStore(),
+        hints=extract_query_hints("def escape_leading_slashes"),
+        query="def escape_leading_slashes",
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=2, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert [hit.path for hit in result.hits] == [str(definition_file)]
+    assert result.hits[0].match_role == "definition"
 
 
 def test_run_exact_backend_keeps_repo_relative_path_filters_when_repo_root_collapses(

@@ -205,6 +205,65 @@ def test_search_router_identifier_queries_stay_on_non_semantic_path(
     assert pack.summary["next_action"] == "open_hit_1"
 
 
+def test_search_router_preserves_exact_backend_rank_for_code_identifier_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/django/utils/http.py",
+                    start_line=42,
+                    end_line=42,
+                    snippet="def url_has_allowed_host_and_scheme(url, allowed_hosts):",
+                    raw_score=0.94,
+                    tags=("literal_match",),
+                    match_role="definition",
+                ),
+                BackendHit(
+                    backend="exact",
+                    path="src/django/contrib/auth/views.py",
+                    start_line=24,
+                    end_line=24,
+                    snippet="from django.utils.http import url_has_allowed_host_and_scheme",
+                    raw_score=1.0,
+                    tags=("literal_match",),
+                    match_role="import",
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=3),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.95 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol")),
+    )
+    pack = router.search(query="url_has_allowed_host_and_scheme", mode="auto")
+
+    assert [hit.path for hit in pack.hits] == [
+        "src/django/utils/http.py",
+        "src/django/contrib/auth/views.py",
+    ]
+    assert pack.summary["decisive"] is True
+    assert pack.summary["next_action"] == "open_hit_1"
+
+
 def test_search_router_declaration_queries_can_choose_symbol_backend(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -249,6 +308,118 @@ def test_search_router_declaration_queries_can_choose_symbol_backend(
     assert pack.summary["strategy"] == "symbol"
     assert pack.summary["decisive"] is True
     assert pack.summary["next_action"] == "open_hit_1"
+
+
+def test_search_router_does_not_mark_code_identifier_results_decisive_when_top_hit_is_not_definition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/django/contrib/auth/views.py",
+                    start_line=24,
+                    end_line=24,
+                    snippet="from django.utils.http import url_has_allowed_host_and_scheme",
+                    raw_score=1.0,
+                    tags=("literal_match",),
+                    match_role="import",
+                ),
+                BackendHit(
+                    backend="exact",
+                    path="src/django/utils/http.py",
+                    start_line=245,
+                    end_line=245,
+                    snippet="def url_has_allowed_host_and_scheme(url, allowed_hosts, require_https=False):",
+                    raw_score=0.99,
+                    tags=("literal_match",),
+                    match_role="definition",
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=3),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.97 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol")),
+    )
+    pack = router.search(query="url_has_allowed_host_and_scheme", mode="auto")
+
+    assert pack.summary["strategy"] == "exact"
+    assert pack.summary["decisive"] is False
+    assert pack.summary["next_action"] == "refine_query"
+
+
+def test_search_router_does_not_mark_code_declaration_results_decisive_when_top_hit_is_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(name="exact", hits=(), timing_ms=3),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(
+            name="symbol",
+            hits=(
+                BackendHit(
+                    backend="symbol",
+                    path="src/django/template/defaultfilters.py",
+                    start_line=17,
+                    end_line=17,
+                    snippet="from django.utils.html import escapejs",
+                    raw_score=1.0,
+                    tags=("symbol_ref",),
+                    match_role="reference",
+                ),
+                BackendHit(
+                    backend="symbol",
+                    path="src/django/utils/html.py",
+                    start_line=58,
+                    end_line=58,
+                    snippet="def escapejs(value):",
+                    raw_score=0.99,
+                    tags=("symbol_def",),
+                    match_role="definition",
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.97 if result.name == "symbol" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol")),
+    )
+    pack = router.search(query="def escapejs", mode="auto")
+
+    assert pack.summary["strategy"] == "symbol"
+    assert pack.summary["decisive"] is False
+    assert pack.summary["next_action"] == "refine_query"
 
 
 def test_search_router_mixed_query_suggests_path_narrowing(

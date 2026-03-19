@@ -869,8 +869,41 @@ def _has_multiple_hit_paths(hits: tuple[ContextHit, ...]) -> bool:
     return len({hit.path for hit in hits if hit.path}) > 1
 
 
+def _definition_ordering_query(*, query_kind: str, query_domain: str) -> bool:
+    return query_domain == "code" and query_kind in {"identifier", "declaration"}
+
+
+def _preserve_selected_hit_order(
+    *,
+    strategy: str,
+    query_kind: str,
+    query_domain: str,
+    semantic_assist: str = "",
+) -> bool:
+    return (
+        strategy == "hybrid"
+        or semantic_assist == "rerank"
+        or (strategy in {"exact", "symbol"} and _definition_ordering_query(
+            query_kind=query_kind,
+            query_domain=query_domain,
+        ))
+    )
+
+
+def _top_hit_is_definition_like(selected_hits: list[BackendHit]) -> bool:
+    if not selected_hits:
+        return False
+    top_hit = selected_hits[0]
+    if top_hit.match_role == "definition":
+        return True
+    if "symbol_def" in top_hit.tags:
+        return True
+    return bool(re.match(r"^\s*(?:async\s+def|def|class|function|func|interface|struct|trait|enum)\b", top_hit.snippet))
+
+
 def _decisive_non_semantic_result(
     *,
+    selected_hits: list[BackendHit],
     hits: tuple[ContextHit, ...],
     outcome: RouterOutcome,
     backend_thresholds: dict[str, dict[str, object]],
@@ -878,6 +911,8 @@ def _decisive_non_semantic_result(
     query_domain: str,
 ) -> bool:
     if outcome.strategy not in {"exact", "symbol"} or not hits:
+        return False
+    if _definition_ordering_query(query_kind=query_kind, query_domain=query_domain) and not _top_hit_is_definition_like(selected_hits):
         return False
     winner_status = backend_thresholds.get(outcome.strategy, {})
     if not bool(winner_status.get("threshold_met")):
@@ -904,6 +939,7 @@ def _decisive_non_semantic_result(
 
 def _resolve_next_action(
     *,
+    selected_hits: list[BackendHit],
     hits: tuple[ContextHit, ...],
     outcome: RouterOutcome,
     backend_thresholds: dict[str, dict[str, object]],
@@ -915,6 +951,7 @@ def _resolve_next_action(
         return True, "open_hit_1", None
 
     decisive = _decisive_non_semantic_result(
+        selected_hits=selected_hits,
         hits=hits,
         outcome=outcome,
         backend_thresholds=backend_thresholds,
@@ -1318,13 +1355,18 @@ class SearchRouter:
                 repo_root=self.repo_root,
                 intent=resolved_intent,
                 config=self.config,
-                preserve_ranked_order=lexical_outcome.strategy == "hybrid",
+                preserve_ranked_order=_preserve_selected_hit_order(
+                    strategy=lexical_outcome.strategy,
+                    query_kind=hints.query_kind,
+                    query_domain=hints.query_domain,
+                ),
             )
             lexical_backend_thresholds = _backend_threshold_status(
                 lexical_enriched,
                 self.config,
             )
             lexical_decisive = _decisive_non_semantic_result(
+                selected_hits=lexical_selected_hits,
                 hits=lexical_packed_hits,
                 outcome=lexical_outcome,
                 backend_thresholds=lexical_backend_thresholds,
@@ -1648,7 +1690,12 @@ class SearchRouter:
             repo_root=self.repo_root,
             intent=resolved_intent,
             config=self.config,
-            preserve_ranked_order=outcome.strategy == "hybrid" or semantic_assist == "rerank",
+            preserve_ranked_order=_preserve_selected_hit_order(
+                strategy=outcome.strategy,
+                query_kind=hints.query_kind,
+                query_domain=hints.query_domain,
+                semantic_assist=semantic_assist,
+            ),
         )
 
         total_ms = int((time.perf_counter() - started) * 1000)
@@ -1662,6 +1709,7 @@ class SearchRouter:
         ):
             warning_codes.append("identifier_query_high_top_k")
         decisive, next_action, suggested_path_prefix = _resolve_next_action(
+            selected_hits=selected_hits,
             hits=packed_hits,
             outcome=outcome,
             backend_thresholds=backend_thresholds,
