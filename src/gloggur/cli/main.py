@@ -7212,6 +7212,17 @@ def _resolve_find_max_snippets(top_k: int, max_snippets: int | None) -> int:
     return min(top_k, 5)
 
 
+def _find_hit_limit_overridden() -> bool:
+    """Return whether the caller explicitly requested a find hit budget."""
+    context = click.get_current_context(silent=True)
+    if context is None:
+        return False
+    for param_name in ("max_snippets", "top_k"):
+        if context.get_parameter_source(param_name) == ParameterSource.COMMANDLINE:
+            return True
+    return False
+
+
 def _find_status(summary: dict[str, object], hit_count: int) -> str:
     """Classify the routed search outcome into a compact decision status."""
     strategy = summary.get("strategy")
@@ -7298,6 +7309,44 @@ def _build_find_suggested_next_command(
     return " ".join(shlex.quote(part) for part in argv)
 
 
+def _build_find_decision_target(
+    *,
+    decision: dict[str, object],
+    hits: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """Build a machine-readable target for the router's suggested next action."""
+    next_action = decision.get("next_action")
+    if next_action == "open_hit_1" and hits:
+        first_hit = hits[0]
+        return {
+            "kind": "hit",
+            "rank": first_hit.get("rank"),
+            "path": first_hit.get("path"),
+            "start_line": first_hit.get("start_line"),
+            "end_line": first_hit.get("end_line"),
+        }
+
+    suggested_path_prefix = decision.get("suggested_path_prefix")
+    if isinstance(suggested_path_prefix, str) and suggested_path_prefix:
+        hit_paths = {
+            str(item.get("path"))
+            for item in hits
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        return {
+            "kind": "file" if suggested_path_prefix in hit_paths else "path_prefix",
+            "path": suggested_path_prefix,
+        }
+
+    if hits and next_action == "narrow_by_path":
+        first_hit = hits[0]
+        return {
+            "kind": "file",
+            "path": first_hit.get("path"),
+        }
+    return None
+
+
 def _render_find_trailing_path_recovery_note(recovery: FindTrailingPathRecovery) -> str:
     """Render a plain-text note for recovered implicit trailing path guesses."""
     return (
@@ -7310,6 +7359,7 @@ def _build_find_success_payload(
     outcome: SearchExecutionOutcome,
     *,
     debug_router: bool,
+    explicit_hit_limit: bool,
     trailing_path_recovery: FindTrailingPathRecovery | None = None,
 ) -> dict[str, object]:
     """Serialize shared search execution artifacts into the slim find contract."""
@@ -7322,8 +7372,11 @@ def _build_find_success_payload(
             start=1,
         )
     ]
+    status = _find_status(summary, len(hits))
+    if not explicit_hit_limit and status == "decisive":
+        hits = hits[:1]
     decision: dict[str, object] = {
-        "status": _find_status(summary, len(hits)),
+        "status": status,
         "strategy": summary.get("strategy"),
         "reason": summary.get("reason"),
         "query_kind": summary.get("query_kind"),
@@ -7341,6 +7394,9 @@ def _build_find_success_payload(
     )
     if suggested_next_command is not None:
         decision["suggested_next_command"] = suggested_next_command
+    decision_target = _build_find_decision_target(decision=decision, hits=hits)
+    if decision_target is not None:
+        decision["target"] = decision_target
 
     payload: dict[str, object] = {
         "schema_version": 1,
@@ -7814,6 +7870,7 @@ def find(
     allow_tool_version_drift: bool,
 ) -> None:
     """Find agent-friendly code context with minimal output overhead."""
+    explicit_hit_limit = _find_hit_limit_overridden()
     resolution = _resolve_find_query_parts(
         query_parts=query_parts,
         file_path=file_path,
@@ -7873,6 +7930,7 @@ def find(
     payload = _build_find_success_payload(
         outcome,
         debug_router=debug_router and as_json and not stream,
+        explicit_hit_limit=explicit_hit_limit,
         trailing_path_recovery=resolution.trailing_path_recovery,
     )
     _emit_find_success(

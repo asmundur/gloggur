@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from gloggur.search.router.path_priors import QUERY_DOMAINS
 from gloggur.search.router.types import QueryHints
 
 _QUOTED_RE = re.compile(r"[\"']([^\"']+)[\"']")
@@ -42,6 +43,43 @@ _NATURAL_LANGUAGE_HINTS = {
     "behaviour",
 }
 _IDENTIFIERISH_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:[.:#][A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?$")
+_LITERAL_FIRST_PUNCTUATION = set("[](){}<>/=+-")
+_WORKFLOW_PHRASES = (
+    "ci",
+    "workflow",
+    "workflows",
+    ".github",
+    "github actions",
+    "matrix",
+    "label",
+    "labels",
+    "backport",
+    "stable branch",
+    "stable/",
+    "subject prefix",
+    "commit prefix",
+    "backport footer",
+    "contributing",
+    "review stage",
+    "trac",
+    "lane",
+    "migrations workflow",
+    "pyproject.toml",
+    "tox.ini",
+)
+_DOCS_POLICY_PHRASES = (
+    "docs",
+    "docs/internals",
+    "readme",
+    "changelog",
+    "history",
+    "release notes",
+    "release-notes",
+    "deprecation",
+    "paper trail",
+    "warning",
+    "warnings",
+)
 
 
 def _detect_verbatim_literal(query: str) -> str | None:
@@ -139,6 +177,51 @@ def _classify_query_kind(
     return "natural_language"
 
 
+def _classify_query_domain(
+    *,
+    query: str,
+    path_hints: tuple[str, ...],
+    literals: tuple[str, ...],
+) -> str:
+    lowered = query.lower()
+    workflow_score = 0
+    docs_score = 0
+    haystacks = [lowered]
+    haystacks.extend(path.lower() for path in path_hints)
+    haystacks.extend(literal.lower() for literal in literals)
+
+    for phrase in _WORKFLOW_PHRASES:
+        if any(phrase in haystack for haystack in haystacks):
+            workflow_score += 1
+    for phrase in _DOCS_POLICY_PHRASES:
+        if any(phrase in haystack for haystack in haystacks):
+            docs_score += 1
+
+    if workflow_score > 0 and workflow_score >= docs_score:
+        return "workflow_config"
+    if docs_score > 0:
+        return "docs_policy"
+    return "code"
+
+
+def _literal_first_query(query: str) -> bool:
+    candidate = query.strip()
+    if not candidate or any(char.isspace() for char in candidate):
+        return False
+    if _looks_identifierish_query(candidate):
+        return False
+    if len(candidate) < 3:
+        return False
+    if not any(char.isalnum() for char in candidate):
+        return False
+    punctuation = [char for char in candidate if not char.isalnum()]
+    if not punctuation:
+        return False
+    if "/" in candidate or "\\" in candidate:
+        return True
+    return any(char in _LITERAL_FIRST_PUNCTUATION or char == "." for char in punctuation)
+
+
 def extract_query_hints(query: str) -> QueryHints:
     """Extract deterministic hints used by routing and scoring."""
     symbol_query, declaration_terms = _strip_declaration_prefix(query)
@@ -199,6 +282,14 @@ def extract_query_hints(query: str) -> QueryHints:
         symbols=symbols,
         identifier_tokens=identifier_tokens,
     )
+    query_domain = _classify_query_domain(
+        query=query,
+        path_hints=raw_paths,
+        literals=raw_literals,
+    )
+    literal_first = _literal_first_query(query)
+    if query_domain not in QUERY_DOMAINS:
+        query_domain = "code"
 
     return QueryHints(
         symbols=symbols,
@@ -209,4 +300,6 @@ def extract_query_hints(query: str) -> QueryHints:
         identifier_tokens=identifier_tokens,
         declaration_terms=declaration_terms,
         query_kind=query_kind,
+        query_domain=query_domain,
+        literal_first=literal_first,
     )

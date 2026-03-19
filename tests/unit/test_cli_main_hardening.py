@@ -280,3 +280,79 @@ def test_search_json_debug_router_fails_when_all_backends_error(
     assert result.exit_code == 1
     assert payload["error"]["code"] == "search_router_backends_failed"
     assert payload["failure_codes"] == ["search_router_backends_failed"]
+
+
+def test_find_json_fails_structured_when_all_backends_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    config = GloggurConfig(cache_dir=str(tmp_path / "cache"), embedding_provider="test")
+
+    class FakePack:
+        hits: list[object] = []
+        debug = {
+            "backend_scores": {"exact": 0.0, "symbol": 0.0, "semantic": 0.0},
+            "backend_errors": {
+                "exact": "lexical failed",
+                "symbol": "symbol failed",
+                "semantic": "semantic failed",
+            },
+        }
+
+        def to_dict(self, include_debug: bool = False) -> dict[str, object]:
+            return {
+                "summary": {"warning_codes": [], "query_kind": "mixed", "next_action": "refine_query"},
+                "hits": [],
+                "debug": dict(self.debug),
+            }
+
+    class FakeRouter:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def search(self, **kwargs) -> FakePack:
+            return FakePack()
+
+    monkeypatch.setattr(
+        cli_main,
+        "_create_runtime",
+        lambda **kwargs: (config, object(), object()),
+    )
+    monkeypatch.setattr(
+        cli_main,
+        "_build_search_health_snapshot",
+        lambda *args, **kwargs: {
+            "entrypoint": "find_cli_v1",
+            "contract_version": "find_v1",
+            "needs_reindex": False,
+            "reindex_reason": None,
+            "resume_contract": {},
+            "warning_codes": [],
+            "semantic_search_allowed": True,
+            "search_integrity": None,
+            "expected_index_profile": "test",
+            "cached_index_profile": "test",
+        },
+    )
+    monkeypatch.setattr(cli_main, "_create_metadata_store", lambda config: object())
+    monkeypatch.setattr(
+        cli_main, "_create_embedding_provider_for_command", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        cli_main, "_resolve_router_repo_root", lambda metadata_store, fallback: tmp_path
+    )
+    monkeypatch.setattr(cli_main, "SymbolIndexStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli_main, "load_search_router_config", lambda repo_root: object())
+    monkeypatch.setattr(cli_main, "SearchRouter", FakeRouter)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "needle", "--json"],
+    )
+    payload = _payload(result.output)
+
+    assert result.exit_code == 1
+    assert payload["error"]["code"] == "search_router_backends_failed"
+    assert payload["failure_codes"] == ["search_router_backends_failed"]
+    assert "Traceback (most recent call last)" not in result.output

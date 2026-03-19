@@ -14,7 +14,7 @@ Gloggur extracts baseline symbol coverage using Tree-sitter parsers for Python (
 
 The CLI exposes two retrieval surfaces:
 
-* **find** – a terse, agent-first entrypoint that returns a short decision plus the best few hits in plain text by default, or a slim `find_v1` JSON/NDJSON contract for tool pipelines.
+* **find** – a terse, agent-first entrypoint that returns a short decision plus the best hits in plain text by default, or a slim `find_v1` JSON/NDJSON contract for tool pipelines.
 * **search** – the full-fidelity retrieval surface with ContextPack v2 output and the complete operational metadata/debug contract.
 
 `search` supports multiple modes:
@@ -149,8 +149,12 @@ Commands emit JSON structures that are easy to consume programmatically.
 * `schema_version` / `contract_version`
 * `query`
 * `about` – optional semantic description when `--about` is supplied
-* `decision` – status, strategy, query kind, next action, bounded assist mode, and an additive `suggested_next_command` when narrowing is needed
+* `decision` – status, strategy, query kind, next action, bounded assist mode, an additive `target` for the machine-readable next open/scope step, and an additive `suggested_next_command` when narrowing is needed
 * `hits[]` – rank, path, start/end lines, start/end bytes, score, tags, and a trimmed snippet
+
+By default, `find --json` and `find --stream` now emit a single top hit when
+`decision.status=decisive`. Pass `--top-k` or `--max-snippets` explicitly when
+you want wider result sets even on decisive outcomes.
 
 `find` accepts grep-like token sequences directly. If the final positional token
 is an existing file or directory, it is treated like `--file` / `--path-prefix`
@@ -170,7 +174,7 @@ Use `search --json` when you need the full ContextPack v2 contract. Search resul
   * `snippet`, `score`, and `tags` (`literal_match`, `semantic_match`, `symbol_def`, `symbol_ref`).
 * `debug` – when `--debug-router` is provided, includes routing decisions, candidate counts, backend errors, and routed lexical/semantic query fields.
 
-`find --json` includes byte offsets for exact agent round-trips while still omitting bulkier success-only metadata such as resume fingerprints and search-integrity payloads. Reach for `search --json` when you need the full operational health/debug contract.
+`find --json` includes byte offsets for exact agent round-trips while still omitting bulkier success-only metadata such as resume fingerprints and search-integrity payloads. Routed semantic fallback failures are downgraded into backend-error metadata when lexical hits remain available, so agents receive a structured result instead of a raw traceback. Reach for `search --json` when you need the full operational health/debug contract.
 
 Byte-range extraction is available without a fresh index once you already have a hit path/span:
 

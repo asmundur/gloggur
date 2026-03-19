@@ -237,6 +237,74 @@ def test_run_exact_backend_locator_verbatim_query_does_not_fallback_to_fragments
     assert result.hits == ()
 
 
+def test_run_exact_backend_locator_literal_first_query_uses_fixed_string_without_fallback(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    sample = tmp_path / "docs" / "internals" / "committing-code.txt"
+    sample.parent.mkdir(parents=True, exist_ok=True)
+    sample.write_text("[5.2.x]\n", encoding="utf8")
+
+    observed_patterns: list[str] = []
+
+    def _run(cmd, **_kwargs):
+        observed_patterns.append(cmd[cmd.index("-e") + 1])
+        assert "-F" in cmd
+        return SimpleNamespace(
+            returncode=0,
+            stdout="docs/internals/committing-code.txt:1:[5.2.x]\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="[5.2.x]",
+        hints=extract_query_hints("[5.2.x]"),
+        repo_root=tmp_path,
+        intent=SearchIntent(result_profile="locator", max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert observed_patterns == ["[5.2.x]"]
+    assert result.hits
+    assert result.hits[0].path.replace("\\", "/").endswith("docs/internals/committing-code.txt")
+
+
+def test_run_exact_backend_workflow_query_searches_hidden_authority_paths(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    observed_commands: list[list[str]] = []
+
+    def _run(cmd, **_kwargs):
+        observed_commands.append(list(cmd))
+        assert "--hidden" in cmd
+        return SimpleNamespace(
+            returncode=0,
+            stdout=".github/workflows/verification.yml:1:name: verification\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="python matrix label source",
+        hints=extract_query_hints("python matrix label source"),
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=1, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert observed_commands
+    assert result.hits
+    assert result.hits[0].path.replace("\\", "/").endswith(
+        "/.github/workflows/verification.yml"
+    )
+
+
 def test_run_exact_backend_non_locator_verbatim_query_falls_back_after_literal_miss(
     monkeypatch,
     tmp_path,

@@ -17,6 +17,13 @@ from gloggur.search.router.backends import (
 )
 from gloggur.search.router.config import SearchRouterConfig
 from gloggur.search.router.hints import extract_query_hints
+from gloggur.search.router.path_priors import (
+    is_authority_path,
+    is_docs_path,
+    is_workflow_config_path,
+    path_domain_score,
+    should_treat_as_auxiliary,
+)
 from gloggur.search.router.query_compat import ParsedQueryCompat, parse_query_compat
 from gloggur.search.router.telemetry import log_router_event
 from gloggur.search.router.types import (
@@ -254,13 +261,11 @@ def _token_overlap_score(*, text: str, hints: QueryHints) -> float:
     return min(len(overlap) / max(len(hint_tokens), 1), 1.0)
 
 
-def _path_quality(path: str) -> float:
+def _path_quality(path: str, *, query_domain: str) -> float:
     lowered = path.replace("\\", "/").lower()
     if "/dist/" in lowered or "/vendor/" in lowered or "/node_modules/" in lowered:
         return 0.0
-    if "/src/" in lowered:
-        return 1.0
-    return 0.7
+    return path_domain_score(path, query_domain=query_domain)
 
 
 def _quality_exact(result: BackendResult, hints: QueryHints, intent: SearchIntent) -> float:
@@ -268,15 +273,24 @@ def _quality_exact(result: BackendResult, hints: QueryHints, intent: SearchInten
         return 0.0
     match_strength = max(hit.raw_score for hit in result.hits)
     hit_density = min(len(result.hits) / max(1, intent.max_snippets or 1), 1.0)
-    path_quality = sum(_path_quality(hit.path) for hit in result.hits) / len(result.hits)
+    path_quality = sum(
+        _path_quality(hit.path, query_domain=hints.query_domain) for hit in result.hits
+    ) / len(result.hits)
     hint_overlap = sum(
         _token_overlap_score(text=f"{hit.path}\n{hit.snippet}", hints=hints) for hit in result.hits
+    ) / len(result.hits)
+    authority_density = sum(
+        1 for hit in result.hits if is_authority_path(hit.path, query_domain=hints.query_domain)
     ) / len(result.hits)
     return max(
         0.0,
         min(
             1.0,
-            0.45 * match_strength + 0.25 * hit_density + 0.20 * path_quality + 0.10 * hint_overlap,
+            0.40 * match_strength
+            + 0.20 * hit_density
+            + 0.20 * path_quality
+            + 0.10 * hint_overlap
+            + 0.10 * authority_density,
         ),
     )
 
@@ -286,7 +300,9 @@ def _quality_symbol(result: BackendResult, hints: QueryHints, intent: SearchInte
         return 0.0
     name_match = max(hit.raw_score for hit in result.hits)
     ref_density = min(len(result.hits) / max(1, intent.max_snippets or 1), 1.0)
-    path_quality = sum(_path_quality(hit.path) for hit in result.hits) / len(result.hits)
+    path_quality = sum(
+        _path_quality(hit.path, query_domain=hints.query_domain) for hit in result.hits
+    ) / len(result.hits)
     hint_overlap = sum(
         _token_overlap_score(text=f"{hit.path}\n{hit.snippet}", hints=hints) for hit in result.hits
     ) / len(result.hits)
@@ -312,11 +328,22 @@ def _quality_semantic(result: BackendResult, hints: QueryHints) -> float:
         directory_counts[parent] = directory_counts.get(parent, 0) + 1
     dir_coherence = max(directory_counts.values()) / len(result.hits)
 
+    path_quality = sum(
+        _path_quality(hit.path, query_domain=hints.query_domain) for hit in result.hits
+    ) / len(result.hits)
     hint_overlap = sum(
         _token_overlap_score(text=f"{hit.path}\n{hit.snippet}", hints=hints) for hit in result.hits
     ) / len(result.hits)
     return max(
-        0.0, min(1.0, 0.45 * top1 + 0.25 * margin + 0.20 * dir_coherence + 0.10 * hint_overlap)
+        0.0,
+        min(
+            1.0,
+            0.36 * top1
+            + 0.20 * margin
+            + 0.18 * dir_coherence
+            + 0.14 * path_quality
+            + 0.12 * hint_overlap,
+        ),
     )
 
 
@@ -676,20 +703,13 @@ def _select_hits_for_outcome(
     return list(winner_result.hits if winner_result is not None else ()), {}, {}, {}, {}
 
 
-def _is_auxiliary_path(path: str) -> bool:
+def _is_auxiliary_path(path: str, *, query_domain: str) -> bool:
+    if should_treat_as_auxiliary(path, query_domain=query_domain):
+        return True
     lowered = path.replace("\\", "/").lower()
-    basename = Path(lowered).name
-    stem = Path(lowered).stem
-    if "/docs/" in lowered or "/doc/" in lowered:
-        return True
-    if "/examples/" in lowered or "/example/" in lowered:
-        return True
-    if basename.endswith((".md", ".rst", ".txt")):
-        return True
-    return any(
-        marker in stem
-        for marker in ("readme", "changelog", "changes", "history", "news", "release-notes")
-    )
+    if query_domain != "code":
+        return False
+    return "/examples/" in lowered or "/example/" in lowered
 
 
 def _auxiliary_intent_requested(*, query: str, intent: SearchIntent) -> bool:
@@ -709,10 +729,15 @@ def _lexical_hits_are_auxiliary_only(
     hits: tuple[ContextHit, ...],
     query: str,
     intent: SearchIntent,
+    query_domain: str,
 ) -> bool:
-    if not hits or _auxiliary_intent_requested(query=query, intent=intent):
+    if (
+        not hits
+        or query_domain != "code"
+        or _auxiliary_intent_requested(query=query, intent=intent)
+    ):
         return False
-    return all(_is_auxiliary_path(hit.path) for hit in hits)
+    return all(_is_auxiliary_path(hit.path, query_domain=query_domain) for hit in hits)
 
 
 def _semantic_overlap_score(
@@ -769,8 +794,13 @@ def _select_semantic_rescue_hits(
     *,
     semantic_result: BackendResult,
     config: SearchRouterConfig,
+    query_domain: str,
 ) -> tuple[list[BackendHit], bool]:
-    candidates = [hit for hit in semantic_result.hits if not _is_auxiliary_path(hit.path)]
+    candidates = [
+        hit
+        for hit in semantic_result.hits
+        if not _is_auxiliary_path(hit.path, query_domain=query_domain)
+    ]
     if not candidates:
         return [], False
 
@@ -781,6 +811,25 @@ def _select_semantic_rescue_hits(
     if len(candidates) > 1 and (top_hit.raw_score - candidates[1].raw_score) < 0.05:
         return [], False
     return [top_hit], True
+
+
+def _authority_scoped_hits(
+    *,
+    hits: tuple[ContextHit, ...],
+    query_domain: str,
+) -> bool:
+    if query_domain == "code" or not hits:
+        return False
+    top_hits = hits[: min(3, len(hits))]
+    if not all(is_authority_path(hit.path, query_domain=query_domain) for hit in top_hits):
+        return False
+    unique_paths = {hit.path for hit in top_hits}
+    if len(unique_paths) <= 2:
+        return True
+    suggested = _suggested_path_prefix(hits)
+    if not isinstance(suggested, str) or not suggested:
+        return False
+    return is_docs_path(suggested) or is_workflow_config_path(suggested)
 
 
 def _suggested_path_prefix(hits: tuple[ContextHit, ...]) -> str | None:
@@ -826,6 +875,7 @@ def _decisive_non_semantic_result(
     outcome: RouterOutcome,
     backend_thresholds: dict[str, dict[str, object]],
     query_kind: str,
+    query_domain: str,
 ) -> bool:
     if outcome.strategy not in {"exact", "symbol"} or not hits:
         return False
@@ -834,6 +884,11 @@ def _decisive_non_semantic_result(
         return False
 
     top_score = hits[0].score
+    if query_domain != "code" and is_authority_path(hits[0].path, query_domain=query_domain):
+        if len(hits) == 1:
+            return top_score >= 0.82
+        if hits[0].path == hits[1].path:
+            return top_score >= 0.84
     if len(hits) == 1:
         return top_score >= 0.80
 
@@ -853,6 +908,7 @@ def _resolve_next_action(
     outcome: RouterOutcome,
     backend_thresholds: dict[str, dict[str, object]],
     query_kind: str,
+    query_domain: str,
     semantic_assist: str,
 ) -> tuple[bool, str, str | None]:
     if semantic_assist == "semantic_rescue" and hits:
@@ -863,6 +919,7 @@ def _resolve_next_action(
         outcome=outcome,
         backend_thresholds=backend_thresholds,
         query_kind=query_kind,
+        query_domain=query_domain,
     )
     if decisive:
         return True, "open_hit_1", None
@@ -1125,7 +1182,9 @@ class SearchRouter:
                     identifier_tokens=tuple(identifier_tokens),
                 )
         backend_execution_hints = resolved_execution_hints
-        if hints.query_kind in {"identifier", "declaration"} and not explicit_regex_requested:
+        if (
+            hints.query_kind in {"identifier", "declaration"} or hints.literal_first
+        ) and not explicit_regex_requested:
             backend_execution_hints = replace(resolved_execution_hints, fixed_string=True)
         bounded_about = bool(
             resolved_intent.semantic_query
@@ -1154,48 +1213,57 @@ class SearchRouter:
             backend_names = tuple(name for name in backend_names if name == "exact") or ("exact",)
 
         def _run_backend(name: str) -> BackendResult:
-            if name == "exact":
-                return run_exact_backend(
-                    query=effective_query,
-                    hints=hints,
-                    repo_root=self.repo_root,
-                    intent=resolved_intent,
-                    execution_hints=backend_execution_hints,
-                    config=self.config,
-                )
-            if name == "semantic":
-                searcher, semantic_init_error = self._get_searcher()
-                if searcher is None:
+            try:
+                if name == "exact":
+                    return run_exact_backend(
+                        query=effective_query,
+                        hints=hints,
+                        repo_root=self.repo_root,
+                        intent=resolved_intent,
+                        execution_hints=backend_execution_hints,
+                        config=self.config,
+                    )
+                if name == "semantic":
+                    searcher, semantic_init_error = self._get_searcher()
+                    if searcher is None:
+                        return BackendResult(
+                            name="semantic",
+                            hits=(),
+                            timing_ms=0,
+                            error=semantic_init_error or "semantic backend unavailable",
+                        )
+                    return run_semantic_backend(
+                        query=effective_query,
+                        hints=hints,
+                        searcher=searcher,
+                        repo_root=self.repo_root,
+                        intent=resolved_intent,
+                        execution_hints=backend_execution_hints,
+                        config=self.config,
+                    )
+                if self.symbol_store is None:
                     return BackendResult(
-                        name="semantic",
+                        name="symbol",
                         hits=(),
                         timing_ms=0,
-                        error=semantic_init_error or "semantic backend unavailable",
+                        error="symbol backend unavailable",
                     )
-                return run_semantic_backend(
+                return run_symbol_backend(
+                    symbol_store=self.symbol_store,
+                    hints=hints,
                     query=effective_query,
-                    searcher=searcher,
                     repo_root=self.repo_root,
                     intent=resolved_intent,
                     execution_hints=backend_execution_hints,
                     config=self.config,
                 )
-            if self.symbol_store is None:
+            except Exception as exc:
                 return BackendResult(
-                    name="symbol",
+                    name=name,
                     hits=(),
                     timing_ms=0,
-                    error="symbol backend unavailable",
+                    error=f"{name} backend failed: {type(exc).__name__}: {exc}",
                 )
-            return run_symbol_backend(
-                symbol_store=self.symbol_store,
-                hints=hints,
-                query=effective_query,
-                repo_root=self.repo_root,
-                intent=resolved_intent,
-                execution_hints=backend_execution_hints,
-                config=self.config,
-            )
 
         fusion_allocation: dict[str, int] = {}
         fusion_proportional_shares: dict[str, float] = {}
@@ -1261,16 +1329,21 @@ class SearchRouter:
                 outcome=lexical_outcome,
                 backend_thresholds=lexical_backend_thresholds,
                 query_kind=hints.query_kind,
+                query_domain=hints.query_domain,
             )
             lexical_auxiliary_only = _lexical_hits_are_auxiliary_only(
                 hits=lexical_packed_hits,
                 query=effective_query,
                 intent=resolved_intent,
+                query_domain=hints.query_domain,
             )
-            lexical_decisive_for_about = (
-                lexical_decisive
-                and not lexical_auxiliary_only
-                and not _has_multiple_hit_paths(lexical_packed_hits)
+            lexical_authority_scoped = _authority_scoped_hits(
+                hits=lexical_packed_hits,
+                query_domain=hints.query_domain,
+            )
+            lexical_decisive_for_about = not lexical_auxiliary_only and (
+                lexical_authority_scoped
+                or (lexical_decisive and not _has_multiple_hit_paths(lexical_packed_hits))
             )
             semantic_needed = "semantic" in backend_names and (
                 not lexical_decisive_for_about or lexical_auxiliary_only
@@ -1291,6 +1364,7 @@ class SearchRouter:
                     rescue_hits, rescue_used = _select_semantic_rescue_hits(
                         semantic_result=semantic_enriched,
                         config=self.config,
+                        query_domain=hints.query_domain,
                     )
                     if rescue_used:
                         semantic_assist = "semantic_rescue"
@@ -1413,15 +1487,42 @@ class SearchRouter:
                 ]
                 preliminary_outcome = _route_auto(preliminary_results, self.config)
                 has_non_semantic_hits = any(result.hits for result in non_semantic_results)
+                preliminary_results_by_name = {
+                    result.name: result for result in preliminary_results
+                }
+                (
+                    preliminary_selected_hits,
+                    _preliminary_allocation,
+                    _preliminary_backend_weights,
+                    _preliminary_eligibility,
+                    _preliminary_proportional_shares,
+                ) = _select_hits_for_outcome(
+                    results_by_name=preliminary_results_by_name,
+                    outcome=preliminary_outcome,
+                    intent=resolved_intent,
+                    hints=hints,
+                    config=self.config,
+                )
+                preliminary_packed_hits = _pack_hits(
+                    preliminary_selected_hits,
+                    repo_root=self.repo_root,
+                    intent=resolved_intent,
+                    config=self.config,
+                    preserve_ranked_order=preliminary_outcome.strategy == "hybrid",
+                )
+                preliminary_authority_scoped = _authority_scoped_hits(
+                    hits=preliminary_packed_hits,
+                    query_domain=hints.query_domain,
+                )
                 needs_semantic_fallback = False
                 if "semantic" in backend_names:
-                    if hints.query_kind in {"identifier", "declaration"}:
+                    if hints.query_kind in {"identifier", "declaration"} or hints.literal_first:
                         needs_semantic_fallback = not has_non_semantic_hits
                     else:
-                        needs_semantic_fallback = preliminary_outcome.strategy in {
-                            "hybrid",
-                            "suppressed",
-                        }
+                        needs_semantic_fallback = (
+                            preliminary_outcome.strategy in {"hybrid", "suppressed"}
+                            and not preliminary_authority_scoped
+                        )
                 if needs_semantic_fallback:
                     backend_results.append(_run_backend("semantic"))
 
@@ -1565,6 +1666,7 @@ class SearchRouter:
             outcome=outcome,
             backend_thresholds=backend_thresholds,
             query_kind=hints.query_kind,
+            query_domain=hints.query_domain,
             semantic_assist=semantic_assist,
         )
         summary: dict[str, object] = {
@@ -1575,6 +1677,7 @@ class SearchRouter:
             "warning_codes": warning_codes,
             "backend_thresholds": backend_thresholds,
             "query_kind": hints.query_kind,
+            "query_domain": hints.query_domain,
             "decisive": decisive,
             "next_action": next_action,
         }
@@ -1632,7 +1735,9 @@ class SearchRouter:
                 "semantic_assist_mode": resolved_intent.semantic_assist_mode,
             },
             "query_kind": hints.query_kind,
+            "query_domain": hints.query_domain,
             "declaration_terms": list(hints.declaration_terms),
+            "literal_first": hints.literal_first,
             "parsed_query": parsed_query.to_debug_payload(),
         }
 
@@ -1647,6 +1752,7 @@ class SearchRouter:
                 "reason": outcome.reason,
                 "next_action": next_action,
                 "decisive": decisive,
+                "query_domain": hints.query_domain,
                 "semantic_assist": semantic_assist,
                 "queries": {
                     "lexical_query": query,

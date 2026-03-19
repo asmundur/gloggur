@@ -37,6 +37,13 @@ def test_extract_query_hints_strips_declaration_prefixes() -> None:
     assert "def" not in hints.symbols
 
 
+def test_extract_query_hints_marks_punctuation_heavy_single_token_literal_first() -> None:
+    hints = extract_query_hints("[5.2.x]")
+
+    assert hints.literal_first is True
+    assert hints.query_domain == "code"
+
+
 @pytest.mark.parametrize(
     "query",
     [
@@ -64,6 +71,20 @@ def test_extract_query_hints_classifies_query_kinds(query: str, expected_kind: s
     hints = extract_query_hints(query)
 
     assert hints.query_kind == expected_kind
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_domain"),
+    [
+        ("backport footer stable branch", "workflow_config"),
+        ("deprecation paper trail docs/internals", "docs_policy"),
+        ("CommonMiddleware APPEND_SLASH", "code"),
+    ],
+)
+def test_extract_query_hints_classifies_query_domains(query: str, expected_domain: str) -> None:
+    hints = extract_query_hints(query)
+
+    assert hints.query_domain == expected_domain
 
 
 def test_search_router_auto_prefers_exact_on_quality_tie(
@@ -1080,6 +1101,90 @@ def test_search_router_locator_about_skips_semantic_on_decisive_lexical_hit(
     assert pack.hits[0].path == "tests/test_sessions.py"
 
 
+def test_search_router_locator_about_skips_semantic_on_authority_scoped_workflow_hits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    semantic_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "docs" / "internals" / "committing-code.txt"),
+                    start_line=12,
+                    end_line=12,
+                    snippet="Backport of <revision> from <branch>.",
+                    raw_score=0.90,
+                    tags=("literal_match",),
+                ),
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "docs" / "internals" / "releases.txt"),
+                    start_line=20,
+                    end_line=20,
+                    snippet="Stable branch subject prefix rules.",
+                    raw_score=0.89,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=2),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.93 if result.name == "exact" else 0.0,
+    )
+
+    class FakeSearcher:
+        def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, str] | None = None,
+            top_k: int = 10,
+            context_radius: int = 8,
+        ) -> dict[str, object]:
+            semantic_calls.append(query)
+            _ = filters, top_k, context_radius
+            return {"results": []}
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=FakeSearcher(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="backport footer stable branch",
+        intent=SearchIntent(
+            semantic_query="stable branch backport footer format",
+            ranking_mode="source-first",
+            result_profile="locator",
+            semantic_assist_mode="bounded_about",
+            max_snippets=5,
+        ),
+        mode="auto",
+        include_debug=True,
+    )
+
+    assert semantic_calls == []
+    assert pack.summary["query_domain"] == "workflow_config"
+    assert pack.summary["strategy"] == "exact"
+    assert [hit.path for hit in pack.hits] == [
+        "docs/internals/committing-code.txt",
+        "docs/internals/releases.txt",
+    ]
+
+
 def test_search_router_locator_about_reranks_lexical_hits_without_adding_semantic_only_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1186,6 +1291,77 @@ def test_search_router_locator_about_reranks_lexical_hits_without_adding_semanti
         "effective_lexical_query": "token",
         "semantic_query": "cache warmup",
     }
+
+
+def test_search_router_semantic_exception_preserves_lexical_hits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "src" / "flask" / "app.py"),
+                    start_line=110,
+                    end_line=110,
+                    snippet="ctx._after_request_functions.append(func)",
+                    raw_score=0.90,
+                    tags=("literal_match",),
+                ),
+                BackendHit(
+                    backend="exact",
+                    path=str(tmp_path / "src" / "flask" / "ctx.py"),
+                    start_line=140,
+                    end_line=140,
+                    snippet="for func in ctx._after_request_functions:",
+                    raw_score=0.88,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=2),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_semantic_backend",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("network unavailable")),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.91 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=object(),
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol", "semantic")),
+    )
+    pack = router.search(
+        query="after_request order",
+        intent=SearchIntent(
+            semantic_query="flask after request ordering",
+            ranking_mode="source-first",
+            result_profile="locator",
+            semantic_assist_mode="bounded_about",
+            max_snippets=5,
+        ),
+        mode="auto",
+        include_debug=True,
+    )
+
+    assert pack.summary["strategy"] == "exact"
+    assert [hit.path for hit in pack.hits] == ["src/flask/app.py", "src/flask/ctx.py"]
+    assert isinstance(pack.debug, dict)
+    assert "semantic" in pack.debug["backend_errors"]
+    assert "network unavailable" in pack.debug["backend_errors"]["semantic"]
 
 
 def test_search_router_locator_about_allows_single_semantic_rescue_from_auxiliary_hits(

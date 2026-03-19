@@ -9,6 +9,7 @@ gate but emits the slimmer `find_v1` decision contract.
 | `search_cache_not_ready` | Shared cache-health error path reused from the search execution layer. |
 | `find_v1` | Successful routed retrieval projected into the slim `find_v1` contract. |
 | `suppressed` / `no_match` / `decisive` / `ambiguous` | Exact `decision.status` values emitted by the command. |
+| `decision.target` | Additive machine-readable next action for direct open/scope steps. |
 | `suggested_next_command` | Additive narrowing hint emitted for some `ambiguous` outcomes. |
 | `emitted` | Final text, JSON, or NDJSON output step. |
 
@@ -23,6 +24,7 @@ stateDiagram-v2
     state "no_match" as no_match
     state "decisive" as decisive
     state "ambiguous" as ambiguous
+    state "decision.target" as decision_target
     state "suggested_next_command" as suggested_next_command
     state "emitted" as emitted
 
@@ -34,11 +36,14 @@ stateDiagram-v2
     find_v1 --> decisive: decision.status=decisive
     find_v1 --> ambiguous: decision.status=ambiguous
 
+    decisive --> decision_target: decision.target
+    ambiguous --> decision_target: decision.target
+    decision_target --> emitted: JSON includes target
     ambiguous --> suggested_next_command: decision.suggested_next_command
     suggested_next_command --> emitted: JSON or text includes hint
     suppressed --> emitted
     no_match --> emitted
-    decisive --> emitted
+    decisive --> emitted: default JSON/NDJSON trims to one hit unless hit limits are explicit
     ambiguous --> emitted: no narrowing hint available
     search_cache_not_ready --> emitted: error payload + Exit(1)
 ```
@@ -49,5 +54,9 @@ stateDiagram-v2
   `contextpack_v2` to `find_v1`.
 - `stream` is an output-mode switch rather than a decision state, so it is
   treated as part of `emitted` here.
+- `decision.target` is additive and complements, rather than replaces,
+  `suggested_next_command`.
+- When routed semantic fallback fails but lexical hits survive, the command
+  still emits `find_v1`; the failure is carried in backend-error metadata.
 - `suggested_next_command` is optional and only appears on narrowing-friendly
   ambiguous paths.

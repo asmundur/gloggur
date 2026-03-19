@@ -12,6 +12,15 @@ from pathlib import Path
 from gloggur.byte_spans import LineByteSpanIndex
 from gloggur.search.hybrid_search import HybridSearch
 from gloggur.search.router.config import SearchRouterConfig
+from gloggur.search.router.path_priors import (
+    is_authority_path,
+    is_docs_authority_path,
+    is_docs_path,
+    is_source_code_path,
+    is_test_path,
+    is_workflow_config_path,
+    path_domain_score,
+)
 from gloggur.search.router.types import (
     BackendHit,
     BackendResult,
@@ -22,28 +31,6 @@ from gloggur.search.router.types import (
 from gloggur.symbol_index.models import SymbolOccurrence
 from gloggur.symbol_index.store import SymbolIndexStore
 
-_SOURCE_CODE_EXTENSIONS = {
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cs",
-    ".go",
-    ".h",
-    ".hpp",
-    ".java",
-    ".js",
-    ".jsx",
-    ".kt",
-    ".m",
-    ".php",
-    ".py",
-    ".rb",
-    ".rs",
-    ".swift",
-    ".ts",
-    ".tsx",
-}
-_DOC_NAME_MARKERS = ("readme", "changelog", "changes", "history", "news", "release-notes")
 _DEFINITION_LINE_RE = re.compile(
     r"^\s*(?:async\s+def|def|class|function|func|interface|struct|trait|enum)\b"
 )
@@ -198,44 +185,41 @@ def _path_allowed(
     return True
 
 
-def _is_source_code_path(path: str) -> bool:
-    lowered = path.replace("\\", "/").lower()
-    return Path(lowered).suffix in _SOURCE_CODE_EXTENSIONS
-
-
-def _is_docs_or_changelog_path(path: str) -> bool:
-    lowered = path.replace("\\", "/").lower()
-    basename = Path(lowered).name
-    stem = Path(lowered).stem
-    if "/docs/" in lowered or "/doc/" in lowered:
-        return True
-    if basename.endswith((".md", ".rst", ".txt")) and stem in _DOC_NAME_MARKERS:
-        return True
-    return any(marker in stem for marker in _DOC_NAME_MARKERS)
-
-
-def _is_test_path(path: str) -> bool:
-    lowered = path.replace("\\", "/").lower()
-    basename = Path(lowered).name
-    return (
-        "/test/" in lowered
-        or "/tests/" in lowered
-        or basename.startswith("test_")
-        or basename.endswith("_test.py")
-        or ".spec." in basename
-    )
-
-
-def _exact_ranking_adjustment(path: str, matched_line: str) -> float:
+def _exact_ranking_adjustment(path: str, matched_line: str, *, query_domain: str) -> float:
     adjustment = 0.0
     if _DEFINITION_LINE_RE.search(matched_line):
         adjustment += 0.10
-    if _is_source_code_path(path):
-        adjustment += 0.08
-    if _is_docs_or_changelog_path(path):
-        adjustment -= 0.08
-    if _is_test_path(path):
-        adjustment -= 0.05
+    if query_domain == "docs_policy":
+        if is_docs_authority_path(path):
+            adjustment += 0.12
+        elif is_docs_path(path):
+            adjustment += 0.08
+        elif is_workflow_config_path(path):
+            adjustment += 0.06
+        elif is_test_path(path):
+            adjustment -= 0.08
+        elif is_source_code_path(path):
+            adjustment -= 0.05
+    elif query_domain == "workflow_config":
+        if is_workflow_config_path(path):
+            adjustment += 0.12
+        elif is_docs_authority_path(path):
+            adjustment += 0.10
+        elif is_docs_path(path):
+            adjustment += 0.06
+        elif is_test_path(path):
+            adjustment -= 0.08
+        elif is_source_code_path(path):
+            adjustment -= 0.04
+    else:
+        if is_source_code_path(path):
+            adjustment += 0.08
+        if is_docs_path(path):
+            adjustment -= 0.08
+        if is_workflow_config_path(path):
+            adjustment -= 0.10
+        if is_test_path(path):
+            adjustment -= 0.05
     return adjustment
 
 
@@ -312,6 +296,7 @@ def _iter_fallback_search_files(
     repo_root: Path,
     search_target: str,
     max_files: int | None,
+    include_hidden: bool,
 ) -> tuple[str, ...]:
     """Return deterministic file candidates for exact backend fallback scans."""
     target = Path(search_target)
@@ -324,12 +309,13 @@ def _iter_fallback_search_files(
         return ()
     files: list[str] = []
     for root, dirs, names in os.walk(target):
-        # Match ripgrep defaults: ignore hidden directories/files unless explicitly requested.
-        dirs[:] = [name for name in dirs if not name.startswith(".")]
+        # Match ripgrep defaults unless the query explicitly needs hidden authority paths.
+        if not include_hidden:
+            dirs[:] = [name for name in dirs if not name.startswith(".")]
         dirs.sort()
         names.sort()
         for name in names:
-            if name.startswith("."):
+            if not include_hidden and name.startswith("."):
                 continue
             files.append(str(Path(root) / name))
             if max_files is not None and max_files > 0 and len(files) >= max_files:
@@ -388,6 +374,7 @@ def _run_exact_backend_fallback_scan(
     search_target: str,
     top_k: int,
     deadline: float,
+    include_hidden: bool,
 ) -> tuple[BackendHit, ...]:
     """Fallback exact scan used when ripgrep invocation is unavailable."""
     compiled_patterns: list[tuple[str, re.Pattern[str], tuple[str, ...], float]] = []
@@ -403,6 +390,7 @@ def _run_exact_backend_fallback_scan(
         repo_root=repo_root,
         search_target=search_target,
         max_files=intent.max_files,
+        include_hidden=include_hidden,
     )
     hit_map: dict[tuple[str, int, int], BackendHit] = {}
     byte_span_cache: dict[str, LineByteSpanIndex] = {}
@@ -446,7 +434,13 @@ def _run_exact_backend_fallback_scan(
                     0.0,
                     min(
                         1.0,
-                        base_score + bonus + _exact_ranking_adjustment(absolute_path, source_line),
+                        base_score
+                        + bonus
+                        + _exact_ranking_adjustment(
+                            absolute_path,
+                            source_line,
+                            query_domain=hints.query_domain,
+                        ),
                     ),
                 )
                 existing = hit_map.get(key)
@@ -500,13 +494,21 @@ def run_exact_backend(
     started = time.perf_counter()
     stripped_query = query.strip()
     locator_verbatim_mode = bool(intent.result_profile == "locator" and hints.verbatim_literal)
+    locator_literal_mode = bool(intent.result_profile == "locator" and hints.literal_first)
+    include_hidden = bool(
+        hints.query_domain == "workflow_config"
+        or ".github" in query
+        or any(".github" in value for value in (*hints.path_hints, *hints.literals))
+    )
 
     primary_patterns: list[tuple[str, tuple[str, ...], float]] = []
     if hints.verbatim_literal is not None:
         primary_patterns.append((hints.verbatim_literal, ("literal_match",), 1.0))
+    elif hints.literal_first and stripped_query:
+        primary_patterns.append((stripped_query, ("literal_match", "literal_first"), 0.98))
 
     fallback_patterns: list[tuple[str, tuple[str, ...], float]] = []
-    if not locator_verbatim_mode:
+    if not locator_verbatim_mode and not locator_literal_mode:
         for literal in hints.literals:
             if literal == hints.verbatim_literal:
                 continue
@@ -523,13 +525,15 @@ def run_exact_backend(
     deduped_fallback_patterns = _dedupe_exact_patterns(fallback_patterns)
     primary_execution_hints = (
         replace(execution_hints, fixed_string=True)
-        if hints.verbatim_literal is not None
+        if hints.verbatim_literal is not None or hints.literal_first
         else execution_hints
     )
 
     top_k = max(1, intent.max_snippets or config.exact_top_k)
     cmd_fragments: list[str] = []
     hit_map: dict[tuple[str, int, int], BackendHit] = {}
+    hit_pattern_map: dict[tuple[str, int, int], set[str]] = {}
+    file_pattern_map: dict[str, set[str]] = {}
     byte_span_cache: dict[str, LineByteSpanIndex] = {}
 
     time_budget_ms = intent.time_budget_ms or config.default_time_budget_ms
@@ -579,6 +583,8 @@ def run_exact_backend(
                 cmd.append("-w")
             if batch_hints.fixed_string:
                 cmd.append("-F")
+            if include_hidden:
+                cmd.append("--hidden")
             for include_glob in batch_hints.include_globs:
                 cmd.extend(["--glob", include_glob])
             for exclude_glob in batch_hints.exclude_globs:
@@ -654,7 +660,11 @@ def run_exact_backend(
                         1.0,
                         base_score
                         + bonus
-                        + _exact_ranking_adjustment(absolute_path, parts[2].strip()),
+                        + _exact_ranking_adjustment(
+                            absolute_path,
+                            parts[2].strip(),
+                            query_domain=hints.query_domain,
+                        ),
                     ),
                 )
                 existing = hit_map.get(key)
@@ -675,6 +685,8 @@ def run_exact_backend(
                     end_byte=byte_span[1] if byte_span is not None else None,
                     tags=tags,
                 )
+                file_pattern_map.setdefault(absolute_path, set()).add(pattern)
+                hit_pattern_map.setdefault(key, set()).add(pattern)
                 if existing is None or candidate.raw_score > existing.raw_score:
                     hit_map[key] = candidate
 
@@ -704,6 +716,7 @@ def run_exact_backend(
                 search_target=search_target,
                 top_k=top_k,
                 deadline=deadline,
+                include_hidden=include_hidden,
             )
             if fallback_hits:
                 break
@@ -714,6 +727,35 @@ def run_exact_backend(
                 timing_ms=int((time.perf_counter() - started) * 1000),
                 commands=tuple(cmd_fragments),
             )
+
+    if hit_map:
+        anchor_path = sorted(
+            hit_map.values(),
+            key=lambda item: (
+                -len(file_pattern_map.get(item.path, ())),
+                -item.raw_score,
+                item.path,
+                item.start_line,
+            ),
+        )[0].path
+        anchor_parent = str(Path(anchor_path).parent)
+        for key, hit in list(hit_map.items()):
+            score = hit.raw_score
+            file_pattern_count = len(file_pattern_map.get(hit.path, ()))
+            hit_pattern_count = len(hit_pattern_map.get(key, ()))
+            if file_pattern_count > 1:
+                score += min(0.16, 0.05 * (file_pattern_count - 1))
+            if hit_pattern_count > 1:
+                score += min(0.08, 0.03 * (hit_pattern_count - 1))
+            if (
+                hints.query_domain == "code"
+                and anchor_parent not in {"", "."}
+                and str(Path(hit.path).parent) == anchor_parent
+            ):
+                score += 0.05
+            if is_authority_path(hit.path, query_domain=hints.query_domain):
+                score += 0.03
+            hit_map[key] = replace(hit, raw_score=max(0.0, min(1.0, score)))
 
     hits = _sorted_exact_hits(hit_map, top_k)
     return BackendResult(
@@ -727,6 +769,7 @@ def run_exact_backend(
 def run_semantic_backend(
     *,
     query: str,
+    hints: QueryHints,
     searcher: HybridSearch,
     repo_root: Path,
     intent: SearchIntent,
@@ -758,12 +801,22 @@ def run_semantic_backend(
         filters["language"] = intent.language
 
     top_k = max(1, intent.max_snippets or config.semantic_top_k)
-    payload = searcher.search(
-        semantic_query,
-        filters=filters,
-        top_k=top_k,
-        context_radius=8,
-    )
+    command_label = f"semantic search mode={filters['mode']} top_k={top_k}"
+    try:
+        payload = searcher.search(
+            semantic_query,
+            filters=filters,
+            top_k=top_k,
+            context_radius=8,
+        )
+    except Exception as exc:
+        return BackendResult(
+            name="semantic",
+            hits=(),
+            timing_ms=int((time.perf_counter() - started) * 1000),
+            error=f"semantic backend failed: {type(exc).__name__}: {exc}",
+            commands=(command_label,),
+        )
 
     raw_results = payload.get("results")
     if not isinstance(raw_results, list):
@@ -839,7 +892,7 @@ def run_semantic_backend(
         name="semantic",
         hits=ordered,
         timing_ms=int((time.perf_counter() - started) * 1000),
-        commands=(f"semantic search mode={filters['mode']} top_k={top_k}",),
+        commands=(command_label,),
     )
 
 
@@ -1003,7 +1056,13 @@ def run_symbol_backend(
             0.0,
             min(
                 1.0,
-                score + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent),
+                score
+                + _kind_bonus(occurrence_kind=occurrence.kind, usage_intent=usage_intent)
+                + max(
+                    0.0,
+                    path_domain_score(path, query_domain=hints.query_domain) - 0.5,
+                )
+                * 0.08,
             ),
         )
         scored_occurrences.append((score, occurrence, path))

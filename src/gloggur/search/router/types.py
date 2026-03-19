@@ -123,6 +123,8 @@ class QueryHints:
     identifier_tokens: tuple[str, ...] = ()
     declaration_terms: tuple[str, ...] = ()
     query_kind: str = "natural_language"
+    query_domain: str = "code"
+    literal_first: bool = False
 
 
 @dataclass(frozen=True)

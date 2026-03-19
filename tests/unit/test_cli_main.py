@@ -4635,6 +4635,13 @@ def test_find_json_contract_is_slim_and_security_gated(
         "query_kind": "identifier",
         "next_action": "open_hit_1",
         "assist": "none",
+        "target": {
+            "kind": "hit",
+            "rank": 1,
+            "path": "src/sample_1.py",
+            "start_line": 1,
+            "end_line": 2,
+        },
     }
     assert payload["warning_codes"] == ["identifier_query_high_top_k"]
     assert payload["security_warning_codes"] == ["untrusted_repo_config"]
@@ -4674,6 +4681,7 @@ def test_find_json_adds_assist_and_suggested_next_command(
     payload = _parse_json_output(result.output)
     decision = payload["decision"]
     assert decision["assist"] == "rerank"
+    assert decision["target"] == {"kind": "file", "path": "src/sample_1.py"}
     assert (
         decision["suggested_next_command"]
         == "gloggur find needle --file src/sample_1.py --about 'cache warmup'"
@@ -4868,6 +4876,7 @@ def test_find_pathlike_trailing_token_missing_recovers_when_query_remains(
     assert cli_main.FIND_TRAILING_PATH_MISSING_RECOVERED_WARNING in warning_codes
     assert captures["query"] == "make_response"
     decision = payload["decision"]
+    assert decision["target"] == {"kind": "file", "path": "src/flask/app.py"}
     assert (
         decision["suggested_next_command"]
         == "gloggur find make_response --file src/flask/app.py"
@@ -4982,11 +4991,11 @@ def test_find_about_rejects_conflicting_modes(args: list[str]) -> None:
 
 
 @pytest.mark.parametrize(
-    ("args", "expected_hits"),
+    ("args", "expected_hits", "expected_router_hits"),
     [
-        (["find", "needle", "--json"], 5),
-        (["find", "needle", "--json", "--top-k", "7"], 7),
-        (["find", "needle", "--json", "--max-snippets", "3"], 3),
+        (["find", "needle", "--json"], 1, 5),
+        (["find", "needle", "--json", "--top-k", "7"], 7, 7),
+        (["find", "needle", "--json", "--max-snippets", "3"], 3, 3),
     ],
 )
 def test_find_hit_limit_defaults_to_five_but_honors_overrides(
@@ -4994,6 +5003,7 @@ def test_find_hit_limit_defaults_to_five_but_honors_overrides(
     tmp_path: Path,
     args: list[str],
     expected_hits: int,
+    expected_router_hits: int,
 ) -> None:
     """find should default to five hits and respect explicit top-k/max-snippets overrides."""
     runner = CliRunner()
@@ -5006,14 +5016,35 @@ def test_find_hit_limit_defaults_to_five_but_honors_overrides(
     assert result.exit_code == 0, result.output
     payload = _parse_json_output(result.output)
     assert len(payload["hits"]) == expected_hits
-    assert captures["intent"]["max_snippets"] == expected_hits
+    assert captures["intent"]["max_snippets"] == expected_router_hits
+
+
+def test_find_non_decisive_default_keeps_five_hits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find should keep the existing five-hit default when the result is not decisive."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(
+        hits=tuple(_make_context_hit(index) for index in range(1, 11)),
+        summary_overrides={"decisive": False, "query_kind": "mixed", "next_action": "narrow_by_path"},
+    )
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(cli_main.cli, ["find", "needle", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = _parse_json_output(result.output)
+    assert len(payload["hits"]) == 5
+    assert captures["intent"]["max_snippets"] == 5
 
 
 def test_find_stream_emits_ndjson_hits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """find --stream should emit one slim NDJSON object per hit."""
+    """find --stream should emit the decisive top hit by default."""
     runner = CliRunner()
     captures: dict[str, object] = {}
     pack = _make_context_pack(hits=(_make_context_hit(1), _make_context_hit(2)))
@@ -5023,11 +5054,28 @@ def test_find_stream_emits_ndjson_hits(
 
     assert result.exit_code == 0, result.output
     lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
-    assert len(lines) == 2
+    assert len(lines) == 1
     assert lines[0]["rank"] == 1
     assert "decision" not in lines[0]
     assert lines[0]["start_byte"] == 10
     assert lines[0]["end_byte"] == 18
+
+
+def test_find_stream_keeps_explicit_hit_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """find --stream should preserve explicit hit-count overrides even when decisive."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    pack = _make_context_pack(hits=(_make_context_hit(1), _make_context_hit(2)))
+    _install_routed_search_runtime(monkeypatch, tmp_path, pack=pack, captures=captures)
+
+    result = runner.invoke(cli_main.cli, ["find", "needle", "--stream", "--top-k", "2"])
+
+    assert result.exit_code == 0, result.output
+    lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    assert len(lines) == 2
 
 
 def test_find_stream_rejects_debug_router_with_structured_error(
