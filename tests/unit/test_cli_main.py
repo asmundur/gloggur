@@ -38,6 +38,7 @@ from gloggur.indexer.cache import CacheConfig, CacheManager, CacheRecoveryError
 from gloggur.io_failures import StorageIOError
 from gloggur.models import EdgeRecord, IndexMetadata, Symbol, SymbolChunk
 from gloggur.search import attach_legacy_search_contract
+from gloggur.search.router.hints import extract_query_hints
 from gloggur.search.router.types import ContextHit, ContextPack, ContextSpan
 from gloggur.support_runtime import (
     SUPPORT_RUNTIME_DEGRADED_WARNING_CODE,
@@ -4501,6 +4502,7 @@ def _install_routed_search_runtime(
                 "semantic_assist_mode": getattr(intent, "semantic_assist_mode", None),
                 "language": getattr(intent, "language", None),
                 "path_prefix": getattr(intent, "path_prefix", None),
+                "path_filters": getattr(intent, "path_filters", None),
                 "max_files": getattr(intent, "max_files", None),
                 "max_snippets": getattr(intent, "max_snippets", None),
                 "time_budget_ms": getattr(intent, "time_budget_ms", None),
@@ -4792,6 +4794,62 @@ def test_find_unprocessed_rg_tokens_infer_directory_scope(
     assert captures["intent"]["path_prefix"] == str(source_dir.resolve())
 
 
+def test_find_infers_multiple_trailing_scope_operands_into_path_filters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Multiple trailing existing paths should become internal path filters."""
+    runner = CliRunner()
+    captures: dict[str, object] = {}
+    source_file = tmp_path / "src" / "flask" / "app.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("def make_response():\n    return None\n", encoding="utf8")
+    test_file = tmp_path / "tests" / "test_app.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text(
+        "def test_make_response():\n    assert make_response() is None\n",
+        encoding="utf8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _install_routed_search_runtime(
+        monkeypatch, tmp_path, pack=_make_context_pack(), captures=captures
+    )
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "make_response", "src/flask/app.py", "tests/test_app.py", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captures["query"] == "make_response"
+    assert captures["intent"]["path_prefix"] is None
+    assert captures["intent"]["path_filters"] == (
+        str(source_file.resolve()),
+        str(test_file.resolve()),
+    )
+
+
+def test_find_positional_scope_operands_do_not_leak_into_query_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Inferred trailing scope should be removed before query hint classification."""
+    scoped_dir = tmp_path / "src" / "django"
+    scoped_dir.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    resolution = cli_main._resolve_find_query_parts(
+        query_parts=("CommonMiddleware", "redirect", "src/django"),
+        file_path=None,
+        path_prefix=None,
+    )
+    hints = extract_query_hints(resolution.query)
+
+    assert resolution.query == "CommonMiddleware redirect"
+    assert resolution.path_prefix == "src/django"
+    assert hints.query_kind == "mixed"
+
+
 def test_find_explicit_scope_disables_implicit_trailing_path_inference(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4818,6 +4876,30 @@ def test_find_explicit_scope_disables_implicit_trailing_path_inference(
     assert captures["query"] == "AuthToken docs"
     assert captures["intent"]["path_prefix"] == str(explicit_target.resolve())
     assert "warning_codes" not in payload
+
+
+def test_find_mixed_existing_and_missing_scope_operands_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mixed existing/missing trailing scope operands should raise a structured error."""
+    runner = CliRunner()
+    existing = tmp_path / "src" / "flask" / "app.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("def make_response():\n    return None\n", encoding="utf8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        cli_main.cli,
+        ["find", "make_response", "src/flask/app.py", "tests/test_app.py", "--json"],
+    )
+
+    assert result.exit_code == 1
+    payload = _parse_json_output(result.output)
+    error = payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "find_positional_scope_ambiguous"
+    assert payload["failure_codes"] == ["find_positional_scope_ambiguous"]
 
 
 def test_find_after_double_dash_preserves_query_tokens_named_like_cli_options(
@@ -5155,6 +5237,7 @@ def test_find_matches_search_router_invocation_semantics(
         "semantic_query",
         "language",
         "path_prefix",
+        "path_filters",
         "max_files",
         "max_snippets",
         "time_budget_ms",

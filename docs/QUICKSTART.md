@@ -9,6 +9,22 @@ scripts/bootstrap_gloggur_env.sh
 scripts/gloggur status --json
 ```
 
+Fresh clones of this repo are `bootstrap_required` for Beads task reads. They
+ship tracked `.beads/issues.jsonl` and `.beads/clone-contract.json`, but not the
+local `.beads/dolt` database. Run `scripts/bootstrap_gloggur_env.sh` before
+using `bd ... --json` in a fresh clone.
+
+Manual Beads repair path:
+
+```bash
+bd init -p bd --json
+bd import -i .beads/issues.jsonl --json
+bd status --json
+```
+
+Machine consumers should read `.beads/clone-contract.json` instead of inferring
+readability from `.beads/metadata.json`.
+
 If `status --json` returns `"resume_decision": "reindex_required"`, run:
 
 ```bash

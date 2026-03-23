@@ -20,6 +20,8 @@ from gloggur.search.router.hints import extract_query_hints
 from gloggur.search.router.path_priors import (
     is_authority_path,
     is_docs_path,
+    is_source_code_path,
+    is_test_path,
     is_workflow_config_path,
     path_domain_score,
     should_treat_as_auxiliary,
@@ -691,16 +693,112 @@ def _select_hits_for_outcome(
     config: SearchRouterConfig,
 ) -> tuple[list[BackendHit], dict[str, int], dict[str, float], dict[str, bool], dict[str, float]]:
     if outcome.strategy == "hybrid":
-        return _adaptive_fusion_selection(
-            results_by_name=results_by_name,
-            intent=intent,
-            hints=hints,
-            config=config,
+        selected_hits, allocation, backend_weights, eligibility, proportional_shares = (
+            _adaptive_fusion_selection(
+                results_by_name=results_by_name,
+                intent=intent,
+                hints=hints,
+                config=config,
+            )
+        )
+        return (
+            _rebalance_mixed_code_hits(selected_hits, hints=hints),
+            allocation,
+            backend_weights,
+            eligibility,
+            proportional_shares,
         )
     if outcome.strategy == "suppressed":
         return [], {}, {}, {}, {}
     winner_result = results_by_name.get(outcome.strategy)
-    return list(winner_result.hits if winner_result is not None else ()), {}, {}, {}, {}
+    selected_hits = list(winner_result.hits if winner_result is not None else ())
+    return _rebalance_mixed_code_hits(selected_hits, hints=hints), {}, {}, {}, {}
+
+
+def _path_subtree_segments(path: str) -> tuple[str, ...]:
+    """Return path segments with generic repo structure removed."""
+    generic = {"src", "tests", "test", "python", "lib"}
+    return tuple(
+        segment.lower()
+        for segment in Path(path).parts
+        if segment and segment not in {"."} and segment.lower() not in generic
+    )
+
+
+def _test_relevance_score(*, implementation_path: str, candidate_path: str) -> tuple[int, float]:
+    """Rank nearby authoritative tests for mixed code queries."""
+    implementation_segments = set(_path_subtree_segments(implementation_path))
+    candidate_segments = set(_path_subtree_segments(candidate_path))
+    shared_segments = len(implementation_segments & candidate_segments)
+
+    implementation_stem = Path(implementation_path).stem.lower()
+    candidate_stem = Path(candidate_path).stem.lower()
+    normalized_candidate_stem = candidate_stem.removeprefix("test_").removesuffix("_test")
+    if implementation_stem and implementation_stem == normalized_candidate_stem:
+        shared_segments += 3
+    elif implementation_stem and implementation_stem in normalized_candidate_stem:
+        shared_segments += 2
+    return shared_segments, float(shared_segments)
+
+
+def _rebalance_mixed_code_hits(
+    selected_hits: list[BackendHit],
+    *,
+    hints: QueryHints,
+) -> list[BackendHit]:
+    """Promote an implementation plus nearby authoritative test for mixed code queries."""
+    if hints.query_domain != "code" or hints.query_kind != "mixed" or len(selected_hits) < 2:
+        return selected_hits
+
+    implementation_candidates = [
+        (index, hit)
+        for index, hit in enumerate(selected_hits)
+        if is_source_code_path(hit.path)
+        and not is_test_path(hit.path)
+        and hit.match_role != "import"
+    ]
+    if not implementation_candidates:
+        return selected_hits
+
+    implementation_index, implementation_hit = sorted(
+        implementation_candidates,
+        key=lambda item: (
+            -item[1].raw_score,
+            0 if item[1].match_role == "definition" else 1,
+            item[0],
+        ),
+    )[0]
+
+    ranked_tests = sorted(
+        (
+            (
+                *_test_relevance_score(
+                    implementation_path=implementation_hit.path,
+                    candidate_path=hit.path,
+                ),
+                hit.raw_score,
+                -index,
+                index,
+            )
+            for index, hit in enumerate(selected_hits)
+            if is_test_path(hit.path)
+        ),
+        reverse=True,
+    )
+    if not ranked_tests or ranked_tests[0][0] <= 0:
+        return selected_hits
+
+    test_index = ranked_tests[0][-1]
+    if test_index == implementation_index + 1 and implementation_index == 0:
+        return selected_hits
+
+    ordered_indices = [implementation_index, test_index]
+    ordered_indices.extend(
+        index
+        for index in range(len(selected_hits))
+        if index not in {implementation_index, test_index}
+    )
+    return [selected_hits[index] for index in ordered_indices]
 
 
 def _is_auxiliary_path(path: str, *, query_domain: str) -> bool:
@@ -883,6 +981,7 @@ def _preserve_selected_hit_order(
     return (
         strategy == "hybrid"
         or semantic_assist == "rerank"
+        or (query_domain == "code" and query_kind == "mixed")
         or (
             strategy in {"exact", "symbol"}
             and _definition_ordering_query(
@@ -917,6 +1016,7 @@ def _decisive_non_semantic_result(
     backend_thresholds: dict[str, dict[str, object]],
     query_kind: str,
     query_domain: str,
+    literal_query: bool = False,
 ) -> bool:
     if outcome.strategy not in {"exact", "symbol"} or not hits:
         return False
@@ -930,6 +1030,16 @@ def _decisive_non_semantic_result(
         return False
 
     top_score = hits[0].score
+    if query_domain == "code" and query_kind == "mixed" and not literal_query:
+        if not is_source_code_path(hits[0].path) or is_test_path(hits[0].path):
+            return False
+        if len(hits) == 1:
+            return top_score >= 0.93
+        second_score = hits[1].score
+        if hits[0].path != hits[1].path:
+            return False
+        return top_score >= 0.92 and top_score - second_score >= 0.08
+
     if query_domain != "code" and is_authority_path(hits[0].path, query_domain=query_domain):
         if len(hits) == 1:
             return top_score >= 0.82
@@ -957,6 +1067,7 @@ def _resolve_next_action(
     query_kind: str,
     query_domain: str,
     semantic_assist: str,
+    literal_query: bool = False,
 ) -> tuple[bool, str, str | None]:
     if semantic_assist == "semantic_rescue" and hits:
         return True, "open_hit_1", None
@@ -968,6 +1079,7 @@ def _resolve_next_action(
         backend_thresholds=backend_thresholds,
         query_kind=query_kind,
         query_domain=query_domain,
+        literal_query=literal_query,
     )
     if decisive:
         return True, "open_hit_1", None
@@ -1383,6 +1495,7 @@ class SearchRouter:
                 backend_thresholds=lexical_backend_thresholds,
                 query_kind=hints.query_kind,
                 query_domain=hints.query_domain,
+                literal_query=hints.literal_first or bool(hints.verbatim_literal),
             )
             lexical_auxiliary_only = _lexical_hits_are_auxiliary_only(
                 hits=lexical_packed_hits,
@@ -1727,6 +1840,7 @@ class SearchRouter:
             query_kind=hints.query_kind,
             query_domain=hints.query_domain,
             semantic_assist=semantic_assist,
+            literal_query=hints.literal_first or bool(hints.verbatim_literal),
         )
         summary: dict[str, object] = {
             "strategy": outcome.strategy,

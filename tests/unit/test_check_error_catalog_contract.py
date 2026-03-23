@@ -80,6 +80,7 @@ def test_error_catalog_contract_passes_when_required_headings_and_codes_exist(
                 "`find_stream_contract_conflict`",
                 "`find_about_contract_conflict`",
                 "`find_trailing_path_missing`",
+                "`find_positional_scope_ambiguous`",
                 "## Index Failure Codes",
                 "`decode_error`",
                 "`read_error`",

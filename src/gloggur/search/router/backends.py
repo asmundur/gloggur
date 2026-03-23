@@ -188,11 +188,11 @@ def _path_allowed(
     return True
 
 
-def _exact_ranking_adjustment(path: str, matched_line: str, *, query_domain: str) -> float:
+def _exact_ranking_adjustment(path: str, matched_line: str, *, hints: QueryHints) -> float:
     adjustment = 0.0
     if _DEFINITION_LINE_RE.search(matched_line):
         adjustment += 0.10
-    if query_domain == "docs_policy":
+    if hints.query_domain == "docs_policy":
         if is_docs_authority_path(path):
             adjustment += 0.12
         elif is_docs_path(path):
@@ -203,7 +203,7 @@ def _exact_ranking_adjustment(path: str, matched_line: str, *, query_domain: str
             adjustment -= 0.08
         elif is_source_code_path(path):
             adjustment -= 0.05
-    elif query_domain == "workflow_config":
+    elif hints.query_domain == "workflow_config":
         if is_workflow_config_path(path):
             adjustment += 0.12
         elif is_docs_authority_path(path):
@@ -215,14 +215,19 @@ def _exact_ranking_adjustment(path: str, matched_line: str, *, query_domain: str
         elif is_source_code_path(path):
             adjustment -= 0.04
     else:
+        source_bonus = 0.08
+        test_adjustment = -0.05
+        if hints.query_kind == "mixed":
+            source_bonus = 0.06
+            test_adjustment = 0.04
         if is_source_code_path(path):
-            adjustment += 0.08
+            adjustment += source_bonus
         if is_docs_path(path):
             adjustment -= 0.08
         if is_workflow_config_path(path):
             adjustment -= 0.10
         if is_test_path(path):
-            adjustment -= 0.05
+            adjustment += test_adjustment
     return adjustment
 
 
@@ -342,12 +347,13 @@ def _final_exact_hits(
                 ),
             )[:top_k]
         )
-    return tuple(
-        sorted(
-            ordered_hits,
-            key=lambda item: (-item.raw_score, item.path, item.start_line),
-        )[:top_k]
+    ranked_hits = sorted(
+        ordered_hits,
+        key=lambda item: (-item.raw_score, item.path, item.start_line),
     )
+    if hints.query_domain == "code" and hints.query_kind == "mixed":
+        ranked_hits = _rebalance_mixed_code_exact_hits(ranked_hits)
+    return tuple(ranked_hits[:top_k])
 
 
 def _sorted_exact_hits(
@@ -360,6 +366,86 @@ def _sorted_exact_hits(
             key=lambda item: (-item.raw_score, item.path, item.start_line),
         )[:top_k]
     )
+
+
+def _path_subtree_tokens(path: str) -> tuple[str, ...]:
+    generic = {"src", "tests", "test", "python", "lib"}
+    return tuple(
+        segment.lower()
+        for segment in Path(path).parts
+        if segment and segment not in {"."} and segment.lower() not in generic
+    )
+
+
+def _mixed_code_test_relevance(*, implementation_path: str, candidate_path: str) -> int:
+    implementation_segments = set(_path_subtree_tokens(implementation_path))
+    candidate_segments = set(_path_subtree_tokens(candidate_path))
+    shared_segments = len(implementation_segments & candidate_segments)
+
+    implementation_stem = Path(implementation_path).stem.lower()
+    candidate_stem = Path(candidate_path).stem.lower()
+    normalized_candidate_stem = candidate_stem.removeprefix("test_").removesuffix("_test")
+    if implementation_stem and implementation_stem == normalized_candidate_stem:
+        shared_segments += 3
+    elif implementation_stem and implementation_stem in normalized_candidate_stem:
+        shared_segments += 2
+    return shared_segments
+
+
+def _rebalance_mixed_code_exact_hits(ordered_hits: list[BackendHit]) -> list[BackendHit]:
+    """Promote one implementation hit plus one nearby test for mixed exact queries."""
+    if len(ordered_hits) < 2:
+        return ordered_hits
+
+    implementation_candidates = [
+        (index, hit)
+        for index, hit in enumerate(ordered_hits)
+        if is_source_code_path(hit.path)
+        and not is_test_path(hit.path)
+        and hit.match_role != "import"
+    ]
+    if not implementation_candidates:
+        return ordered_hits
+
+    implementation_index, implementation_hit = sorted(
+        implementation_candidates,
+        key=lambda item: (
+            -item[1].raw_score,
+            0 if item[1].match_role == "definition" else 1,
+            item[0],
+        ),
+    )[0]
+
+    ranked_tests = sorted(
+        (
+            (
+                _mixed_code_test_relevance(
+                    implementation_path=implementation_hit.path,
+                    candidate_path=hit.path,
+                ),
+                hit.raw_score,
+                -index,
+                index,
+            )
+            for index, hit in enumerate(ordered_hits)
+            if is_test_path(hit.path)
+        ),
+        reverse=True,
+    )
+    if not ranked_tests or ranked_tests[0][0] <= 0:
+        return ordered_hits
+
+    test_index = ranked_tests[0][-1]
+    if implementation_index == 0 and test_index == 1:
+        return ordered_hits
+
+    ordered_indices = [implementation_index, test_index]
+    ordered_indices.extend(
+        index
+        for index in range(len(ordered_hits))
+        if index not in {implementation_index, test_index}
+    )
+    return [ordered_hits[index] for index in ordered_indices]
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -566,7 +652,7 @@ def _run_exact_backend_fallback_scan(
                         + _exact_ranking_adjustment(
                             absolute_path,
                             source_line,
-                            query_domain=hints.query_domain,
+                            hints=hints,
                         ),
                     ),
                 )
@@ -795,7 +881,7 @@ def run_exact_backend(
                         + _exact_ranking_adjustment(
                             absolute_path,
                             parts[2].strip(),
-                            query_domain=hints.query_domain,
+                            hints=hints,
                         ),
                     ),
                 )
@@ -876,6 +962,12 @@ def run_exact_backend(
             ),
         )[0].path
         anchor_parent = str(Path(anchor_path).parent)
+        parent_hit_counts: dict[str, int] = {}
+        for candidate in hit_map.values():
+            parent = str(Path(candidate.path).parent)
+            if parent in {"", "."}:
+                continue
+            parent_hit_counts[parent] = parent_hit_counts.get(parent, 0) + 1
         for key, hit in list(hit_map.items()):
             score = hit.raw_score
             file_pattern_count = len(file_pattern_map.get(hit.path, ()))
@@ -884,17 +976,30 @@ def run_exact_backend(
                 score += min(0.16, 0.05 * (file_pattern_count - 1))
             if hit_pattern_count > 1:
                 score += min(0.08, 0.03 * (hit_pattern_count - 1))
+            if hints.query_domain == "code" and hints.query_kind == "mixed":
+                if hit.match_role == "import":
+                    score -= 0.12
+                elif hit.match_role == "definition" and not is_test_path(hit.path):
+                    score -= 0.02
+                elif hit.match_role == "reference" and is_source_code_path(hit.path):
+                    score += 0.03
+                if is_test_path(hit.path):
+                    score += 0.04
             if (
                 not _definition_ordering_enabled(hints)
                 and hints.query_domain == "code"
                 and anchor_parent not in {"", "."}
                 and str(Path(hit.path).parent) == anchor_parent
+                and parent_hit_counts.get(anchor_parent, 0) >= 2
             ):
-                score += 0.05
+                score += 0.02 if hints.query_kind == "mixed" else 0.05
             if not _definition_ordering_enabled(hints) and is_authority_path(
                 hit.path, query_domain=hints.query_domain
             ):
-                score += 0.03
+                authority_bonus = 0.03
+                if hints.query_domain == "code" and hints.query_kind == "mixed":
+                    authority_bonus = 0.01
+                score += authority_bonus
             hit_map[key] = replace(hit, raw_score=max(0.0, min(1.0, score)))
 
     hits = _final_exact_hits(hit_map, hints=hints, top_k=top_k)

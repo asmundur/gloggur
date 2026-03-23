@@ -74,8 +74,14 @@ gloggur find "how to decode auth token"
 # slim structured output for agents
 gloggur find "pkg.module.Handler.handle" --json
 
-# natural grep-like narrowing with a trailing path
-gloggur find make_response src/flask/app.py
+# natural grep-like narrowing with trailing scope paths
+gloggur find make_response src/flask/app.py tests/test_app.py
+
+# identifier-first lookup through find
+gloggur find "pkg.module.Handler.handle" --search-mode by_fqname --json
+
+# direct path lookup through find
+gloggur find "src/services" --search-mode by_path --json
 
 # combine a ripgrep-style lexical query with bounded semantic disambiguation
 gloggur find rg -S -g '*.py' AuthToken src/ --about "cache warmup startup state" --json
@@ -156,10 +162,12 @@ By default, `find --json` and `find --stream` now emit a single top hit when
 `decision.status=decisive`. Pass `--top-k` or `--max-snippets` explicitly when
 you want wider result sets even on decisive outcomes.
 
-`find` accepts grep-like token sequences directly. If the final positional token
-is an existing file or directory, it is treated like `--file` / `--path-prefix`
-automatically. If you need a literal query token that collides with a Glöggur
-option name, quote it or place it after `--`.
+`find` accepts grep-like token sequences directly. If one or more trailing
+positional tokens are existing files or directories, they are treated like
+implicit `--file` / `--path-prefix` scope filters automatically. Mixed
+existing/missing trailing scope operands now fail closed with a structured
+error instead of silently broadening the query. If you need a literal query
+token that collides with a Glöggur option name, quote it or place it after `--`.
 
 Use `search --json` when you need the full ContextPack v2 contract. Search results include:
 

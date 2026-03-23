@@ -146,6 +146,11 @@ Fields:
   - Meaning: the final positional argument looked like a file or directory path, but it did not exist in the active workspace.
   - Retryability: retry after fixing the path or making the scope explicit.
   - Operator action: pass an existing trailing path, or use `--file` / `--path-prefix` with a valid repo-relative path.
+- `find_positional_scope_ambiguous`
+  - Command(s): `find`.
+  - Meaning: multiple trailing positional scope operands were ambiguous or lossy because one or more path-like operands did not exist.
+  - Retryability: retry after fixing the scope paths or moving non-scope tokens back into the query.
+  - Operator action: make every trailing scope path exist, or move path-like query text before the trailing scope operands and use `--file` / `--path-prefix` explicitly when needed.
 - `find_stream_contract_conflict`
   - Command(s): `find`.
   - Meaning: `--stream` was combined with `--debug-router`.

@@ -635,6 +635,16 @@ CLI_FAILURE_REMEDIATION: dict[str, list[str]] = {
             "or change into the repo first."
         ),
     ],
+    "find_positional_scope_ambiguous": [
+        (
+            "Make every trailing positional scope path exist, for example "
+            "`gloggur find make_response src/flask/app.py tests/test_app.py`."
+        ),
+        (
+            "If a path-like token is part of the query text, move it before the "
+            "trailing scope paths or make scope explicit with `--file` / `--path-prefix`."
+        ),
+    ],
     "find_stream_contract_conflict": [
         "Disable --stream when requesting `--debug-router` output from `gloggur find`.",
     ],
@@ -6298,12 +6308,23 @@ class FindTrailingPathRecovery:
 
 
 @dataclass(frozen=True)
+class FindPositionalScopeOperand:
+    """Parsed trailing positional scope operand for `find`."""
+
+    raw_token: str
+    exists: bool
+    scope_kind: str | None = None
+    scope_value: str | None = None
+
+
+@dataclass(frozen=True)
 class FindQueryResolution:
     """Normalized find query text with optional inferred scope/recovery."""
 
     query: str
     file_path: str | None
     path_prefix: str | None
+    path_filters: tuple[str, ...] = ()
     trailing_path_recovery: FindTrailingPathRecovery | None = None
 
 
@@ -6370,6 +6391,61 @@ def _resolve_find_scope_path(raw_path: str) -> tuple[str, str] | None:
     return None
 
 
+def _probe_find_positional_scope_operand(token: str) -> FindPositionalScopeOperand | None:
+    """Classify one trailing `find` token as scope, missing scope, or plain query text."""
+    if _looks_find_verbatim_literal_token(token):
+        return None
+    scope = _resolve_find_scope_path(token)
+    if scope is not None:
+        return FindPositionalScopeOperand(
+            raw_token=token,
+            exists=True,
+            scope_kind=scope[0],
+            scope_value=scope[1],
+        )
+    if _looks_find_pathlike(token):
+        return FindPositionalScopeOperand(raw_token=token, exists=False)
+    return None
+
+
+def _collect_find_positional_scope_operands(
+    parts: Sequence[str],
+) -> tuple[int, tuple[FindPositionalScopeOperand, ...]]:
+    """Collect consecutive trailing positional scope operands."""
+    operands: list[FindPositionalScopeOperand] = []
+    cutoff = len(parts)
+    for index in range(len(parts) - 1, -1, -1):
+        operand = _probe_find_positional_scope_operand(parts[index])
+        if operand is None:
+            break
+        operands.append(operand)
+        cutoff = index
+    operands.reverse()
+    return cutoff, tuple(operands)
+
+
+def _build_find_positional_scope_ambiguity_error(
+    *,
+    operands: Sequence[FindPositionalScopeOperand],
+) -> CLIContractError:
+    """Build a structured failure for ambiguous multi-operand positional scope misuse."""
+    operand_labels = ", ".join(repr(operand.raw_token) for operand in operands)
+    existing = [repr(operand.raw_token) for operand in operands if operand.exists]
+    missing = [repr(operand.raw_token) for operand in operands if not operand.exists]
+    detail = [
+        f"Trailing positional scope operands are ambiguous: {operand_labels}.",
+        "When `gloggur find` uses rg-like trailing scope, every trailing path operand must exist.",
+    ]
+    if existing:
+        detail.append(f"existing={', '.join(existing)}")
+    if missing:
+        detail.append(f"missing={', '.join(missing)}")
+    return CLIContractError(
+        " ".join(detail),
+        error_code="find_positional_scope_ambiguous",
+    )
+
+
 def _resolve_find_query_parts(
     *,
     query_parts: Sequence[str],
@@ -6383,31 +6459,51 @@ def _resolve_find_query_parts(
 
     resolved_file_path = file_path
     resolved_path_prefix = path_prefix
+    resolved_path_filters: tuple[str, ...] = ()
     trailing_path_recovery: FindTrailingPathRecovery | None = None
     if resolved_file_path is None and resolved_path_prefix is None:
-        trailing = parts[-1]
-        if not _looks_find_verbatim_literal_token(trailing):
-            scope = _resolve_find_scope_path(trailing)
-            if scope is not None:
-                parts = parts[:-1]
-                scope_kind, scope_value = scope
-                if scope_kind == "file":
-                    resolved_file_path = scope_value
-                else:
-                    resolved_path_prefix = scope_value
-            elif _looks_find_pathlike(trailing):
-                remaining_parts = parts[:-1]
-                if remaining_parts:
+        cutoff, operands = _collect_find_positional_scope_operands(parts)
+        if operands:
+            trailing_operands = list(operands)
+            remaining_parts = parts[:cutoff]
+            if len(trailing_operands) == 1:
+                operand = trailing_operands[0]
+                if operand.exists:
                     parts = remaining_parts
-                    trailing_path_recovery = FindTrailingPathRecovery(ignored_token=trailing)
+                    if operand.scope_kind == "file":
+                        resolved_file_path = operand.scope_value
+                    else:
+                        resolved_path_prefix = operand.scope_value
                 else:
-                    raise CLIContractError(
-                        (
-                            f"Trailing argument {trailing!r} looks like a file or directory "
-                            "path, but it does not exist in the current workspace."
-                        ),
-                        error_code="find_trailing_path_missing",
+                    if remaining_parts:
+                        parts = remaining_parts
+                        trailing_path_recovery = FindTrailingPathRecovery(
+                            ignored_token=operand.raw_token
+                        )
+                    else:
+                        raise CLIContractError(
+                            (
+                                f"Trailing argument {operand.raw_token!r} looks like a file or "
+                                "directory path, but it does not exist in the current workspace."
+                            ),
+                            error_code="find_trailing_path_missing",
+                        )
+            else:
+                if any(not operand.exists for operand in trailing_operands):
+                    raise _build_find_positional_scope_ambiguity_error(
+                        operands=trailing_operands,
                     )
+                parts = remaining_parts
+                seen_filters: set[str] = set()
+                inferred_filters: list[str] = []
+                for operand in trailing_operands:
+                    if not isinstance(operand.scope_value, str) or not operand.scope_value:
+                        continue
+                    if operand.scope_value in seen_filters:
+                        continue
+                    seen_filters.add(operand.scope_value)
+                    inferred_filters.append(operand.scope_value)
+                resolved_path_filters = tuple(inferred_filters)
 
     query = " ".join(parts).strip()
     if not query:
@@ -6416,6 +6512,7 @@ def _resolve_find_query_parts(
         query=query,
         file_path=resolved_file_path,
         path_prefix=resolved_path_prefix,
+        path_filters=resolved_path_filters,
         trailing_path_recovery=trailing_path_recovery,
     )
 
@@ -6967,6 +7064,7 @@ def _execute_search_command(
     debug_router: bool,
     kind: str | None,
     file_path: str | None,
+    path_filters: Sequence[str] = (),
     search_mode: str,
     top_k: int,
     context_radius: int,
@@ -7086,6 +7184,17 @@ def _execute_search_command(
         repo_root=router_repo_root,
         raw_path=resolved_path_prefix,
     )
+    routing_path_filters = tuple(
+        resolved
+        for resolved in (
+            _resolve_search_path_filter_for_routing(
+                repo_root=router_repo_root,
+                raw_path=candidate,
+            )
+            for candidate in path_filters
+        )
+        if resolved
+    )
     intent = SearchIntent(
         search_mode=normalized_search_mode,
         semantic_query=normalized_semantic_query,
@@ -7094,6 +7203,7 @@ def _execute_search_command(
         semantic_assist_mode=semantic_assist_mode,
         language=language,
         path_prefix=routing_path_prefix,
+        path_filters=routing_path_filters,
         max_files=max_files,
         max_snippets=resolved_max_snippets,
         time_budget_ms=time_budget_ms,
@@ -7664,6 +7774,7 @@ def search(
         debug_router=debug_router,
         kind=kind,
         file_path=file_path,
+        path_filters=(),
         search_mode=search_mode,
         top_k=top_k,
         context_radius=context_radius,
@@ -7869,7 +7980,13 @@ def find(
     stream: bool,
     allow_tool_version_drift: bool,
 ) -> None:
-    """Find agent-friendly code context with minimal output overhead."""
+    """Find agent-friendly code context with minimal output overhead.
+
+    Positional trailing files/directories behave like ripgrep scope operands:
+    `gloggur find PATTERN path1 path2` narrows search to those existing paths.
+    Use `--file` / `--path-prefix` for explicit scope, `--search-mode by_fqname`
+    for identifier-first lookup, and `--search-mode by_path` for direct path search.
+    """
     explicit_hit_limit = _find_hit_limit_overridden()
     resolution = _resolve_find_query_parts(
         query_parts=query_parts,
@@ -7895,6 +8012,7 @@ def find(
         debug_router=debug_router and as_json and not stream,
         kind=kind,
         file_path=resolution.file_path,
+        path_filters=resolution.path_filters,
         search_mode=search_mode,
         top_k=top_k,
         context_radius=context_radius,

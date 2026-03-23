@@ -1228,6 +1228,108 @@ def test_cli_find_verbatim_literal_miss_returns_no_match_and_about_can_rescue(
             assert hits[0]["path"] == "django/utils/http.py"
 
 
+def test_cli_find_multiple_trailing_scope_paths_become_internal_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/flask/app.py": (
+                    "def make_response(value):\n"
+                    "    return value\n"
+                ),
+                "tests/test_app.py": (
+                    "def test_make_response():\n"
+                    "    assert make_response('ok') == 'ok'\n"
+                ),
+                "docs/reference.md": "make_response docs\n",
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        monkeypatch.chdir(repo)
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            [
+                "find",
+                "make_response",
+                "src/flask/app.py",
+                "tests/test_app.py",
+                "--json",
+                "--debug-router",
+                "--top-k",
+                "5",
+            ],
+            env=env,
+        )
+
+        assert result.exit_code == 0, result.output
+        payload = _parse_json_output(result.output)
+        debug = payload.get("debug")
+        assert isinstance(debug, dict)
+        constraints = debug.get("constraints")
+        assert isinstance(constraints, dict)
+        assert constraints["path_prefix"] is None
+        assert constraints["path_filters"] == [
+            str(repo / "src" / "flask" / "app.py"),
+            str(repo / "tests" / "test_app.py"),
+        ]
+        paths = {item["path"] for item in payload["hits"]}
+        assert paths <= {"src/flask/app.py", "tests/test_app.py"}
+
+
+def test_cli_find_mixed_existing_and_missing_scope_paths_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    with TestFixtures() as fixtures:
+        repo = fixtures.create_temp_repo(
+            {
+                "src/flask/app.py": (
+                    "def make_response(value):\n"
+                    "    return value\n"
+                ),
+            }
+        )
+        cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
+        _write_fallback_marker(cache_dir)
+        env = {
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
+        monkeypatch.chdir(repo)
+
+        index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
+        assert index_result.exit_code == 0, index_result.output
+
+        result = runner.invoke(
+            cli,
+            [
+                "find",
+                "make_response",
+                "src/flask/app.py",
+                "tests/test_app.py",
+                "--json",
+            ],
+            env=env,
+        )
+
+        assert result.exit_code == 1
+        payload = _parse_json_output(result.output)
+        error = payload["error"]
+        assert isinstance(error, dict)
+        assert error["code"] == "find_positional_scope_ambiguous"
+
+
 def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
     """Low-signal search should return empty bounded evidence with deterministic metadata."""
     runner = CliRunner()

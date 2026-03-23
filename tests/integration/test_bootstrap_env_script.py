@@ -54,8 +54,7 @@ def _run_bootstrap(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["/bin/bash", str(script_path), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
         cwd=str(cwd),
@@ -154,6 +153,100 @@ esac
     )
     wrapper.chmod(0o755)
     return log_file, state_file
+
+
+def _prepare_fake_beads_export(repo_root: Path, *, issue_count: int = 3) -> Path:
+    beads_dir = repo_root / ".beads"
+    beads_dir.mkdir(parents=True, exist_ok=True)
+    issues_path = beads_dir / "issues.jsonl"
+    lines = [
+        json.dumps({"id": f"bd-test-{index}", "title": f"issue {index}"})
+        for index in range(issue_count)
+    ]
+    issues_path.write_text("\n".join(lines) + "\n", encoding="utf8")
+    return issues_path
+
+
+def _prepare_fake_bd(repo_root: Path) -> tuple[Path, Path, Path]:
+    bin_dir = repo_root / "fake-bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    log_file = repo_root / "bd-invocations.log"
+    state_file = repo_root / "bd-ready.flag"
+    wrapper = bin_dir / "bd"
+    wrapper_template = """#!/usr/bin/env bash
+set -euo pipefail
+
+log_file="${BOOTSTRAP_BD_LOG_FILE:-__BOOTSTRAP_BD_LOG_FILE__}"
+state_file="${BOOTSTRAP_BD_STATE_FILE:-__BOOTSTRAP_BD_STATE_FILE__}"
+
+if [[ -n "$log_file" ]]; then
+  printf '%s\\n' "$*" >> "$log_file"
+fi
+
+command_name="${1:-}"
+shift || true
+
+case "$command_name" in
+  status)
+    if [[ -f "$state_file" ]]; then
+      printf '{"summary":{"total_issues":1}}\\n'
+      exit 0
+    fi
+    printf 'Error: no beads database found\\n\\n' >&2
+    printf 'Found JSONL file: %s/.beads/issues.jsonl\\n' "$(pwd)" >&2
+    printf 'This looks like a fresh clone or JSONL-only project.\\n' >&2
+    exit 1
+    ;;
+  init)
+    if [[ "${BOOTSTRAP_BD_INIT_FAIL:-0}" == "1" ]]; then
+      printf '%s\\n' "${BOOTSTRAP_BD_INIT_FAIL_MESSAGE:-forced init failure}" >&2
+      exit 1
+    fi
+    touch "$state_file"
+    printf '{"ok":true}\\n'
+    ;;
+  import)
+    if [[ "${BOOTSTRAP_BD_IMPORT_FAIL:-0}" == "1" ]]; then
+      printf '%s\\n' "${BOOTSTRAP_BD_IMPORT_FAIL_MESSAGE:-forced import failure}" >&2
+      exit 1
+    fi
+    if [[ "${1:-}" != "-i" || $# -lt 2 ]]; then
+      printf 'missing import input\\n' >&2
+      exit 2
+    fi
+    input_file="$2"
+    count="$(wc -l < "$input_file" | tr -d ' ')"
+    printf '%s' "$count" > "${state_file}.count"
+    printf 'Import complete: %s created, 0 updated\\n' "$count"
+    ;;
+  count)
+    if [[ "${BOOTSTRAP_BD_COUNT_FAIL:-0}" == "1" ]]; then
+      printf '%s\\n' "${BOOTSTRAP_BD_COUNT_FAIL_MESSAGE:-forced count failure}" >&2
+      exit 1
+    fi
+    if [[ -n "${BOOTSTRAP_BD_COUNT_OVERRIDE:-}" ]]; then
+      count="${BOOTSTRAP_BD_COUNT_OVERRIDE}"
+    elif [[ -f "${state_file}.count" ]]; then
+      count="$(cat "${state_file}.count")"
+    else
+      count="0"
+    fi
+    printf '{"count":%s}\\n' "$count"
+    ;;
+  *)
+    printf 'unsupported bd command: %s\\n' "$command_name" >&2
+    exit 1
+    ;;
+esac
+"""
+    wrapper.write_text(
+        wrapper_template.replace("__BOOTSTRAP_BD_LOG_FILE__", str(log_file)).replace(
+            "__BOOTSTRAP_BD_STATE_FILE__", str(state_file)
+        ),
+        encoding="utf8",
+    )
+    wrapper.chmod(0o755)
+    return bin_dir, log_file, state_file
 
 
 def _write_legacy_global_wrapper(wrapper_path: Path) -> None:
@@ -399,6 +492,189 @@ def test_bootstrap_fails_when_startup_watch_payload_is_contradictory(tmp_path: P
     assert invocations == ["status --json", "status --json", "watch status --json"]
 
 
+def test_bootstrap_bootstraps_beads_from_tracked_jsonl_on_fresh_clone(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    gloggur_log_file, gloggur_state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    gloggur_state_file.write_text("ready", encoding="utf8")
+    _prepare_fake_beads_export(repo_root, issue_count=4)
+    fake_bd_dir, bd_log_file, _ = _prepare_fake_bd(repo_root)
+
+    env = _base_bootstrap_env(tmp_path)
+    env["PATH"] = f"{fake_bd_dir}:{env['PATH']}"
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(gloggur_log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(gloggur_state_file)
+    env["BOOTSTRAP_BD_LOG_FILE"] = str(bd_log_file)
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Beads readiness: bootstrapped:4" in completed.stdout
+    assert bd_log_file.read_text(encoding="utf8").splitlines() == [
+        "status --json",
+        "init -p bd --json",
+        "import -i .beads/issues.jsonl --json",
+        "status --json",
+        "count --json",
+    ]
+
+
+def test_bootstrap_skips_beads_bootstrap_when_bd_status_is_already_ready(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    gloggur_log_file, gloggur_state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    gloggur_state_file.write_text("ready", encoding="utf8")
+    _prepare_fake_beads_export(repo_root, issue_count=2)
+    fake_bd_dir, bd_log_file, bd_state_file = _prepare_fake_bd(repo_root)
+    bd_state_file.write_text("ready", encoding="utf8")
+
+    env = _base_bootstrap_env(tmp_path)
+    env["PATH"] = f"{fake_bd_dir}:{env['PATH']}"
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(gloggur_log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(gloggur_state_file)
+    env["BOOTSTRAP_BD_LOG_FILE"] = str(bd_log_file)
+    env["BOOTSTRAP_BD_STATE_FILE"] = str(bd_state_file)
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Beads readiness: ready" in completed.stdout
+    assert bd_log_file.read_text(encoding="utf8").splitlines() == ["status --json"]
+
+
+def test_bootstrap_fails_loudly_when_bd_is_missing_for_beads_enabled_repo(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    gloggur_log_file, gloggur_state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    gloggur_state_file.write_text("ready", encoding="utf8")
+    _prepare_fake_beads_export(repo_root, issue_count=1)
+
+    env = _base_bootstrap_env(tmp_path)
+    env["PATH"] = "/usr/bin:/bin"
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(gloggur_log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(gloggur_state_file)
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 1
+    assert "Beads readiness check failed: bd command not found." in completed.stderr
+
+
+def test_bootstrap_fails_loudly_when_beads_import_fails(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    gloggur_log_file, gloggur_state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    gloggur_state_file.write_text("ready", encoding="utf8")
+    _prepare_fake_beads_export(repo_root, issue_count=5)
+    fake_bd_dir, bd_log_file, _ = _prepare_fake_bd(repo_root)
+
+    env = _base_bootstrap_env(tmp_path)
+    env["PATH"] = f"{fake_bd_dir}:{env['PATH']}"
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(gloggur_log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(gloggur_state_file)
+    env["BOOTSTRAP_BD_LOG_FILE"] = str(bd_log_file)
+    env["BOOTSTRAP_BD_IMPORT_FAIL"] = "1"
+    env["BOOTSTRAP_BD_IMPORT_FAIL_MESSAGE"] = "import exploded"
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 1
+    assert "Beads bootstrap failed while running: bd import -i .beads/issues.jsonl --json" in (
+        completed.stderr
+    )
+    assert "import exploded" in completed.stderr
+    assert bd_log_file.read_text(encoding="utf8").splitlines() == [
+        "status --json",
+        "init -p bd --json",
+        "import -i .beads/issues.jsonl --json",
+    ]
+
+
+def test_bootstrap_fails_loudly_when_imported_beads_count_mismatches_jsonl(tmp_path: Path) -> None:
+    repo_root, script_path = _prepare_temp_repo(tmp_path)
+    source_workspace = _prepare_seed_venv_workspace(tmp_path)
+    gloggur_log_file, gloggur_state_file = _prepare_fake_gloggur_wrapper(repo_root)
+    gloggur_state_file.write_text("ready", encoding="utf8")
+    _prepare_fake_beads_export(repo_root, issue_count=3)
+    fake_bd_dir, bd_log_file, _ = _prepare_fake_bd(repo_root)
+
+    env = _base_bootstrap_env(tmp_path)
+    env["PATH"] = f"{fake_bd_dir}:{env['PATH']}"
+    env["BOOTSTRAP_GLOGGUR_LOG_FILE"] = str(gloggur_log_file)
+    env["BOOTSTRAP_GLOGGUR_STATE_FILE"] = str(gloggur_state_file)
+    env["BOOTSTRAP_BD_LOG_FILE"] = str(bd_log_file)
+    env["BOOTSTRAP_BD_COUNT_OVERRIDE"] = "99"
+
+    completed = _run_bootstrap(
+        script_path=script_path,
+        args=[
+            "--skip-install",
+            "--seed-venv-from",
+            str(source_workspace),
+            "--seed-venv-mode",
+            "copy",
+        ],
+        env=env,
+        cwd=repo_root,
+    )
+
+    assert completed.returncode == 1
+    assert "imported issue count does not match tracked .beads/issues.jsonl" in completed.stderr
+    assert "Expected count: 3" in completed.stderr
+    assert "Actual count: 99" in completed.stderr
+    assert bd_log_file.read_text(encoding="utf8").splitlines() == [
+        "status --json",
+        "init -p bd --json",
+        "import -i .beads/issues.jsonl --json",
+        "status --json",
+        "count --json",
+    ]
+
+
 def test_bootstrap_rewrites_stale_global_wrapper(tmp_path: Path) -> None:
     repo_root, script_path = _prepare_temp_repo(tmp_path)
     source_workspace = _prepare_seed_venv_workspace(tmp_path)
@@ -470,8 +746,7 @@ def test_rewritten_global_wrapper_runs_from_external_cwd(tmp_path: Path) -> None
     external_cwd.mkdir()
     status = subprocess.run(
         [str(wrapper_path), "status", "--json"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=env,
         cwd=str(external_cwd),
@@ -558,8 +833,7 @@ def test_rewritten_global_wrapper_fails_deterministically_for_invalid_install_ro
     run_env["GLOGGUR_INSTALL_ROOT"] = str(invalid_root)
     status = subprocess.run(
         [str(wrapper_path), "status", "--json"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         env=run_env,
         cwd=str(tmp_path),

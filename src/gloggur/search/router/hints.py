@@ -42,6 +42,23 @@ _NATURAL_LANGUAGE_HINTS = {
     "behavior",
     "behaviour",
 }
+_BEHAVIOR_PROCESS_HINTS = {
+    "absolute",
+    "alias",
+    "config",
+    "configs",
+    "footer",
+    "forwarded",
+    "format",
+    "order",
+    "parity",
+    "preserve",
+    "redirect",
+    "tuple",
+    "uri",
+    "workflow",
+    "workflows",
+}
 _IDENTIFIERISH_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:[.:#][A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?$")
 _LITERAL_FIRST_PUNCTUATION = set("[](){}<>/=+-")
 _WORKFLOW_PHRASES = (
@@ -166,6 +183,10 @@ def _classify_query_kind(
         for token in _TOKEN_RE.findall(stripped_query)
         if len(token) >= 3 and token.lower() not in _SYMBOL_STOPWORDS
     }
+    if (symbols or identifier_tokens) and any(
+        token in _BEHAVIOR_PROCESS_HINTS for token in nl_tokens
+    ):
+        return "mixed"
     if (symbols or identifier_tokens) and any(
         token in _NATURAL_LANGUAGE_HINTS for token in nl_tokens
     ):

@@ -7,6 +7,9 @@ bd.sock
 bd.sock.startlock
 sync-state.json
 last-touched
+metadata.json
+README.md
+hooks/
 
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version

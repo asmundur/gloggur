@@ -22,6 +22,11 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
                 "## Install and Bootstrap",
                 "scripts/bootstrap_gloggur_env.sh",
                 "scripts/gloggur status --json",
+                "Fresh clones are bootstrap_required for Beads reads.",
+                ".beads/clone-contract.json",
+                "bd init -p bd --json",
+                "bd import -i .beads/issues.jsonl --json",
+                "bd status --json",
                 "scripts/gloggur index . --json",
                 "scripts/gloggur init . --betatester-support --yes --json",
                 "## Provider Setup",
@@ -78,6 +83,7 @@ def test_quickstart_contract_passes_when_required_sections_and_codes_exist(tmp_p
     assert payload["missing_headings"] == []
     assert payload["missing_commands"] == []
     assert payload["missing_provider_snippets"] == []
+    assert payload["missing_beads_snippets"] == []
     assert payload["missing_failure_codes_in_docs"] == []
     assert payload["missing_failure_codes_in_source"] == []
 

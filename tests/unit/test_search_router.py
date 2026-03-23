@@ -65,6 +65,10 @@ def test_extract_query_hints_detects_verbatim_literals(query: str) -> None:
         ("Session.mount", "identifier"),
         ("url_has_allowed_host_and_scheme", "identifier"),
         ("after_request order", "mixed"),
+        ("CommonMiddleware redirect", "mixed"),
+        ("preserve_request redirect", "mixed"),
+        ("make_response tuple", "mixed"),
+        ("forwarded absolute uri", "mixed"),
     ],
 )
 def test_extract_query_hints_classifies_query_kinds(query: str, expected_kind: str) -> None:
@@ -476,6 +480,73 @@ def test_search_router_mixed_query_suggests_path_narrowing(
     assert pack.summary["decisive"] is False
     assert pack.summary["next_action"] == "narrow_by_path"
     assert pack.summary["suggested_path_prefix"] == "src/flask/app.py"
+
+
+def test_search_router_mixed_code_queries_promote_implementation_and_test_pair(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path="src/flask/helpers.py",
+                    start_line=9,
+                    end_line=9,
+                    snippet="from .app import make_response",
+                    raw_score=0.97,
+                    tags=("literal_match",),
+                    match_role="import",
+                ),
+                BackendHit(
+                    backend="exact",
+                    path="src/flask/app.py",
+                    start_line=120,
+                    end_line=120,
+                    snippet="def make_response(rv):",
+                    raw_score=0.95,
+                    tags=("literal_match",),
+                    match_role="definition",
+                ),
+                BackendHit(
+                    backend="exact",
+                    path="tests/test_app.py",
+                    start_line=48,
+                    end_line=48,
+                    snippet="assert make_response((body, 200))[1] == 200",
+                    raw_score=0.92,
+                    tags=("literal_match",),
+                    match_role="reference",
+                ),
+            ),
+            timing_ms=4,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=1),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.94 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol")),
+    )
+    pack = router.search(query="make_response tuple", mode="auto")
+
+    assert pack.summary["query_kind"] == "mixed"
+    assert pack.summary["decisive"] is False
+    assert pack.summary["next_action"] == "narrow_by_path"
+    assert [hit.path for hit in pack.hits[:2]] == ["src/flask/app.py", "tests/test_app.py"]
 
 
 def test_search_router_grep_fixed_string_query_preserves_verbatim_literal(
@@ -1354,6 +1425,70 @@ def test_search_router_locator_about_skips_semantic_on_authority_scoped_workflow
         "docs/internals/committing-code.txt",
         "docs/internals/releases.txt",
     ]
+
+
+def test_search_router_workflow_parity_queries_keep_authority_pack_non_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_exact_backend",
+        lambda **_kwargs: BackendResult(
+            name="exact",
+            hits=(
+                BackendHit(
+                    backend="exact",
+                    path=".github/workflows/docs.yml",
+                    start_line=3,
+                    end_line=3,
+                    snippet="name: docs",
+                    raw_score=0.94,
+                    tags=("literal_match",),
+                ),
+                BackendHit(
+                    backend="exact",
+                    path="docs/Makefile",
+                    start_line=12,
+                    end_line=12,
+                    snippet="html:\n\t$(SPHINXBUILD) -b html . _build/html",
+                    raw_score=0.93,
+                    tags=("literal_match",),
+                ),
+                BackendHit(
+                    backend="exact",
+                    path="src/docs_helpers.py",
+                    start_line=8,
+                    end_line=8,
+                    snippet="def docs_ci_parity_check():",
+                    raw_score=0.91,
+                    tags=("literal_match",),
+                ),
+            ),
+            timing_ms=5,
+        ),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine.run_symbol_backend",
+        lambda **_kwargs: BackendResult(name="symbol", hits=(), timing_ms=1),
+    )
+    monkeypatch.setattr(
+        "gloggur.search.router.engine._compute_quality",
+        lambda result, **_kwargs: 0.93 if result.name == "exact" else 0.0,
+    )
+
+    router = SearchRouter(
+        repo_root=tmp_path,
+        searcher=None,
+        metadata_store=None,
+        symbol_store=object(),
+        config=SearchRouterConfig(enabled_backends=("exact", "symbol")),
+    )
+    pack = router.search(query="docs ci parity", mode="auto")
+
+    assert pack.summary["query_domain"] == "workflow_config"
+    assert pack.summary["decisive"] is False
+    assert pack.summary["next_action"] != "open_hit_1"
+    assert [hit.path for hit in pack.hits[:2]] == [".github/workflows/docs.yml", "docs/Makefile"]
 
 
 def test_search_router_locator_about_reranks_lexical_hits_without_adding_semantic_only_paths(

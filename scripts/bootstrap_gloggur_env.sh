@@ -18,6 +18,7 @@ SEED_CACHE_DIR=""
 SEED_CACHE_RESULT="not_requested"
 INSTALL_RESULT="not_run"
 INDEX_FRESHNESS_RESULT="not_checked"
+BEADS_READINESS_RESULT="not_checked"
 INSTALL_GLOBAL_WRAPPER="${GLOGGUR_BOOTSTRAP_INSTALL_GLOBAL_WRAPPER:-1}"
 GLOBAL_BIN_DIR="${GLOGGUR_BOOTSTRAP_GLOBAL_BIN_DIR:-}"
 GLOBAL_LINK_DIRS="${GLOGGUR_BOOTSTRAP_GLOBAL_LINK_DIRS:-/opt/homebrew/bin:/usr/local/bin}"
@@ -233,6 +234,94 @@ ensure_startup_readiness() {
     >&2 echo "$readiness_output"
     exit 1
   fi
+}
+
+json_extract_integer_field() {
+  local payload="$1"
+  local field="$2"
+  BOOTSTRAP_JSON_PAYLOAD="$payload" "${VENV_DIR}/bin/python" - "$field" <<'PY'
+import json
+import os
+import sys
+
+field = sys.argv[1]
+payload = json.loads(os.environ["BOOTSTRAP_JSON_PAYLOAD"])
+value = payload.get(field)
+if not isinstance(value, int):
+    raise SystemExit(1)
+print(value)
+PY
+}
+
+ensure_beads_are_ready() {
+  local issues_file="${REPO_ROOT}/.beads/issues.jsonl"
+  if [[ ! -f "$issues_file" ]]; then
+    BEADS_READINESS_RESULT="skipped:no_issues_jsonl"
+    return 0
+  fi
+
+  if ! command -v bd >/dev/null 2>&1; then
+    >&2 echo "Beads readiness check failed: bd command not found."
+    >&2 echo "Install Beads and rerun scripts/bootstrap_gloggur_env.sh."
+    exit 1
+  fi
+
+  local status_output=""
+  if status_output="$(bd status --json 2>&1)"; then
+    BEADS_READINESS_RESULT="ready"
+    return 0
+  fi
+
+  if [[ "$status_output" != *"no beads database found"* ]]; then
+    >&2 echo "Beads readiness check failed while running: bd status --json"
+    >&2 echo "$status_output"
+    exit 1
+  fi
+
+  local init_output=""
+  if ! init_output="$(bd init -p bd --json 2>&1)"; then
+    >&2 echo "Beads bootstrap failed while running: bd init -p bd --json"
+    >&2 echo "$init_output"
+    exit 1
+  fi
+
+  local import_output=""
+  if ! import_output="$(bd import -i .beads/issues.jsonl --json 2>&1)"; then
+    >&2 echo "Beads bootstrap failed while running: bd import -i .beads/issues.jsonl --json"
+    >&2 echo "$import_output"
+    exit 1
+  fi
+
+  local verify_output=""
+  if ! verify_output="$(bd status --json 2>&1)"; then
+    >&2 echo "Beads readiness verification failed while running: bd status --json"
+    >&2 echo "$verify_output"
+    exit 1
+  fi
+
+  local count_output=""
+  if ! count_output="$(bd count --json 2>&1)"; then
+    >&2 echo "Beads readiness verification failed while running: bd count --json"
+    >&2 echo "$count_output"
+    exit 1
+  fi
+
+  local expected_count actual_count
+  expected_count="$(wc -l < "$issues_file" | tr -d ' ')"
+  if ! actual_count="$(json_extract_integer_field "$count_output" "count")"; then
+    >&2 echo "Beads readiness verification failed: unable to parse count from bd count --json."
+    >&2 echo "$count_output"
+    exit 1
+  fi
+
+  if [[ "$actual_count" != "$expected_count" ]]; then
+    >&2 echo "Beads readiness verification failed: imported issue count does not match tracked .beads/issues.jsonl."
+    >&2 echo "Expected count: ${expected_count}"
+    >&2 echo "Actual count: ${actual_count}"
+    exit 1
+  fi
+
+  BEADS_READINESS_RESULT="bootstrapped:${actual_count}"
 }
 
 install_global_wrapper() {
@@ -479,6 +568,7 @@ install_global_wrapper
 seed_cache_if_requested
 ensure_index_is_current
 ensure_startup_readiness
+ensure_beads_are_ready
 
 cat <<EOF
 Bootstrap complete.
@@ -488,8 +578,10 @@ Bootstrap complete.
 - Global wrapper: ${GLOBAL_WRAPPER_RESULT}
 - Cache seed: ${SEED_CACHE_RESULT}
 - Index freshness: ${INDEX_FRESHNESS_RESULT}
+- Beads readiness: ${BEADS_READINESS_RESULT}
 
 Next steps:
 1. python scripts/check_startup_readiness.py --format json
 2. scripts/gloggur status --json
+3. bd status --json
 EOF

@@ -17,6 +17,9 @@ REQUIRED_HEADINGS = [
 REQUIRED_COMMAND_SNIPPETS = [
     "scripts/bootstrap_gloggur_env.sh",
     "scripts/gloggur status --json",
+    "bd init -p bd --json",
+    "bd import -i .beads/issues.jsonl --json",
+    "bd status --json",
     "scripts/gloggur index . --json",
     "scripts/gloggur init . --betatester-support --yes --json",
     "scripts/gloggur watch init . --json",
@@ -38,6 +41,11 @@ REQUIRED_PROVIDER_SNIPPETS = [
     "GLOGGUR_EMBEDDING_PROVIDER=gemini",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
+]
+
+REQUIRED_BEADS_SNIPPETS = [
+    ".beads/clone-contract.json",
+    "bootstrap_required",
 ]
 
 REQUIRED_FAILURE_CODES = [
@@ -79,6 +87,7 @@ def check_quickstart_contract(
     missing_headings = _missing_snippets(docs_text, REQUIRED_HEADINGS)
     missing_commands = _missing_snippets(docs_text, REQUIRED_COMMAND_SNIPPETS)
     missing_provider_snippets = _missing_snippets(docs_text, REQUIRED_PROVIDER_SNIPPETS)
+    missing_beads_snippets = _missing_snippets(docs_text, REQUIRED_BEADS_SNIPPETS)
     missing_doc_codes = _missing_snippets(docs_text, REQUIRED_FAILURE_CODES)
 
     source_text_fragments: list[str] = []
@@ -95,6 +104,7 @@ def check_quickstart_contract(
         not missing_headings
         and not missing_commands
         and not missing_provider_snippets
+        and not missing_beads_snippets
         and not missing_doc_codes
         and not missing_source_files
         and not missing_cli_codes
@@ -108,11 +118,13 @@ def check_quickstart_contract(
             "required_headings": len(REQUIRED_HEADINGS),
             "required_commands": len(REQUIRED_COMMAND_SNIPPETS),
             "required_provider_snippets": len(REQUIRED_PROVIDER_SNIPPETS),
+            "required_beads_snippets": len(REQUIRED_BEADS_SNIPPETS),
             "required_failure_codes": len(REQUIRED_FAILURE_CODES),
         },
         "missing_headings": missing_headings,
         "missing_commands": missing_commands,
         "missing_provider_snippets": missing_provider_snippets,
+        "missing_beads_snippets": missing_beads_snippets,
         "missing_failure_codes_in_docs": missing_doc_codes,
         "missing_source_files": missing_source_files,
         "missing_failure_codes_in_source": missing_cli_codes,
@@ -144,6 +156,7 @@ def _render_markdown(payload: dict[str, object]) -> str:
         "missing_headings",
         "missing_commands",
         "missing_provider_snippets",
+        "missing_beads_snippets",
         "missing_failure_codes_in_docs",
         "missing_source_files",
         "missing_failure_codes_in_source",

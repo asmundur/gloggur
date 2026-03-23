@@ -61,7 +61,7 @@ git status --porcelain --untracked-files=all -- .beads | sed 's/^.. //' | sort -
 while IFS= read -r path; do
   [ -n "${path}" ] || continue
   case "${path}" in
-    .beads/issues.jsonl|.beads/interactions.jsonl|.beads/metadata.json)
+    .beads/issues.jsonl|.beads/interactions.jsonl)
       git add "${path}"
       echo "Auto-staged ${path}"
       ;;
@@ -72,7 +72,7 @@ UNEXPECTED_NEW_DIRTY=""
 while IFS= read -r path; do
   [ -n "${path}" ] || continue
   case "${path}" in
-    .beads/issues.jsonl|.beads/interactions.jsonl|.beads/metadata.json)
+    .beads/issues.jsonl|.beads/interactions.jsonl)
       ;;
     *)
       UNEXPECTED_NEW_DIRTY="${UNEXPECTED_NEW_DIRTY}

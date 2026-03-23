@@ -310,6 +310,57 @@ def test_run_exact_backend_code_declaration_queries_return_only_declarations_whe
     assert result.hits[0].match_role == "definition"
 
 
+def test_run_exact_backend_mixed_code_queries_keep_implementation_and_test_near_top(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app_file = tmp_path / "src" / "flask" / "app.py"
+    app_file.parent.mkdir(parents=True, exist_ok=True)
+    app_file.write_text(
+        "def make_response(rv):\n"
+        "    return _coerce_response_tuple(rv)\n",
+        encoding="utf8",
+    )
+    helper_file = tmp_path / "src" / "flask" / "helpers.py"
+    helper_file.parent.mkdir(parents=True, exist_ok=True)
+    helper_file.write_text("from .app import make_response\n", encoding="utf8")
+    test_file = tmp_path / "tests" / "test_app.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text(
+        "def test_make_response_tuple():\n"
+        "    assert make_response((body, 200))[1] == 200\n",
+        encoding="utf8",
+    )
+
+    def _run(_cmd, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "src/flask/helpers.py:1:from .app import make_response\n"
+                "src/flask/app.py:1:def make_response(rv):\n"
+                "tests/test_app.py:2:    assert make_response((body, 200))[1] == 200\n"
+                "src/flask/app.py:2:    return _coerce_response_tuple(rv)\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="make_response tuple",
+        hints=extract_query_hints("make_response tuple"),
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=4, time_budget_ms=900),
+        execution_hints=ExecutionHints(fixed_string=True),
+        config=SearchRouterConfig(),
+    )
+
+    assert [Path(hit.path).as_posix() for hit in result.hits[:2]] == [
+        str(app_file).replace("\\", "/"),
+        str(test_file).replace("\\", "/"),
+    ]
+
+
 def test_run_symbol_backend_ranks_definitions_before_references_for_code_identifier_queries(
     tmp_path,
 ) -> None:
@@ -582,6 +633,42 @@ def test_run_exact_backend_workflow_query_searches_hidden_authority_paths(
     assert result.hits[0].path.replace("\\", "/").endswith(
         "/.github/workflows/verification.yml"
     )
+
+
+def test_run_exact_backend_workflow_parity_queries_rank_authority_files_ahead_of_repo_noise(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    observed_commands: list[list[str]] = []
+
+    def _run(cmd, **_kwargs):
+        observed_commands.append(list(cmd))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "src/docs_helpers.py:1:def docs_ci_parity_check():\n"
+                "docs/Makefile:1:html:\n"
+                ".github/workflows/docs.yml:1:name: docs\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.search.router.backends.subprocess.run", _run)
+
+    result = run_exact_backend(
+        query="docs ci parity",
+        hints=extract_query_hints("docs ci parity"),
+        repo_root=tmp_path,
+        intent=SearchIntent(max_snippets=3, time_budget_ms=900),
+        execution_hints=ExecutionHints(),
+        config=SearchRouterConfig(),
+    )
+
+    assert observed_commands
+    assert [Path(hit.path).as_posix() for hit in result.hits[:2]] == [
+        str(tmp_path / ".github" / "workflows" / "docs.yml").replace("\\", "/"),
+        str(tmp_path / "docs" / "Makefile").replace("\\", "/"),
+    ]
 
 
 def test_run_exact_backend_non_locator_verbatim_query_falls_back_after_literal_miss(
