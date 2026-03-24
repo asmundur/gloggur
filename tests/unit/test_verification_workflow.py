@@ -45,6 +45,19 @@ def test_pytest_coverage_target_points_to_runtime_src_package() -> None:
     assert "--cov=gloggur" not in pyproject
 
 
+def test_pytest_discovery_is_limited_to_tests_tree() -> None:
+    """Default pytest runs should not collect helper/demo modules from src/."""
+    pyproject = _load_pyproject()
+    tool = pyproject.get("tool")
+    assert isinstance(tool, dict)
+
+    pytest_config = tool.get("pytest")
+    assert isinstance(pytest_config, dict)
+    ini_options = pytest_config.get("ini_options")
+    assert isinstance(ini_options, dict)
+    assert ini_options.get("testpaths") == ["tests"]
+
+
 def test_static_tooling_excludes_shadow_worktrees_and_cache_dirs() -> None:
     """Static tooling should ignore shadow worktrees and cache directories."""
     pyproject = _load_pyproject()

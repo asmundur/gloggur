@@ -80,6 +80,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-n auto --dist=loadscope --cov=src/gloggur --cov-report=term-missing --cov-report=xml"
+testpaths = ["tests"]
 markers = [
   "performance: benchmark and timing-sensitive checks that should not block required CI",
 ]
