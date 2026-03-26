@@ -149,6 +149,7 @@ def test_verification_workflow_pytest_lane_is_unconditional() -> None:
     run_script = pytest_step.get("run")
     assert isinstance(run_script, str)
     assert "pytest" in run_script
+    assert "--cov-report=xml:coverage-full.xml" in run_script
     assert '-m "not performance and not native_parser"' in run_script
 
 
@@ -170,7 +171,7 @@ def test_verification_workflow_runs_native_parser_lane_serially_on_required_lane
     assert native_step.get("if") == "${{ matrix.required }}"
     run_script = native_step.get("run")
     assert isinstance(run_script, str)
-    assert "pytest -n0 -m native_parser" in run_script
+    assert "pytest -n0 --no-cov -m native_parser" in run_script
 
 
 def test_verification_workflow_includes_runtime_and_resolver_diagnostics() -> None:
@@ -268,7 +269,10 @@ def test_verification_workflow_includes_coverage_baseline_gate_after_pytest() ->
     assert coverage_step.get("if") == "${{ matrix.python-version == '3.13' }}"
     run_script = coverage_step.get("run")
     assert isinstance(run_script, str)
-    assert "python scripts/check_coverage_baseline.py --format json" in run_script
+    assert (
+        "python scripts/check_coverage_baseline.py --coverage-file coverage-full.xml --format json"
+        in run_script
+    )
 
 
 def test_verification_workflow_includes_error_catalog_contract_check() -> None:
