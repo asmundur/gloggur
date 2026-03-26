@@ -101,9 +101,29 @@ bd ready --json
 **Create new issues:**
 
 ```bash
-bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
-bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
+bd create "Tight, concrete issue title" \
+  --type bug|feature|task \
+  --priority 1 \
+  --description "Current behavior, why it matters, scope boundaries, and the exact code/docs/tests paths involved." \
+  --design "Implementation touchpoints in src/... tests/... docs/... plus key constraints and non-goals." \
+  --acceptance "- Observable outcome 1\n- Observable outcome 2\n- Verification or fail-loud contract" \
+  --notes "Current evidence: direct probes, failing commands, relevant commits, and focused test nodes." \
+  --estimate 120 \
+  --json
+
+bd create "Concrete follow-up discovered while landing bd-123" \
+  --type task \
+  --priority 1 \
+  --description "Specific follow-up needed after inspecting src/... and tests/... during bd-123." \
+  --design "Call out the exact files, contracts, or parser/search/index surfaces likely to change." \
+  --acceptance "- Define the shipped contract\n- Add or adjust targeted regression coverage\n- Keep scope narrower than the parent issue" \
+  --notes "Discovered during bd-123; include the exact probe, failure, or code-path evidence that surfaced it." \
+  --estimate 90 \
+  --deps discovered-from:bd-123 \
+  --json
 ```
+
+Prefer high-signal Beads issues by default: reference concrete paths, describe current behavior before proposing changes, fill `--design` / `--acceptance` / `--notes` / `--estimate`, and avoid vague umbrella wording unless the issue is intentionally an umbrella.
 
 **Claim and update:**
 
