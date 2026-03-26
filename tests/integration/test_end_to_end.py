@@ -27,12 +27,13 @@ def _run_cli(args: list[str], env: dict[str, str]) -> dict[str, object]:
     command = [sys.executable, "-m", "gloggur.cli.main", *args]
     completed = subprocess.run(
         command,
-        check=True,
+        check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         env=env,
     )
+    assert completed.returncode == 0, f"{completed.stderr}\n{completed.stdout}"
     payload = json.loads(completed.stdout)
     if isinstance(payload, dict):
         return attach_legacy_search_contract(payload)
@@ -46,7 +47,11 @@ def test_end_to_end_index_and_search() -> None:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {**os.environ, "GLOGGUR_CACHE_DIR": cache_dir}
+        env = {
+            **os.environ,
+            "GLOGGUR_CACHE_DIR": cache_dir,
+            "GLOGGUR_EMBEDDING_PROVIDER": "test",
+        }
 
         index_payload = _run_cli(["index", str(repo), "--json"], env=env)
         assert index_payload["indexed_files"] == 1

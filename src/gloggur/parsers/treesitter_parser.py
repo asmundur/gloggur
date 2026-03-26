@@ -5,6 +5,7 @@ import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from tree_sitter import Node, Tree
 from tree_sitter_language_pack import get_parser
@@ -151,10 +152,17 @@ class TreeSitterParser(Parser):
             raise ValueError(f"Unsupported language: {language}")
         self.language = language
         self.spec = _LANGUAGE_SPECS[language]
-        self.parser = get_parser(language)
+        self._parser: Any | None = None
         self.signal_processors = signal_processors or default_signal_processors()
         self._js_object_owner_aliases: dict[str, tuple[str, ...]] = {}
         self._cpp_macro_patterns: dict[str, _CppMacroPattern] = {}
+
+    @property
+    def parser(self) -> Any:
+        """Return the lazily constructed native parser instance."""
+        if self._parser is None:
+            self._parser = get_parser(self.language)
+        return self._parser
 
     def parse_file(self, path: str, source: str) -> ParsedFile:
         """Parse a file and return ParsedFile with extracted symbols."""

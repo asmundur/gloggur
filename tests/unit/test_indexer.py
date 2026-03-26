@@ -32,8 +32,7 @@ def _write_timeout_parser_module(tmp_path: Path, *, sleep_seconds: float = 0.2) 
     module_name = f"gloggur_test_timeout_parser_{next(tempfile._get_candidate_names())}"
     module_path = tmp_path / f"{module_name}.py"
     module_path.write_text(
-        textwrap.dedent(
-            f"""
+        textwrap.dedent(f"""
             from __future__ import annotations
 
             import hashlib
@@ -77,8 +76,7 @@ def _write_timeout_parser_module(tmp_path: Path, *, sleep_seconds: float = 0.2) 
 
             def create_parser() -> TimeoutParser:
                 return TimeoutParser()
-            """
-        ),
+            """),
         encoding="utf8",
     )
     return module_name
@@ -356,7 +354,10 @@ def test_indexer_verbose_line_metrics_include_edge_vectors_when_enabled() -> Non
         assert result.verbose_lines is not None
         assert result.verbose_lines.symbol_chunks.vector_count > 0
         assert result.verbose_lines.graph_edges.vector_count > 0
-        assert result.verbose_lines.graph_edges.line_total >= result.verbose_lines.graph_edges.line_unique
+        assert (
+            result.verbose_lines.graph_edges.line_total
+            >= result.verbose_lines.graph_edges.line_unique
+        )
         assert (
             result.verbose_lines.embedded_total
             == result.verbose_lines.symbol_chunks.line_total
@@ -450,6 +451,7 @@ def test_indexer_verbose_line_metrics_single_file_matches_repo_scope() -> None:
         assert execution.verbose_lines == repo_result.verbose_lines
 
 
+@pytest.mark.native_parser
 def test_indexer_indexes_mixed_c_cpp_files_without_parser_unavailable_failures() -> None:
     """Indexer should parse default C/C++ source and header extensions without parser gaps."""
     with TestFixtures() as fixtures:
@@ -953,7 +955,9 @@ def test_indexer_rolls_back_file_state_after_transient_vector_upsert_failure() -
         assert checkpoint.state == BUILD_FILE_CHECKPOINT_STATE_EXTRACT_COMPLETE
         assert cache.get_file_metadata(sample_path) is not None
         assert cache.count_symbols() == 1
-        assert all(chunk.embedding_vector is None for chunk in cache.list_chunks_for_file(sample_path))
+        assert all(
+            chunk.embedding_vector is None for chunk in cache.list_chunks_for_file(sample_path)
+        )
         assert vector_store.list_symbol_ids() == []
 
         second = indexer.index_repository(str(repo))
@@ -1631,7 +1635,9 @@ def test_indexer_resume_skips_prepare_for_stat_matched_extract_checkpoints(
         original_build_edges = first_indexer._build_edges_with_watchdog
         edge_calls = 0
 
-        def _halt_on_second_edge(**kwargs: object) -> tuple[list[EdgeRecord] | None, int, bool, str | None]:
+        def _halt_on_second_edge(
+            **kwargs: object,
+        ) -> tuple[list[EdgeRecord] | None, int, bool, str | None]:
             nonlocal edge_calls
             edge_calls += 1
             if edge_calls == 2:
@@ -1661,7 +1667,9 @@ def test_indexer_resume_skips_prepare_for_stat_matched_extract_checkpoints(
             prepare_calls.append(str(kwargs["path"]))
             return original_prepare(**kwargs)
 
-        monkeypatch.setattr(second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare)
+        monkeypatch.setattr(
+            second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare
+        )
 
         second_result = second_indexer.index_repository(str(repo))
 
@@ -1740,7 +1748,9 @@ def test_indexer_resume_embeds_extract_checkpoint_without_reextracting(
             prepare_calls.append(str(kwargs["path"]))
             return original_prepare(**kwargs)
 
-        monkeypatch.setattr(second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare)
+        monkeypatch.setattr(
+            second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare
+        )
 
         second_result = second_indexer.index_repository(str(repo))
 
@@ -1792,9 +1802,7 @@ def test_indexer_worker_and_inline_modes_preserve_persisted_output() -> None:
         "    return helper(value)\n"
     )
     source_b = (
-        "from a import alpha\n\n"
-        "def beta(value: int) -> int:\n"
-        "    return alpha(value)\n"
+        "from a import alpha\n\n" "def beta(value: int) -> int:\n" "    return alpha(value)\n"
     )
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo({"a.py": source_a, "b.py": source_b})
@@ -2043,7 +2051,9 @@ def test_indexer_resume_preserves_inline_large_catalog_checkpoints(
                 )
             return original_build_edges(**kwargs)
 
-        monkeypatch.setattr(first_indexer, "_build_edges_with_watchdog", _halt_on_second_inline_edge)
+        monkeypatch.setattr(
+            first_indexer, "_build_edges_with_watchdog", _halt_on_second_inline_edge
+        )
 
         first_result = first_indexer.index_repository(str(repo))
 
@@ -2068,7 +2078,9 @@ def test_indexer_resume_preserves_inline_large_catalog_checkpoints(
             prepare_calls.append(str(kwargs["path"]))
             return original_prepare(**kwargs)
 
-        monkeypatch.setattr(second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare)
+        monkeypatch.setattr(
+            second_indexer, "_prepare_file_for_index_with_watchdog", _record_prepare
+        )
 
         second_result = second_indexer.index_repository(str(repo))
 

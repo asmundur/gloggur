@@ -82,5 +82,6 @@ ignore_missing_imports = true
 addopts = "-n auto --dist=loadscope --cov=src/gloggur --cov-report=term-missing --cov-report=xml"
 testpaths = ["tests"]
 markers = [
+  "native_parser: tests that exercise native C/C++ tree-sitter grammars and should run serially in required CI lanes",
   "performance: benchmark and timing-sensitive checks that should not block required CI",
 ]

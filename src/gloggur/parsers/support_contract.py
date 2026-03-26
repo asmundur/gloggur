@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import signal
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +15,12 @@ if TYPE_CHECKING:
 
 LANGUAGE_SUPPORT_CONTRACT_SCHEMA_VERSION = "1"
 PARSER_CHECK_SCHEMA_VERSION = "1"
+_NATIVE_PARSER_CHECK_LANGUAGES = frozenset({"c", "cpp"})
+_PARSER_CHECK_CHILD_COMMAND = (
+    "from gloggur.parsers.support_contract import "
+    "_run_parser_check_case_child_entrypoint; "
+    "raise SystemExit(_run_parser_check_case_child_entrypoint())"
+)
 
 
 _LANGUAGE_CONSTRUCT_TIERS: dict[str, dict[str, str]] = {
@@ -508,10 +518,140 @@ def build_language_support_contract(*, config: GloggurConfig | None = None) -> d
     }
 
 
+def _parser_check_case_to_payload(case: ParserCheckCase) -> dict[str, Any]:
+    """Serialize a parser capability case for subprocess transport."""
+    return {
+        "case_id": case.case_id,
+        "language": case.language,
+        "path": case.path,
+        "source": case.source,
+        "expected_symbols": [[kind, name] for kind, name in case.expected_symbols],
+        "expected_fqnames": list(case.expected_fqnames),
+        "forbidden_symbols": [[kind, name] for kind, name in case.forbidden_symbols],
+        "forbidden_fqnames": list(case.forbidden_fqnames),
+        "known_gap": case.known_gap,
+    }
+
+
+def _parser_check_case_from_payload(payload: dict[str, Any]) -> ParserCheckCase:
+    """Deserialize a subprocess parser capability case payload."""
+    return ParserCheckCase(
+        case_id=str(payload["case_id"]),
+        language=str(payload["language"]),
+        path=str(payload["path"]),
+        source=str(payload["source"]),
+        expected_symbols=tuple(
+            (str(kind), str(name)) for kind, name in payload.get("expected_symbols", [])
+        ),
+        expected_fqnames=tuple(str(value) for value in payload.get("expected_fqnames", [])),
+        forbidden_symbols=tuple(
+            (str(kind), str(name)) for kind, name in payload.get("forbidden_symbols", [])
+        ),
+        forbidden_fqnames=tuple(str(value) for value in payload.get("forbidden_fqnames", [])),
+        known_gap=bool(payload.get("known_gap", False)),
+    )
+
+
+def _collect_parser_case_observation(
+    case: ParserCheckCase,
+    *,
+    parser_registry: ParserRegistry,
+) -> tuple[set[tuple[str, str]], set[str], str | None]:
+    """Execute one parser case in-process and return observed symbols/fqnames/errors."""
+    parser_entry = parser_registry.get_parser_for_path(case.path)
+    actual_symbols: set[tuple[str, str]] = set()
+    actual_fqnames: set[str] = set()
+    parse_error: str | None = None
+    if parser_entry is None:
+        parse_error = "parser_unavailable"
+    else:
+        try:
+            extracted = parser_entry.parser.extract_symbols(case.path, case.source)
+            actual_symbols = {(symbol.kind, symbol.name) for symbol in extracted}
+            actual_fqnames = {symbol.fqname or symbol.name for symbol in extracted}
+        except Exception as exc:  # pragma: no cover - defensive envelope
+            parse_error = f"{type(exc).__name__}: {exc}"
+    return actual_symbols, actual_fqnames, parse_error
+
+
+def _parser_check_observation_to_payload(
+    actual_symbols: set[tuple[str, str]],
+    actual_fqnames: set[str],
+    parse_error: str | None,
+) -> dict[str, Any]:
+    """Serialize parser-case observations for subprocess transport."""
+    return {
+        "actual_symbols": sorted([list(symbol) for symbol in actual_symbols]),
+        "actual_fqnames": sorted(actual_fqnames),
+        "parse_error": parse_error,
+    }
+
+
+def _parser_check_observation_from_payload(
+    payload: dict[str, Any],
+) -> tuple[set[tuple[str, str]], set[str], str | None]:
+    """Deserialize parser-case observations from subprocess JSON."""
+    actual_symbols = {(str(kind), str(name)) for kind, name in payload.get("actual_symbols", [])}
+    actual_fqnames = {str(value) for value in payload.get("actual_fqnames", [])}
+    parse_error = payload.get("parse_error")
+    return actual_symbols, actual_fqnames, None if parse_error is None else str(parse_error)
+
+
+def _run_parser_check_case_child_entrypoint() -> int:
+    """Run one parser capability case in a fresh Python process."""
+    payload = json.loads(sys.stdin.read())
+    case = _parser_check_case_from_payload(payload)
+    observation = _collect_parser_case_observation(case, parser_registry=ParserRegistry())
+    sys.stdout.write(json.dumps(_parser_check_observation_to_payload(*observation), sort_keys=True))
+    return 0
+
+
+def _format_parser_check_subprocess_failure(completed: subprocess.CompletedProcess[str]) -> str:
+    """Describe a non-zero subprocess result for parser capability checks."""
+    if completed.returncode < 0:
+        signal_number = -completed.returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:  # pragma: no cover - defensive envelope
+            signal_name = f"SIG{signal_number}"
+        detail = f"child process terminated by signal {signal_name}"
+    else:
+        detail = f"child process exited with code {completed.returncode}"
+    stderr = completed.stderr.strip()
+    if stderr:
+        detail = f"{detail}: {stderr.splitlines()[-1]}"
+    return detail
+
+
+def _run_parser_check_case_in_subprocess(
+    case: ParserCheckCase,
+) -> tuple[set[tuple[str, str]], set[str], str | None]:
+    """Run one native parser capability case in a child Python process."""
+    completed = subprocess.run(
+        [sys.executable, "-c", _PARSER_CHECK_CHILD_COMMAND],
+        input=json.dumps(_parser_check_case_to_payload(case)),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return set(), set(), _format_parser_check_subprocess_failure(completed)
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        detail = f"child process returned invalid JSON: {exc.msg}"
+        stdout = completed.stdout.strip()
+        if stdout:
+            detail = f"{detail}: {stdout.splitlines()[-1]}"
+        return set(), set(), detail
+    return _parser_check_observation_from_payload(payload)
+
+
 def run_parser_capability_check(
     *,
     parser_registry: ParserRegistry,
     config: GloggurConfig | None = None,
+    _cases: tuple[ParserCheckCase, ...] | None = None,
 ) -> dict[str, Any]:
     """Execute built-in parser capability checks and return structured results."""
     cases: list[dict[str, Any]] = []
@@ -520,20 +660,16 @@ def run_parser_capability_check(
     known_gap_confirmed = 0
     known_gap_closed = 0
 
-    for case in _PARSER_CHECK_CASES:
-        parser_entry = parser_registry.get_parser_for_path(case.path)
-        actual_symbols: set[tuple[str, str]] = set()
-        actual_fqnames: set[str] = set()
-        parse_error: str | None = None
-        if parser_entry is None:
-            parse_error = "parser_unavailable"
+    parser_cases = _PARSER_CHECK_CASES if _cases is None else _cases
+
+    for case in parser_cases:
+        if case.language in _NATIVE_PARSER_CHECK_LANGUAGES:
+            actual_symbols, actual_fqnames, parse_error = _run_parser_check_case_in_subprocess(case)
         else:
-            try:
-                extracted = parser_entry.parser.extract_symbols(case.path, case.source)
-                actual_symbols = {(symbol.kind, symbol.name) for symbol in extracted}
-                actual_fqnames = {symbol.fqname or symbol.name for symbol in extracted}
-            except Exception as exc:  # pragma: no cover - defensive envelope
-                parse_error = f"{type(exc).__name__}: {exc}"
+            actual_symbols, actual_fqnames, parse_error = _collect_parser_case_observation(
+                case,
+                parser_registry=parser_registry,
+            )
         missing_symbols = [
             {"kind": kind, "name": name}
             for kind, name in case.expected_symbols

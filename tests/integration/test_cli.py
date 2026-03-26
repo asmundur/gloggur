@@ -30,6 +30,14 @@ def _write_fallback_marker(cache_dir: str) -> None:
     marker.touch(exist_ok=True)
 
 
+def _cli_test_env(cache_dir: str | Path) -> dict[str, str]:
+    """Return an explicit CLI test environment for deterministic embedding setup."""
+    return {
+        "GLOGGUR_CACHE_DIR": str(cache_dir),
+        "GLOGGUR_EMBEDDING_PROVIDER": "test",
+    }
+
+
 def _install_fake_sentence_transformers(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -139,28 +147,28 @@ def test_cli_index_search_status_and_clear_cache() -> None:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
-        assert index_result.exit_code == 0
+        assert index_result.exit_code == 0, index_result.output
         index_payload = _parse_json_output(index_result.output)
         assert index_payload["indexed_files"] == 1
         assert index_payload["indexed_symbols"] > 0
         assert index_payload["index_stats"]["embedded_edge_vectors"] == 0
 
         status_result = runner.invoke(cli, ["status", "--json"], env=env)
-        assert status_result.exit_code == 0
+        assert status_result.exit_code == 0, status_result.output
         status_payload = _parse_json_output(status_result.output)
         assert status_payload["total_symbols"] > 0
         assert status_payload["index_stats"]["embedded_edge_vectors"] == 0
 
         search_result = runner.invoke(cli, ["search", "add", "--json", "--top-k", "3"], env=env)
-        assert search_result.exit_code == 0
+        assert search_result.exit_code == 0, search_result.output
         search_payload = _parse_json_output(search_result.output)
         assert search_payload["metadata"]["total_results"] > 0
 
         clear_result = runner.invoke(cli, ["clear-cache", "--json"], env=env)
-        assert clear_result.exit_code == 0
+        assert clear_result.exit_code == 0, clear_result.output
         clear_payload = _parse_json_output(clear_result.output)
         assert clear_payload["cleared"] is True
 
@@ -1117,7 +1125,7 @@ def test_cli_find_verbatim_literals_prioritize_exact_hits_over_fragment_noise(
                 "django/utils/http.py": (
                     "def escape_leading_slashes(url):\n"
                     '    """Keep malformed absolute URLs stable for callers."""\n'
-                    '    # Handles http:///example.com and ///example.com without fragment fallback.\n'
+                    "    # Handles http:///example.com and ///example.com without fragment fallback.\n"
                     "    return url\n"
                 ),
                 "tests/test_http.py": (
@@ -1137,8 +1145,7 @@ def test_cli_find_verbatim_literals_prioritize_exact_hits_over_fragment_noise(
                     "    path = '/tmp/security/path'\n"
                 ),
                 "tests/gis/test_geos.py": (
-                    "def test_gis_path_value():\n"
-                    "    path = 'layers/path'\n"
+                    "def test_gis_path_value():\n" "    path = 'layers/path'\n"
                 ),
             }
         )
@@ -1181,8 +1188,7 @@ def test_cli_find_verbatim_literal_miss_returns_no_match_and_about_can_rescue(
                 ),
                 "django/conf/global_settings.py": "MIDDLEWARE = []\n",
                 "tests/gis/test_geos.py": (
-                    "def test_gis_path_value():\n"
-                    "    path = 'layers/path'\n"
+                    "def test_gis_path_value():\n" "    path = 'layers/path'\n"
                 ),
             }
         )
@@ -1235,13 +1241,9 @@ def test_cli_find_multiple_trailing_scope_paths_become_internal_filters(
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
             {
-                "src/flask/app.py": (
-                    "def make_response(value):\n"
-                    "    return value\n"
-                ),
+                "src/flask/app.py": ("def make_response(value):\n" "    return value\n"),
                 "tests/test_app.py": (
-                    "def test_make_response():\n"
-                    "    assert make_response('ok') == 'ok'\n"
+                    "def test_make_response():\n" "    assert make_response('ok') == 'ok'\n"
                 ),
                 "docs/reference.md": "make_response docs\n",
             }
@@ -1294,10 +1296,7 @@ def test_cli_find_mixed_existing_and_missing_scope_paths_fail_closed(
     with TestFixtures() as fixtures:
         repo = fixtures.create_temp_repo(
             {
-                "src/flask/app.py": (
-                    "def make_response(value):\n"
-                    "    return value\n"
-                ),
+                "src/flask/app.py": ("def make_response(value):\n" "    return value\n"),
             }
         )
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
@@ -1338,10 +1337,10 @@ def test_cli_search_low_signal_reports_bounded_retry_metadata() -> None:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
-        assert index_result.exit_code == 0
+        assert index_result.exit_code == 0, index_result.output
 
         search_result = runner.invoke(
             cli,
@@ -1399,7 +1398,7 @@ def test_cli_search_file_filter_prefix_boundary_and_context_radius() -> None:
         )
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
         previous_cwd = os.getcwd()
         os.chdir(repo)
         try:
@@ -1482,10 +1481,10 @@ def test_cli_search_rejects_legacy_grounding_contract_flags() -> None:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
-        assert index_result.exit_code == 0
+        assert index_result.exit_code == 0, index_result.output
 
         search_result = runner.invoke(
             cli,
@@ -1518,10 +1517,10 @@ def test_cli_search_fail_on_ungrounded_returns_nonzero_with_validation_payload()
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
-        assert index_result.exit_code == 0
+        assert index_result.exit_code == 0, index_result.output
 
         search_result = runner.invoke(
             cli,
@@ -1565,7 +1564,7 @@ def test_calls_covered_target():
         repo = fixtures.create_temp_repo({"service.py": source, "test_service.py": test_source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
         assert index_result.exit_code == 0, index_result.output
@@ -1746,10 +1745,10 @@ def test_cli_index_reports_incremental_observability_and_prunes_deleted_files() 
         repo = fixtures.create_temp_repo({"keep.py": source, "remove.py": delete_source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
 
         first_index = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
-        assert first_index.exit_code == 0
+        assert first_index.exit_code == 0, first_index.output
         first_payload = _parse_json_output(first_index.output)
         for field in (
             "files_scanned",
@@ -1767,14 +1766,14 @@ def test_cli_index_reports_incremental_observability_and_prunes_deleted_files() 
         assert initial_symbols > 0
 
         status_before = runner.invoke(cli, ["status", "--json"], env=env)
-        assert status_before.exit_code == 0
+        assert status_before.exit_code == 0, status_before.output
         status_before_payload = _parse_json_output(status_before.output)
         total_before = int(status_before_payload["total_symbols"])
         assert total_before == initial_symbols
 
         (repo / "remove.py").unlink()
         second_index = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
-        assert second_index.exit_code == 0
+        assert second_index.exit_code == 0, second_index.output
         second_payload = _parse_json_output(second_index.output)
         assert int(second_payload["indexed_files"]) == 0
         assert int(second_payload["skipped_files"]) == 1
@@ -1783,7 +1782,7 @@ def test_cli_index_reports_incremental_observability_and_prunes_deleted_files() 
         assert int(second_payload["files_changed"]) == 0
 
         status_after = runner.invoke(cli, ["status", "--json"], env=env)
-        assert status_after.exit_code == 0
+        assert status_after.exit_code == 0, status_after.output
         status_after_payload = _parse_json_output(status_after.output)
         total_after = int(status_after_payload["total_symbols"])
         assert total_after < total_before
@@ -2084,7 +2083,7 @@ def test_cli_status_and_index_self_heal_corrupted_cache_idempotently() -> None:
         repo = fixtures.create_temp_repo({"sample.py": source})
         cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
         _write_fallback_marker(cache_dir)
-        env = {"GLOGGUR_CACHE_DIR": cache_dir}
+        env = _cli_test_env(cache_dir)
 
         db_path = Path(cache_dir) / "index.db"
         db_path.write_bytes(b"broken sqlite bytes")
@@ -2092,7 +2091,7 @@ def test_cli_status_and_index_self_heal_corrupted_cache_idempotently() -> None:
         Path(f"{db_path}-shm").write_bytes(b"broken shm")
 
         first_status = runner.invoke(cli, ["status", "--json"], env=env)
-        assert first_status.exit_code == 0
+        assert first_status.exit_code == 0, first_status.output
         assert "Cache corruption detected at" in first_status.output
         first_payload = _parse_json_output(first_status.output)
         assert first_payload["needs_reindex"] is True
@@ -2105,7 +2104,7 @@ def test_cli_status_and_index_self_heal_corrupted_cache_idempotently() -> None:
         assert not Path(f"{db_path}-shm").exists()
 
         second_status = runner.invoke(cli, ["status", "--json"], env=env)
-        assert second_status.exit_code == 0
+        assert second_status.exit_code == 0, second_status.output
         assert "Cache corruption detected at" not in second_status.output
         second_payload = _parse_json_output(second_status.output)
         assert second_payload["needs_reindex"] is True
@@ -2115,13 +2114,13 @@ def test_cli_status_and_index_self_heal_corrupted_cache_idempotently() -> None:
         assert quarantined_after_second == quarantined_after_first
 
         index_result = runner.invoke(cli, ["index", str(repo), "--json"], env=env)
-        assert index_result.exit_code == 0
+        assert index_result.exit_code == 0, index_result.output
         index_payload = _parse_json_output(index_result.output)
         assert index_payload["indexed_files"] == 1
         assert index_payload["indexed_symbols"] > 0
 
         final_status = runner.invoke(cli, ["status", "--json"], env=env)
-        assert final_status.exit_code == 0
+        assert final_status.exit_code == 0, final_status.output
         final_payload = _parse_json_output(final_status.output)
         assert final_payload["needs_reindex"] is False
         assert int(final_payload["total_symbols"]) > 0
@@ -2132,12 +2131,12 @@ def test_cli_search_self_heals_corrupted_cache() -> None:
     runner = CliRunner()
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     _write_fallback_marker(cache_dir)
-    env = {"GLOGGUR_CACHE_DIR": cache_dir}
+    env = _cli_test_env(cache_dir)
     db_path = Path(cache_dir) / "index.db"
     db_path.write_bytes(b"broken sqlite bytes")
 
     first_search = runner.invoke(cli, ["search", "add", "--json"], env=env)
-    assert first_search.exit_code == 1
+    assert first_search.exit_code == 1, first_search.output
     assert "Cache corruption detected at" in first_search.output
     first_payload = _parse_json_output(first_search.output)
     assert first_payload["results"] == []
@@ -2149,7 +2148,7 @@ def test_cli_search_self_heals_corrupted_cache() -> None:
     assert int(metadata["total_results"]) == 0
 
     second_search = runner.invoke(cli, ["search", "add", "--json"], env=env)
-    assert second_search.exit_code == 1
+    assert second_search.exit_code == 1, second_search.output
     assert "Cache corruption detected at" not in second_search.output
 
 
@@ -2158,12 +2157,12 @@ def test_cli_clear_cache_self_heals_corrupted_cache() -> None:
     runner = CliRunner()
     cache_dir = tempfile.mkdtemp(prefix="gloggur-cache-")
     _write_fallback_marker(cache_dir)
-    env = {"GLOGGUR_CACHE_DIR": cache_dir}
+    env = _cli_test_env(cache_dir)
     db_path = Path(cache_dir) / "index.db"
     db_path.write_bytes(b"broken sqlite bytes")
 
     result = runner.invoke(cli, ["clear-cache", "--json"], env=env)
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "Cache corruption detected at" in result.output
     payload = _parse_json_output(result.output)
     assert payload["cleared"] is True

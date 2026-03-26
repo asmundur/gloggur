@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+import signal
+import subprocess
+
 from gloggur.config import GloggurConfig
 from gloggur.parsers.registry import ParserRegistry
 from gloggur.parsers.support_contract import (
+    ParserCheckCase,
     build_language_support_contract,
     run_parser_capability_check,
 )
@@ -111,3 +116,75 @@ def test_parser_capability_check_promotes_js_assignment_cases_to_required_passes
     assert cases["cpp.namespace_qualified_methods"]["status"] == "passed"
     assert cases["cpp.template_and_operator_methods"]["status"] == "passed"
     assert cases["cpp.macro_generated_method_recovery"]["status"] == "passed"
+
+
+def test_parser_capability_check_reports_native_child_crashes_as_parse_errors(
+    monkeypatch,
+) -> None:
+    """Native parser subprocess crashes should become structured case failures."""
+    case = ParserCheckCase(
+        case_id="cpp.crash",
+        language="cpp",
+        path="sample.cpp",
+        source="int ping() { return 1; }\n",
+        expected_symbols=(("function", "ping"),),
+    )
+
+    def _fake_run(*_args, **_kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["python"],
+            returncode=-signal.SIGBUS,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.parsers.support_contract.subprocess.run", _fake_run)
+    payload = run_parser_capability_check(
+        parser_registry=ParserRegistry(),
+        config=GloggurConfig(),
+        _cases=(case,),
+    )
+
+    assert payload["required_case_counts"] == {"total": 1, "passed": 0, "failed": 1}
+    result = payload["cases"][0]
+    assert result["status"] == "failed"
+    assert result["parse_error"] == "child process terminated by signal SIGBUS"
+
+
+def test_parser_capability_check_preserves_native_language_missing_errors(
+    monkeypatch,
+) -> None:
+    """Native subprocess parse errors should surface as case-level parse_error values."""
+    case = ParserCheckCase(
+        case_id="cpp.language_missing",
+        language="cpp",
+        path="sample.cpp",
+        source="class Greeter {};\n",
+        expected_symbols=(("class", "Greeter"),),
+    )
+
+    child_payload = {
+        "actual_symbols": [],
+        "actual_fqnames": [],
+        "parse_error": "LanguageNotFoundError: Language 'cpp' not found",
+    }
+
+    def _fake_run(*_args, **_kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["python"],
+            returncode=0,
+            stdout=json.dumps(child_payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr("gloggur.parsers.support_contract.subprocess.run", _fake_run)
+    payload = run_parser_capability_check(
+        parser_registry=ParserRegistry(),
+        config=GloggurConfig(),
+        _cases=(case,),
+    )
+
+    assert payload["required_case_counts"] == {"total": 1, "passed": 0, "failed": 1}
+    result = payload["cases"][0]
+    assert result["status"] == "failed"
+    assert result["parse_error"] == "LanguageNotFoundError: Language 'cpp' not found"

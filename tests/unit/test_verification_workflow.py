@@ -149,7 +149,28 @@ def test_verification_workflow_pytest_lane_is_unconditional() -> None:
     run_script = pytest_step.get("run")
     assert isinstance(run_script, str)
     assert "pytest" in run_script
-    assert '-m "not performance"' in run_script
+    assert '-m "not performance and not native_parser"' in run_script
+
+
+def test_verification_workflow_runs_native_parser_lane_serially_on_required_lanes() -> None:
+    """Native C/C++ parser coverage should run serially only on required lanes."""
+    tests_job = _verification_tests_job()
+    steps = tests_job.get("steps")
+    assert isinstance(steps, list)
+
+    native_step = next(
+        (
+            step
+            for step in steps
+            if isinstance(step, dict) and step.get("name") == "Run native parser pytest"
+        ),
+        None,
+    )
+    assert isinstance(native_step, dict)
+    assert native_step.get("if") == "${{ matrix.required }}"
+    run_script = native_step.get("run")
+    assert isinstance(run_script, str)
+    assert "pytest -n0 -m native_parser" in run_script
 
 
 def test_verification_workflow_includes_runtime_and_resolver_diagnostics() -> None:
@@ -230,7 +251,18 @@ def test_verification_workflow_includes_coverage_baseline_gate_after_pytest() ->
         for index, step in enumerate(steps)
         if isinstance(step, dict) and step.get("name") == "Run pytest"
     )
-    coverage_step = steps[pytest_index + 1]
+    native_index = next(
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, dict) and step.get("name") == "Run native parser pytest"
+    )
+    coverage_step = next(
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("name") == "Run coverage baseline contract"
+    )
+    coverage_index = steps.index(coverage_step)
+    assert pytest_index < native_index < coverage_index
     assert isinstance(coverage_step, dict)
     assert coverage_step.get("name") == "Run coverage baseline contract"
     assert coverage_step.get("if") == "${{ matrix.python-version == '3.13' }}"

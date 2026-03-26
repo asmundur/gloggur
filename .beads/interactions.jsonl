@@ -1,3 +1,4 @@
 {"id":"int-25aa2de3","kind":"field_change","created_at":"2026-03-26T11:25:45.882219Z","actor":"Ásmundur","issue_id":"bd-ymf9","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-9ae25720","kind":"field_change","created_at":"2026-03-26T11:34:18.145274Z","actor":"Ásmundur","issue_id":"bd-ymf9","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
 {"id":"int-cc93b2be","kind":"field_change","created_at":"2026-03-26T13:27:58.175563Z","actor":"Ásmundur","issue_id":"bd-aenf","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
+{"id":"int-f3f2ff9f","kind":"field_change","created_at":"2026-03-26T19:23:55.527056Z","actor":"Ásmundur","issue_id":"bd-g9wq","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented"}}

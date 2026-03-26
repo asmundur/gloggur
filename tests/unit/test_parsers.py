@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from gloggur.parsers.registry import EXTENSION_LANGUAGE, ParserRegistry
 from gloggur.parsers.treesitter_parser import TreeSitterParser
 from scripts.verification.fixtures import TestFixtures
@@ -39,6 +41,35 @@ def test_parser_registry_supports_extension_overrides() -> None:
     entry = registry.get_parser_for_path("sample.pyi")
     assert entry is not None
     assert entry.language == "python"
+
+
+def test_parser_registry_defers_native_parser_initialization_until_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registry lookup should not initialize native C/C++ grammars until parse time."""
+    calls: list[tuple[str, object]] = []
+    sentinel_tree = object()
+
+    class _FakeParser:
+        def parse(self, source: bytes, old_tree=None) -> object:  # noqa: ANN001
+            calls.append(("parse", source))
+            return sentinel_tree
+
+    def _fake_get_parser(language: str) -> _FakeParser:
+        calls.append(("get_parser", language))
+        return _FakeParser()
+
+    monkeypatch.setattr("gloggur.parsers.treesitter_parser.get_parser", _fake_get_parser)
+    entry = ParserRegistry().get_parser_for_path("sample.hpp")
+
+    assert entry is not None
+    assert entry.language == "cpp"
+    assert calls == []
+
+    tree = entry.parser.parse_with_edit(None, "int ping();\n")
+
+    assert tree is sentinel_tree
+    assert calls == [("get_parser", "cpp"), ("parse", b"int ping();\n")]
 
 
 def test_treesitter_parser_extracts_python_symbols() -> None:
@@ -223,6 +254,7 @@ func test_when_user_logs_in() int {
     assert target.implicit_contract is None
 
 
+@pytest.mark.native_parser
 def test_treesitter_parser_extracts_c_function_and_type_symbols() -> None:
     """C parser should recover function definitions/declarations and named type declarations."""
     source = """
@@ -242,6 +274,7 @@ enum Mode { Fast, Slow };
     assert by_fqname["Mode"].kind == "enum"
 
 
+@pytest.mark.native_parser
 def test_treesitter_parser_extracts_c_callback_returning_function_pointer() -> None:
     """C parser should classify callback-return declarators as callable functions."""
     parser = TreeSitterParser("c")
@@ -252,6 +285,7 @@ def test_treesitter_parser_extracts_c_callback_returning_function_pointer() -> N
     assert by_fqname["make_cb"].kind == "function"
 
 
+@pytest.mark.native_parser
 def test_treesitter_parser_skips_c_function_pointer_variables() -> None:
     """C parser should not classify plain function-pointer variables as functions."""
     parser = TreeSitterParser("c")
@@ -260,6 +294,7 @@ def test_treesitter_parser_skips_c_function_pointer_variables() -> None:
     assert symbols == []
 
 
+@pytest.mark.native_parser
 def test_treesitter_parser_extracts_cpp_class_and_qualified_method_symbols() -> None:
     """C++ parser should recover class-body methods and qualified out-of-class method owners."""
     source = """
@@ -289,6 +324,7 @@ int Greeter::ping() { return 2; }
     assert any("Greeter::ping" in (symbol.signature or "") for symbol in ping_symbols)
 
 
+@pytest.mark.native_parser
 def test_treesitter_parser_extracts_cpp_namespace_template_and_operator_symbols() -> None:
     """C++ parser should preserve namespace/template owners and operator method names."""
     source = """
@@ -327,6 +363,7 @@ int Vec::operator[](int idx) const { return idx; }
     assert all(symbol.name == "operator[]" for symbol in grouped["Vec.operator[]"])
 
 
+@pytest.mark.native_parser
 def test_treesitter_parser_recovers_cpp_macro_generated_method_symbols() -> None:
     """C++ parser should recover strict method macros and dedupe explicit duplicates."""
     parser = TreeSitterParser("cpp")
@@ -487,9 +524,7 @@ app["x-y"] = function missBad() {};
     assert grouped["exports.listen"][0].kind == "function"
     assert grouped["exports.listen"][0].attributes["binding_style"] == "export_assignment"
     assert grouped["module.exports.listen"][0].kind == "function"
-    assert grouped["module.exports.listen"][0].attributes["binding_style"] == (
-        "export_assignment"
-    )
+    assert grouped["module.exports.listen"][0].attributes["binding_style"] == ("export_assignment")
 
     descriptor_symbols = grouped["res.connection"]
     assert len(descriptor_symbols) == 3
