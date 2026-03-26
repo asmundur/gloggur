@@ -19,7 +19,23 @@ def _write_repo_contract(repo_root: Path, *, issue_count: int = 2) -> None:
     beads_dir.mkdir(parents=True, exist_ok=True)
     _write(beads_dir / "config.yaml", "issue-prefix: bd\n")
     _write(beads_dir / "clone-contract.json", json.dumps(EXPECTED_CLONE_CONTRACT, indent=2) + "\n")
-    _write(beads_dir / ".gitignore", "metadata.json\nREADME.md\nhooks/\n")
+    _write(
+        beads_dir / ".gitignore",
+        "\n".join(
+            (
+                ".beads-credential-key",
+                "metadata.json",
+                "README.md",
+                "hooks/",
+                "dolt-server.lock",
+                "dolt-server.log",
+                "dolt-server.pid",
+                "dolt-server.port",
+                "backup/",
+                "",
+            )
+        ),
+    )
     issues = [
         json.dumps({"id": f"bd-{index}", "title": f"issue {index}"}) for index in range(issue_count)
     ]
@@ -102,7 +118,15 @@ def test_beads_clone_contract_fails_when_tracked_contract_files_are_invalid(tmp_
     assert any(
         error.startswith("read_probe: expected") for error in payload["clone_contract_errors"]
     )
-    assert payload["missing_gitignore_entries"] == ["hooks/"]
+    assert payload["missing_gitignore_entries"] == [
+        ".beads-credential-key",
+        "hooks/",
+        "dolt-server.lock",
+        "dolt-server.log",
+        "dolt-server.pid",
+        "dolt-server.port",
+        "backup/",
+    ]
 
 
 def test_beads_clone_contract_fails_when_live_export_drifts_from_tracked_jsonl(

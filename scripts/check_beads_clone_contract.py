@@ -20,9 +20,15 @@ EXPECTED_CLONE_CONTRACT = {
 }
 
 REQUIRED_GITIGNORE_ENTRIES = [
+    ".beads-credential-key",
     "metadata.json",
     "README.md",
     "hooks/",
+    "dolt-server.lock",
+    "dolt-server.log",
+    "dolt-server.pid",
+    "dolt-server.port",
+    "backup/",
 ]
 
 REQUIRED_CONFIG_SNIPPETS = [

@@ -3,6 +3,7 @@ dolt/
 dolt-access.lock
 
 # Runtime files
+.beads-credential-key
 bd.sock
 bd.sock.startlock
 sync-state.json
@@ -10,6 +11,13 @@ last-touched
 metadata.json
 README.md
 hooks/
+dolt-server.lock
+dolt-server.log
+dolt-server.pid
+dolt-server.port
+
+# Backup snapshot exports are local recovery artifacts, not clone-contract inputs
+backup/
 
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
