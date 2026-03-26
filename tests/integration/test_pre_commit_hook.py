@@ -20,7 +20,9 @@ def _run(
     )
 
 
-def test_pre_commit_hook_ignores_recreated_beads_metadata(tmp_path: Path) -> None:
+def test_pre_commit_hook_allows_metadata_deletion_while_refreshing_beads_exports(
+    tmp_path: Path,
+) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
 
@@ -59,12 +61,25 @@ cmd="${1:-}"
 shift || true
 
 case "$cmd" in
-  sync)
+  export)
+    if [[ "${1:-}" != "-o" || "${2:-}" != ".beads/issues.jsonl" ]]; then
+      echo "unexpected bd export args: $*" >&2
+      exit 1
+    fi
     printf '{"id":"bd-1"}\\n{"id":"bd-2"}\\n' > .beads/issues.jsonl
-    printf '{"database":"dolt"}\\n' > .beads/metadata.json
     ;;
-  hook)
-    exit 0
+  hooks)
+    subcmd="${1:-}"
+    shift || true
+    case "$subcmd" in
+      run)
+        exit 0
+        ;;
+      *)
+        echo "unexpected bd hooks subcommand: $subcmd" >&2
+        exit 1
+        ;;
+    esac
     ;;
   *)
     echo "unexpected bd command: $cmd" >&2
@@ -84,7 +99,7 @@ esac
     completed = _run([str(hook_path)], cwd=repo_root, env=env)
 
     assert completed.returncode == 0, completed.stderr
-    assert "Syncing Beads tracker exports..." in completed.stdout
+    assert "Refreshing Beads tracker exports..." in completed.stdout
     assert "Auto-staged .beads/issues.jsonl" in completed.stdout
     assert ".beads/metadata.json" not in completed.stderr
 
