@@ -209,6 +209,47 @@ def test_verification_workflow_includes_runtime_and_resolver_diagnostics() -> No
     assert 'python -m pip install -e ".[dev,openai,gemini]" -v' in run_script
 
 
+def test_verification_workflow_prewarms_tree_sitter_parsers_before_pytest() -> None:
+    """Workflow should fail fast on parser bootstrap drift before xdist pytest starts."""
+    tests_job = _verification_tests_job()
+    steps = tests_job.get("steps")
+    assert isinstance(steps, list)
+
+    install_index = next(
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, dict) and step.get("name") == "Install dependencies"
+    )
+    prewarm_step = next(
+        (
+            step
+            for step in steps
+            if isinstance(step, dict) and step.get("name") == "Prewarm tree-sitter parsers"
+        ),
+        None,
+    )
+    assert isinstance(prewarm_step, dict)
+    prewarm_index = steps.index(prewarm_step)
+    pytest_index = next(
+        index
+        for index, step in enumerate(steps)
+        if isinstance(step, dict) and step.get("name") == "Run pytest"
+    )
+    assert install_index < prewarm_index < pytest_index
+
+    run_script = prewarm_step.get("run")
+    assert isinstance(run_script, str)
+    assert "from importlib import metadata" in run_script
+    assert "from gloggur.parsers.registry import ParserRegistry" in run_script
+    assert "from tree_sitter_language_pack import get_parser" in run_script
+    assert "ParserRegistry().supported_extensions().values()" in run_script
+    assert 'metadata.version(\'tree-sitter-language-pack\')' in run_script
+    assert "for language in languages:" in run_script
+    assert "get_parser(language)" in run_script
+    assert "warming parser:" in run_script
+    assert "warmed_languages=" in run_script
+
+
 def test_verification_workflow_includes_packaging_smoke_harness() -> None:
     """Verification workflow should run packaging smoke harness on required runtime lane."""
     tests_job = _verification_tests_job()
