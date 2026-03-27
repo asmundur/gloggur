@@ -56,6 +56,22 @@ jobs:
           python -m pip install -e ".[dev,openai,gemini]" -v
           python -m pip freeze | sed -n '1,120p'
 
+      - name: Prewarm tree-sitter parsers
+        run: |
+          python - <<'PY'
+          from importlib import metadata
+
+          from gloggur.parsers.registry import ParserRegistry
+          from tree_sitter_language_pack import get_parser
+
+          languages = sorted(set(ParserRegistry().supported_extensions().values()))
+          print(f"tree-sitter-language-pack={metadata.version('tree-sitter-language-pack')}")
+          for language in languages:
+              print(f"warming parser: {language}")
+              get_parser(language)
+          print(f"warmed_languages={','.join(languages)}")
+          PY
+
       - name: Run pytest
         run: pytest --cov-report=xml:coverage-full.xml -m "not performance and not native_parser"
 
