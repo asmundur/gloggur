@@ -9,6 +9,7 @@ on:
 
 jobs:
   tests:
+    name: ${{ matrix.job-name }}
     runs-on: ubuntu-latest
     continue-on-error: ${{ !matrix.required }}
     env:
@@ -18,14 +19,19 @@ jobs:
       matrix:
         include:
           - python-version: "3.10"
+            job-name: "tests (py3.10)"
             required: true
           - python-version: "3.11"
+            job-name: "tests (py3.11)"
             required: true
           - python-version: "3.12"
+            job-name: "tests (py3.12)"
             required: true
           - python-version: "3.13"
+            job-name: "tests (py3.13)"
             required: true
           - python-version: "3.14"
+            job-name: "tests (py3.14 provisional)"
             required: false
 
     steps:

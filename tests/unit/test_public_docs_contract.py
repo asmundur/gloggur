@@ -51,6 +51,22 @@ def test_readme_documents_bidirectional_graph_neighbors_and_parser_gaps() -> Non
     assert "gloggur parsers check --json" in text
 
 
+def test_readme_documents_main_branch_governance_contract() -> None:
+    """README should describe the enforced PR-only governance on main."""
+    text = Path("README.md").read_text(encoding="utf8")
+
+    assert "`main` is PR-only" in text
+    assert "Direct pushes are blocked" in text
+    assert "Rebase and merge" in text
+    assert "tests (py3.10)" in text
+    assert "tests (py3.11)" in text
+    assert "tests (py3.12)" in text
+    assert "tests (py3.13)" in text
+    assert "lane-audit" in text
+    assert "tests (py3.14 provisional)" in text
+    assert "do not block merges" in text
+
+
 def test_quickstart_documents_current_operator_gotchas() -> None:
     """Quickstart should call out inspect scope, graph-edge defaults, repo-config warnings, and test-provider scope."""
     text = Path("docs/QUICKSTART.md").read_text(encoding="utf8")
