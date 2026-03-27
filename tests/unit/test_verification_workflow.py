@@ -243,7 +243,7 @@ def test_verification_workflow_prewarms_tree_sitter_parsers_before_pytest() -> N
     assert "from gloggur.parsers.registry import ParserRegistry" in run_script
     assert "from tree_sitter_language_pack import get_parser" in run_script
     assert "ParserRegistry().supported_extensions().values()" in run_script
-    assert 'metadata.version(\'tree-sitter-language-pack\')' in run_script
+    assert "metadata.version('tree-sitter-language-pack')" in run_script
     assert "for language in languages:" in run_script
     assert "get_parser(language)" in run_script
     assert "warming parser:" in run_script
