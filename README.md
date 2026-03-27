@@ -113,6 +113,18 @@ Audit docstrings:
 gloggur inspect . --json
 ```
 
+## Main Branch Governance
+
+`main` is PR-only. Direct pushes are blocked, PRs targeting `main` must stay up to
+date with the latest `main`, and GitHub only allows **Rebase and merge** for that
+branch.
+
+Merges to `main` require one approval, passing required CI checks, and resolved
+review threads. The required checks are `tests (py3.10)`, `tests (py3.11)`,
+`tests (py3.12)`, `tests (py3.13)`, and `lane-audit`. The provisional
+`tests (py3.14 provisional)` lane and the separate `Performance` workflow remain
+visible but do not block merges.
+
 ## Configuration
 
 Place a `.gloggur.yaml` or `.gloggur.json` file in your project root to customise embedding providers, cache location, watch settings and supported file extensions. By default, minified JavaScript (`*.min.js`) is excluded from index/watch runs to avoid noisy vendor artifacts, and graph edges are stored structurally without semantic embeddings; set `include_minified_js: true` when you explicitly need those files indexed, or `embed_graph_edges: true` (or `GLOGGUR_EMBED_GRAPH_EDGES=true`) when you explicitly want edge vectors. Environment variables can override any option.  Here is a minimal example:

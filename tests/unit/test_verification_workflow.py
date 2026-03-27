@@ -82,6 +82,7 @@ def test_static_tooling_excludes_shadow_worktrees_and_cache_dirs() -> None:
 def test_verification_workflow_python_matrix_policy_is_stable() -> None:
     """Workflow should preserve required/provisional lane policy and non-masking behavior."""
     tests_job = _verification_tests_job()
+    assert tests_job.get("name") == "${{ matrix.job-name }}"
 
     continue_on_error = tests_job.get("continue-on-error")
     assert continue_on_error == "${{ !matrix.required }}"
@@ -97,12 +98,16 @@ def test_verification_workflow_python_matrix_policy_is_stable() -> None:
 
     required_versions: set[str] = set()
     provisional_versions: set[str] = set()
+    lane_names: dict[str, str] = {}
     for lane in include:
         assert isinstance(lane, dict)
         version = lane.get("python-version")
+        lane_name = lane.get("job-name")
         required = lane.get("required")
         assert isinstance(version, str)
+        assert isinstance(lane_name, str)
         assert isinstance(required, bool)
+        lane_names[version] = lane_name
         if required:
             required_versions.add(version)
         else:
@@ -110,6 +115,13 @@ def test_verification_workflow_python_matrix_policy_is_stable() -> None:
 
     assert required_versions == {"3.10", "3.11", "3.12", "3.13"}
     assert provisional_versions == {"3.14"}
+    assert lane_names == {
+        "3.10": "tests (py3.10)",
+        "3.11": "tests (py3.11)",
+        "3.12": "tests (py3.12)",
+        "3.13": "tests (py3.13)",
+        "3.14": "tests (py3.14 provisional)",
+    }
 
 
 def test_verification_workflow_matrix_has_no_hidden_exclusions_or_duplicates() -> None:
