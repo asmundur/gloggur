@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 from scripts.check_beads_clone_contract import (
     EXPECTED_CLONE_CONTRACT,
@@ -14,10 +15,18 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf8")
 
 
+def _payload_mapping(payload: dict[str, object], key: str) -> dict[str, Any]:
+    return cast(dict[str, Any], payload[key])
+
+
+def _payload_list(payload: dict[str, object], key: str) -> list[str]:
+    return cast(list[str], payload[key])
+
+
 def _write_repo_contract(repo_root: Path, *, issue_count: int = 2) -> None:
     beads_dir = repo_root / ".beads"
     beads_dir.mkdir(parents=True, exist_ok=True)
-    _write(beads_dir / "config.yaml", "issue-prefix: bd\n")
+    _write(beads_dir / "config.yaml", "issue-prefix: gloggur\n")
     _write(beads_dir / "clone-contract.json", json.dumps(EXPECTED_CLONE_CONTRACT, indent=2) + "\n")
     _write(
         beads_dir / ".gitignore",
@@ -37,7 +46,8 @@ def _write_repo_contract(repo_root: Path, *, issue_count: int = 2) -> None:
         ),
     )
     issues = [
-        json.dumps({"id": f"bd-{index}", "title": f"issue {index}"}) for index in range(issue_count)
+        json.dumps({"id": f"gloggur-{index}", "title": f"issue {index}"})
+        for index in range(issue_count)
     ]
     _write(beads_dir / "issues.jsonl", "\n".join(issues) + "\n")
 
@@ -84,8 +94,9 @@ def test_beads_clone_contract_passes_when_contract_files_are_present_and_parity_
     assert payload["config_errors"] == []
     assert payload["clone_contract_errors"] == []
     assert payload["missing_gitignore_entries"] == []
-    assert payload["parity"]["status"] == "skipped"
-    assert payload["parity"]["reason"] == "bd_missing"
+    parity = _payload_mapping(payload, "parity")
+    assert parity["status"] == "skipped"
+    assert parity["reason"] == "bd_missing"
 
 
 def test_beads_clone_contract_passes_when_export_matches_tracked_jsonl(tmp_path: Path) -> None:
@@ -97,8 +108,9 @@ def test_beads_clone_contract_passes_when_export_matches_tracked_jsonl(tmp_path:
     payload = check_beads_clone_contract(tmp_path, bd_command=str(fake_bd))
 
     assert payload["ok"] is True
-    assert payload["parity"]["status"] == "verified"
-    assert payload["parity"]["tracked_count"] == 3
+    parity = _payload_mapping(payload, "parity")
+    assert parity["status"] == "verified"
+    assert parity["tracked_count"] == 3
 
 
 def test_beads_clone_contract_fails_when_tracked_contract_files_are_invalid(tmp_path: Path) -> None:
@@ -113,10 +125,13 @@ def test_beads_clone_contract_fails_when_tracked_contract_files_are_invalid(tmp_
     payload = check_beads_clone_contract(tmp_path, bd_command="definitely-missing-bd")
 
     assert payload["ok"] is False
-    assert payload["failure"]["code"] == "beads_clone_contract_violation"
-    assert "missing config snippet: issue-prefix: bd" in payload["config_errors"]
+    failure = _payload_mapping(payload, "failure")
+    config_errors = _payload_list(payload, "config_errors")
+    clone_contract_errors = _payload_list(payload, "clone_contract_errors")
+    assert failure["code"] == "beads_clone_contract_violation"
+    assert "missing config snippet: issue-prefix: gloggur" in config_errors
     assert any(
-        error.startswith("read_probe: expected") for error in payload["clone_contract_errors"]
+        error.startswith("read_probe: expected") for error in clone_contract_errors
     )
     assert payload["missing_gitignore_entries"] == [
         ".beads-credential-key",
@@ -134,15 +149,17 @@ def test_beads_clone_contract_fails_when_live_export_drifts_from_tracked_jsonl(
 ) -> None:
     _write_repo_contract(tmp_path, issue_count=2)
     fake_bd = tmp_path / "bin" / "bd"
-    _write_fake_bd(fake_bd, export_payload='{"id":"bd-1"}\n')
+    _write_fake_bd(fake_bd, export_payload='{"id":"gloggur-1"}\n')
 
     payload = check_beads_clone_contract(tmp_path, bd_command=str(fake_bd))
 
     assert payload["ok"] is False
-    assert payload["failure"]["code"] == "beads_clone_contract_parity_mismatch"
-    assert payload["parity"]["status"] == "mismatch"
-    assert payload["parity"]["tracked_count"] == 2
-    assert payload["parity"]["exported_count"] == 1
+    failure = _payload_mapping(payload, "failure")
+    parity = _payload_mapping(payload, "parity")
+    assert failure["code"] == "beads_clone_contract_parity_mismatch"
+    assert parity["status"] == "mismatch"
+    assert parity["tracked_count"] == 2
+    assert parity["exported_count"] == 1
 
 
 def test_beads_clone_contract_fails_when_bd_export_errors_for_non_clone_reason(
@@ -155,6 +172,8 @@ def test_beads_clone_contract_fails_when_bd_export_errors_for_non_clone_reason(
     payload = check_beads_clone_contract(tmp_path, bd_command=str(fake_bd))
 
     assert payload["ok"] is False
-    assert payload["failure"]["code"] == "beads_clone_contract_parity_check_failed"
-    assert payload["parity"]["status"] == "error"
-    assert payload["parity"]["reason"] == "export_failed"
+    failure = _payload_mapping(payload, "failure")
+    parity = _payload_mapping(payload, "parity")
+    assert failure["code"] == "beads_clone_contract_parity_check_failed"
+    assert parity["status"] == "error"
+    assert parity["reason"] == "export_failed"

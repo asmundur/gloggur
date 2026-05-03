@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-Python CLI indexing and retrieval engine for codebases.
+Symbol-level, incremental codebase indexer for semantic search and precedent retrieval.
 
-- **Tech Stack:** Python, Click, Pydantic, Tree-sitter, SQLite, FAISS, pytest
+- **Tech Stack:** Python, Click, Pydantic, Tree-sitter, SQLite, FAISS, sentence-transformers, pytest
 - **Language:** Python
 - **Source Directory:** src/gloggur
 - **Architecture:** CLI-first package with parser, indexer, search, graph, storage, watch, and support modules

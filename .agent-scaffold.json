@@ -1,13 +1,13 @@
 {
   "generatedBy": "agent-bootstrap",
   "templateVersion": "1.2.0",
-  "generatedAt": "2026-05-03T01:10:06Z",
+  "generatedAt": "2026-05-03T01:29:50Z",
   "agentHarness": "all",
   "templateSource": "bootstrap-templates/templates/universal",
   "variables": {
     "PROJECT_NAME": "gloggur",
-    "PROJECT_DESCRIPTION": "Python CLI indexing and retrieval engine for codebases.",
-    "TECH_STACK": "Python, Click, Pydantic, Tree-sitter, SQLite, FAISS, pytest",
+    "PROJECT_DESCRIPTION": "Symbol-level, incremental codebase indexer for semantic search and precedent retrieval.",
+    "TECH_STACK": "Python, Click, Pydantic, Tree-sitter, SQLite, FAISS, sentence-transformers, pytest",
     "MAIN_LANGUAGE": "Python",
     "BUILD_COMMAND": ".venv/bin/python -m build",
     "TYPECHECK_COMMAND": ".venv/bin/python -m mypy src tests scripts",
@@ -20,7 +20,7 @@
     "SCAFFOLD_COMMAND": "../agent-bootstrap/scripts/scaffold.sh . all",
     "AGENT_HARNESS": "all",
     "BEADS_PREFIX": "gloggur",
-    "BOOTSTRAP_DATE": "2026-05-03T01:10:06Z"
+    "BOOTSTRAP_DATE": "2026-05-03T01:29:50Z"
   },
   "files": [
     { "target": ".agents/anti-patterns.md", "source": "anti-patterns.md.tmpl", "category": "config", "checksum": "2685661425d5e033b0c76d1ec1a21fb1395bb1bfe51b5908507832af4e220833" },
@@ -42,7 +42,7 @@
     { "target": ".githooks/_common.sh", "source": "githooks/_common.sh", "category": "hook", "checksum": "49ec38b6c5692dd7a36a9cf4454f03c73babccb2218f5cb93fa22033151ebedc" },
     { "target": ".githooks/beads-pre-commit.sh", "source": "githooks/beads-pre-commit.sh", "category": "hook", "checksum": "fc873fb3b80e42e2004568328fba7a1f9ad28b203396d86b5ec9d092d3d84800" },
     { "target": ".githooks/pre-commit", "source": "githooks/pre-commit", "category": "hook", "checksum": "4a1622348133dd3c487692da41b2f9f9f8f6508b1459c1c4a902aef7a8bfdc74" },
-    { "target": "AGENTS.md", "source": "AGENTS.md.tmpl", "category": "config", "checksum": "1ef47dadf1bad39b63eda140a7ee6cc96cd26b6eb77223bf7d87f1b0f84d0406" },
+    { "target": "AGENTS.md", "source": "AGENTS.md.tmpl", "category": "config", "checksum": "deb238fb8413d86349a7fbb24eebf881af1e9d90412e17c1e4663631bcd76361" },
     { "target": ".codex/skills/bootstrap.md", "source": "skills/bootstrap.md.tmpl", "category": "skill", "checksum": "68cc49622296b4126779d1245325b6c5272586dba1161780e2009f7dc664db89" },
     { "target": ".antigravity/skills/bootstrap.md", "source": "skills/bootstrap.md.tmpl", "category": "skill", "checksum": "68cc49622296b4126779d1245325b6c5272586dba1161780e2009f7dc664db89" },
     { "target": ".codex/skills/grill-me.md", "source": "skills/grill-me.md.tmpl", "category": "skill", "checksum": "b98e3483a180ddde91fb14218834e5c21be5a5d8118c14c29fec29257a81f9fc" },
