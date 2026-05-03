@@ -11,3 +11,5 @@
 {"id":"int-f722f891","kind":"field_change","created_at":"2026-04-01T13:42:10.63638Z","actor":"Ásmundur","issue_id":"bd-o25i","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed"}}
 {"id":"int-c588ee11","kind":"field_change","created_at":"2026-05-03T00:53:51.362127Z","actor":"Ásmundur","issue_id":"gloggur-2lv","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-b69883ae","kind":"field_change","created_at":"2026-05-03T01:11:08.429435Z","actor":"Ásmundur","issue_id":"gloggur-2lv","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Completed scaffold adoption conflict resolution"}}
+{"id":"int-f9313061","kind":"field_change","created_at":"2026-05-03T01:21:01.890067Z","actor":"Ásmundur","issue_id":"gloggur-en9","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-422740eb","kind":"field_change","created_at":"2026-05-03T01:25:16.583003Z","actor":"Ásmundur","issue_id":"gloggur-en9","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Fixed"}}

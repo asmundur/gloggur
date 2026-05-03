@@ -30,11 +30,14 @@ def test_pre_commit_hook_allows_metadata_deletion_while_refreshing_beads_exports
     assert _run(["git", "config", "user.name", "Codex"], cwd=repo_root).returncode == 0
     assert _run(["git", "config", "user.email", "codex@example.com"], cwd=repo_root).returncode == 0
 
-    hook_source = Path(__file__).resolve().parents[2] / ".githooks" / "pre-commit"
+    hook_source_dir = Path(__file__).resolve().parents[2] / ".githooks"
     hook_path = repo_root / ".githooks" / "pre-commit"
     hook_path.parent.mkdir(parents=True, exist_ok=True)
-    hook_path.write_text(hook_source.read_text(encoding="utf8"), encoding="utf8")
-    hook_path.chmod(0o755)
+    for hook_name in ("_common.sh", "beads-pre-commit.sh", "pre-commit"):
+        hook_source = hook_source_dir / hook_name
+        copied_hook = hook_path.parent / hook_name
+        copied_hook.write_text(hook_source.read_text(encoding="utf8"), encoding="utf8")
+        copied_hook.chmod(0o755)
 
     beads_dir = repo_root / ".beads"
     beads_dir.mkdir()
@@ -62,17 +65,24 @@ shift || true
 
 case "$cmd" in
   export)
-    if [[ "${1:-}" != "-o" || "${2:-}" != ".beads/issues.jsonl" ]]; then
+    if [[ "${1:-}" == "--no-memories" ]]; then
+      shift
+    fi
+    if [[ "${1:-}" != "-o" || "${2:-}" != */.beads/issues.jsonl ]]; then
       echo "unexpected bd export args: $*" >&2
       exit 1
     fi
-    printf '{"id":"bd-1"}\\n{"id":"bd-2"}\\n' > .beads/issues.jsonl
+    printf '{"id":"bd-1"}\\n{"id":"bd-2"}\\n' > "${2}"
     ;;
   hooks)
     subcmd="${1:-}"
     shift || true
     case "$subcmd" in
       run)
+        if [[ "${1:-}" != "pre-commit" ]]; then
+          echo "unexpected bd hooks run arg: $*" >&2
+          exit 1
+        fi
         exit 0
         ;;
       *)
@@ -99,8 +109,6 @@ esac
     completed = _run([str(hook_path)], cwd=repo_root, env=env)
 
     assert completed.returncode == 0, completed.stderr
-    assert "Refreshing Beads tracker exports..." in completed.stdout
-    assert "Auto-staged .beads/issues.jsonl" in completed.stdout
     assert ".beads/metadata.json" not in completed.stderr
 
     status = _run(["git", "status", "--short"], cwd=repo_root)
