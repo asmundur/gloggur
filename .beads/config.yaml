@@ -1,2 +1,1 @@
-# Fresh clones bootstrap a local Dolt database from the tracked JSONL export.
-issue-prefix: bd
+issue-prefix: gloggur

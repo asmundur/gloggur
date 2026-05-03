@@ -1,0 +1,113 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+TARGET_FILE="src/gloggur/embeddings/base.py"
+OUTPUT_FILE="docs/semantic-search-embedding-breakdown-base.md"
+
+if [ ! -x ".venv/bin/python" ]; then
+  echo "Skipping embedding trace hook: .venv/bin/python not found."
+else
+  NEEDS_REFRESH=0
+
+  if [ ! -f "${OUTPUT_FILE}" ]; then
+    NEEDS_REFRESH=1
+  fi
+
+  if git diff --cached --name-only --diff-filter=ACMR | grep -Eq \
+    '^(generate_embedding_breakdown\.py|src/gloggur/embeddings/base\.py|src/gloggur/indexer/indexer\.py|src/gloggur/parsers/treesitter_parser\.py|src/gloggur/embeddings/(base|factory|local|openai|gemini)\.py|src/gloggur/config\.py)$'; then
+    NEEDS_REFRESH=1
+  fi
+
+  if [ "${NEEDS_REFRESH}" -ne 0 ]; then
+    echo "Refreshing semantic embedding trace for ${TARGET_FILE}..."
+    .venv/bin/python generate_embedding_breakdown.py \
+      "${TARGET_FILE}" \
+      --embedding-provider test \
+      --output "${OUTPUT_FILE}"
+    git add "${OUTPUT_FILE}"
+    echo "Updated and auto-staged ${OUTPUT_FILE}"
+  fi
+fi
+
+if ! command -v bd >/dev/null 2>&1; then
+  echo "Warning: bd command not found in PATH, skipping Beads pre-commit hook" >&2
+  echo "  Install bd: brew install beads" >&2
+  exit 0
+fi
+
+STATUS_BEFORE="$(mktemp)"
+STATUS_AFTER="$(mktemp)"
+NEWLY_DIRTY="$(mktemp)"
+BEADS_DIRTY="$(mktemp)"
+
+cleanup_tmp() {
+  rm -f "${STATUS_BEFORE}" "${STATUS_AFTER}" "${NEWLY_DIRTY}" "${BEADS_DIRTY}"
+}
+
+trap cleanup_tmp EXIT HUP INT TERM
+
+git status --porcelain --untracked-files=all | sed 's/^.. //' | sort -u > "${STATUS_BEFORE}"
+
+echo "Refreshing Beads tracker exports..."
+bd export -o .beads/issues.jsonl >/dev/null
+
+git status --porcelain --untracked-files=all | sed 's/^.. //' | sort -u > "${STATUS_AFTER}"
+comm -13 "${STATUS_BEFORE}" "${STATUS_AFTER}" > "${NEWLY_DIRTY}" || true
+git status --porcelain --untracked-files=all -- .beads | sed 's/^.. //' | sort -u > "${BEADS_DIRTY}"
+
+while IFS= read -r path; do
+  [ -n "${path}" ] || continue
+  case "${path}" in
+    .beads/issues.jsonl|.beads/interactions.jsonl)
+      git add "${path}"
+      echo "Auto-staged ${path}"
+      ;;
+  esac
+done < "${BEADS_DIRTY}"
+
+UNEXPECTED_NEW_DIRTY=""
+while IFS= read -r path; do
+  [ -n "${path}" ] || continue
+  case "${path}" in
+    .beads/issues.jsonl|.beads/interactions.jsonl)
+      ;;
+    *)
+      UNEXPECTED_NEW_DIRTY="${UNEXPECTED_NEW_DIRTY}
+  • ${path}"
+      ;;
+  esac
+done < "${NEWLY_DIRTY}"
+
+if [ -n "${UNEXPECTED_NEW_DIRTY}" ]; then
+  echo "Error: bd export dirtied unexpected files:${UNEXPECTED_NEW_DIRTY}" >&2
+  echo "Commit the intended changes manually before retrying." >&2
+  exit 1
+fi
+
+export BD_GIT_HOOK=1
+BD_HOOK_TIMEOUT="${BEADS_HOOK_TIMEOUT:-300}"
+
+set +e
+if command -v timeout >/dev/null 2>&1; then
+  timeout "${BD_HOOK_TIMEOUT}" bd hooks run pre-commit "$@"
+  BD_HOOK_EXIT=$?
+else
+  bd hooks run pre-commit "$@"
+  BD_HOOK_EXIT=$?
+fi
+set -e
+
+if [ "${BD_HOOK_EXIT}" -eq 124 ]; then
+  echo >&2 "beads: hook 'pre-commit' timed out after ${BD_HOOK_TIMEOUT}s - continuing without beads"
+  exit 0
+fi
+
+if [ "${BD_HOOK_EXIT}" -eq 3 ]; then
+  echo >&2 "beads: database not initialized - skipping hook 'pre-commit'"
+  exit 0
+fi
+
+exit "${BD_HOOK_EXIT}"

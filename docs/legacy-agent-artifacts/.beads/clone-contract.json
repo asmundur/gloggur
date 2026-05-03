@@ -1,0 +1,11 @@
+{
+  "mode": "bootstrap_required",
+  "backend": "dolt",
+  "issue_prefix": "bd",
+  "jsonl_export": "issues.jsonl",
+  "bootstrap_commands": [
+    "bd init -p bd --json",
+    "bd import -i .beads/issues.jsonl --json"
+  ],
+  "read_probe": "bd status --json"
+}
