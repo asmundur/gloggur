@@ -79,6 +79,17 @@ def test_static_tooling_excludes_shadow_worktrees_and_cache_dirs() -> None:
     assert r"\.gloggur-cache" in black_exclude
 
 
+def test_tree_sitter_language_pack_dependency_is_pinned_for_ci_stability() -> None:
+    """Parser bootstrap dependency should stay pinned to avoid hosted drift."""
+    pyproject = _load_pyproject()
+    project = pyproject.get("project")
+    assert isinstance(project, dict)
+
+    dependencies = project.get("dependencies")
+    assert isinstance(dependencies, list)
+    assert "tree-sitter-language-pack==1.3.2" in dependencies
+
+
 def test_verification_workflow_python_matrix_policy_is_stable() -> None:
     """Workflow should preserve required/provisional lane policy and non-masking behavior."""
     tests_job = _verification_tests_job()
