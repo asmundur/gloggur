@@ -58,3 +58,5 @@
 {"id":"int-044945c5","kind":"field_change","created_at":"2026-05-05T17:25:17.871673Z","actor":"Ásmundur","issue_id":"bd-3yy","extra":{"field":"priority","new_value":"4","old_value":"2"}}
 {"id":"int-664ffab3","kind":"field_change","created_at":"2026-05-05T17:25:18.082636Z","actor":"Ásmundur","issue_id":"bd-xag","extra":{"field":"priority","new_value":"4","old_value":"2"}}
 {"id":"int-f303e078","kind":"field_change","created_at":"2026-05-05T17:25:18.28362Z","actor":"Ásmundur","issue_id":"bd-cqg","extra":{"field":"priority","new_value":"4","old_value":"2"}}
+{"id":"int-2a524064","kind":"field_change","created_at":"2026-05-29T02:53:24.350606Z","actor":"Ásmundur","issue_id":"bd-7yb","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"done"}}
+{"id":"int-8c11cd77","kind":"field_change","created_at":"2026-05-29T02:53:32.356766Z","actor":"Ásmundur","issue_id":"bd-uee","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"done"}}
